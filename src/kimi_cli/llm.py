@@ -4,8 +4,9 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
+import yaml
 from kosong.chat_provider import ChatProvider
 from pydantic import SecretStr
 
@@ -44,6 +45,41 @@ class LLM:
     @property
     def model_name(self) -> str:
         return self.chat_provider.model_name
+
+
+def parse_llm_providers_env() -> list[dict[str, Any]] | None:
+    """Parse ``LLM_PROVIDERS`` environment variable as a YAML list.
+
+    Expected format (YAML string inside an env var)::
+
+        LLM_PROVIDERS='
+        - name: kimi
+          type: kimi
+          api_key: sk-...
+          base_url: https://api.moonshot.cn/v1
+          model: kimi-k2
+          max_context_size: 262144
+          capabilities:
+            - thinking
+            - image_in
+        '
+
+    Returns:
+        A list of provider dictionaries, or ``None`` if the variable is not
+        set or cannot be parsed.
+    """
+    raw = os.environ.get("LLM_PROVIDERS")
+    if not raw:
+        return None
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        logger.warning("Failed to parse LLM_PROVIDERS as YAML: {exc}", exc=exc)
+        return None
+    if not isinstance(data, list):
+        logger.warning("LLM_PROVIDERS must be a YAML list, got {type}", type=type(data).__name__)
+        return None
+    return cast(list[dict[str, Any]], data)
 
 
 def model_display_name(model_name: str | None, model: LLMModel | None = None) -> str:
@@ -87,17 +123,21 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
                 )
                 applied["KIMI_MODEL_CAPABILITIES"] = capabilities
         case "openai_legacy" | "openai_responses":
-            if base_url := os.getenv("OPENAI_BASE_URL"):
+            # Only fill missing values from env vars; do not override
+            # explicit config.toml settings (e.g. local providers)
+            if not provider.base_url and (base_url := os.getenv("OPENAI_BASE_URL")):
                 provider.base_url = base_url
-            if api_key := os.getenv("OPENAI_API_KEY"):
+            if not provider.api_key.get_secret_value() and (api_key := os.getenv("OPENAI_API_KEY")):
                 provider.api_key = SecretStr(api_key)
             if model_name := os.getenv("OPENAI_MODEL_NAME"):
                 model.model = model_name
                 applied["OPENAI_MODEL_NAME"] = model_name
         case "anthropic":
-            if base_url := os.getenv("ANTHROPIC_BASE_URL"):
+            if not provider.base_url and (base_url := os.getenv("ANTHROPIC_BASE_URL")):
                 provider.base_url = base_url
-            if api_key := os.getenv("ANTHROPIC_API_KEY"):
+            if not provider.api_key.get_secret_value() and (
+                api_key := os.getenv("ANTHROPIC_API_KEY")
+            ):
                 provider.api_key = SecretStr(api_key)
             if model_name := os.getenv("ANTHROPIC_MODEL_NAME"):
                 model.model = model_name

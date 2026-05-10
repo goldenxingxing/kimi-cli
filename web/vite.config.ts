@@ -63,7 +63,7 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       "/api": {
-        target: process.env.VITE_API_TARGET ?? "http://127.0.0.1:5494",
+        target: process.env.VITE_API_TARGET ?? "http://127.0.0.1:5495",
         changeOrigin: true,
         ws: true, // Enable WebSocket proxy
       },

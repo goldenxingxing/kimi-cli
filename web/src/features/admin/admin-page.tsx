@@ -44,10 +44,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, BookOpen, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette } from "lucide-react";
+import { ArrowLeft, BookOpen, Cpu, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette } from "lucide-react";
 import { toast } from "sonner";
+import { apiClient } from "@/lib/apiClient";
+import type { ConfigModel, ConfigToml } from "@/lib/api/models";
 
-type AdminTab = "users" | "plugins" | "branding" | "knowledge";
+type AdminTab = "users" | "models" | "plugins" | "branding" | "knowledge";
 
 type AdminPageProps = {
   currentUser: UserInfo;
@@ -285,6 +287,16 @@ export function AdminPage({ currentUser }: AdminPageProps) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [togglingUserId, setTogglingUserId] = useState<string | null>(null);
 
+  // Models tab state
+  const [models, setModels] = useState<ConfigModel[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string>("");
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [tomlContent, setTomlContent] = useState<string>("");
+  const [tomlPath, setTomlPath] = useState<string>("");
+  const [isEditingToml, setIsEditingToml] = useState(false);
+  const [isSavingToml, setIsSavingToml] = useState(false);
+  const [tomlError, setTomlError] = useState<string | null>(null);
+
   const loadUsers = useCallback(async () => {
     setIsLoading(true);
     setError(null);
@@ -298,9 +310,63 @@ export function AdminPage({ currentUser }: AdminPageProps) {
     }
   }, []);
 
+  const loadModels = useCallback(async () => {
+    setIsLoadingModels(true);
+    try {
+      const globalConfig = await apiClient.config.getGlobalConfigApiConfigGet();
+      setModels(globalConfig.models);
+      setDefaultModel(globalConfig.defaultModel);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load models.");
+    } finally {
+      setIsLoadingModels(false);
+    }
+  }, []);
+
+  const loadToml = useCallback(async () => {
+    try {
+      const toml: ConfigToml = await apiClient.config.getConfigTomlApiConfigTomlGet();
+      setTomlContent(toml.content);
+      setTomlPath(toml.path);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load config.toml.");
+    }
+  }, []);
+
+  const handleSaveToml = useCallback(async () => {
+    setIsSavingToml(true);
+    setTomlError(null);
+    try {
+      const resp = await apiClient.config.updateConfigTomlApiConfigTomlPut({
+        updateConfigTomlRequest: { content: tomlContent },
+      });
+      if (resp.success) {
+        toast.success("Config saved successfully");
+        setIsEditingToml(false);
+        loadModels();
+      } else {
+        setTomlError(resp.error ?? "Failed to save config.");
+        toast.error(resp.error ?? "Failed to save config.");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to save config.";
+      setTomlError(msg);
+      toast.error(msg);
+    } finally {
+      setIsSavingToml(false);
+    }
+  }, [tomlContent, loadModels]);
+
   useEffect(() => {
     loadUsers();
   }, [loadUsers]);
+
+  useEffect(() => {
+    if (activeTab === "models") {
+      loadModels();
+      loadToml();
+    }
+  }, [activeTab, loadModels, loadToml]);
 
   const handleToggleActive = useCallback(
     async (user: AdminUser) => {
@@ -392,6 +458,19 @@ export function AdminPage({ currentUser }: AdminPageProps) {
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab("models")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "models"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <Cpu className="size-3.5" />
+            Models
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab("plugins")}
             className={[
               "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
@@ -439,6 +518,117 @@ export function AdminPage({ currentUser }: AdminPageProps) {
 
         {/* Knowledge tab */}
         {activeTab === "knowledge" && <AdminKnowledgePanel />}
+
+        {/* Models tab */}
+        {activeTab === "models" && (
+          <div className="flex flex-col gap-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Model Configuration</h2>
+                <p className="text-sm text-muted-foreground">
+                  Configured LLM providers and their protocol types.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { loadModels(); loadToml(); }}
+                  disabled={isLoadingModels}
+                  className="gap-2"
+                >
+                  <RefreshCw className={isLoadingModels ? "animate-spin size-4" : "size-4"} />
+                  Refresh
+                </Button>
+                <Button size="sm" onClick={() => setIsEditingToml(true)} className="gap-2">
+                  Edit Config
+                </Button>
+              </div>
+            </div>
+
+            {isLoadingModels && models.length === 0 ? (
+              <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
+                <Loader2 className="animate-spin size-4" />
+                Loading models...
+              </div>
+            ) : models.length === 0 ? (
+              <div className="rounded-xl border bg-card shadow-sm p-8 text-center text-muted-foreground">
+                No models configured. Set up providers via config.toml or environment variables.
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {models.map((m) => (
+                  <Card key={m.name} className={m.name === defaultModel ? "border-primary/50" : ""}>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-base font-semibold">{m.name}</CardTitle>
+                        {m.name === defaultModel && (
+                          <Badge variant="default" className="text-[10px]">Default</Badge>
+                        )}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="flex flex-col gap-2 text-sm">
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Protocol</span>
+                        <Badge variant="secondary">{m.providerType}</Badge>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Model ID</span>
+                        <span className="font-mono text-xs">{m.model}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Context</span>
+                        <span>{m.maxContextSize?.toLocaleString()} tokens</span>
+                      </div>
+                      {m.capabilities && m.capabilities.size > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {Array.from(m.capabilities).map((cap) => (
+                            <Badge key={cap} variant="outline" className="text-[10px]">
+                              {cap}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+
+            {/* Config.toml editor dialog */}
+            <Dialog open={isEditingToml} onOpenChange={setIsEditingToml}>
+              <DialogContent className="max-w-3xl">
+                <DialogHeader>
+                  <DialogTitle>Edit Config</DialogTitle>
+                  <DialogDescription>
+                    {tomlPath ? <span className="font-mono text-xs">{tomlPath}</span> : "Raw TOML configuration"}
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="flex flex-col gap-3 pt-2">
+                  <textarea
+                    className="min-h-[320px] w-full rounded-md border bg-muted/30 p-3 font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-ring"
+                    value={tomlContent}
+                    onChange={(e) => setTomlContent(e.target.value)}
+                    disabled={isSavingToml}
+                  />
+                  {tomlError && (
+                    <p className="text-sm text-destructive" role="alert">
+                      {tomlError}
+                    </p>
+                  )}
+                </div>
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={() => setIsEditingToml(false)} disabled={isSavingToml}>
+                    Cancel
+                  </Button>
+                  <Button type="button" onClick={handleSaveToml} disabled={isSavingToml}>
+                    {isSavingToml ? <><Loader2 className="animate-spin size-4" />Saving...</> : "Save Config"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        )}
 
         {/* Users tab */}
         {activeTab === "users" && (
