@@ -3,6 +3,7 @@ import {
   memo,
   useCallback,
   useMemo,
+  useRef,
   type ReactElement,
   useEffect,
   useState,
@@ -255,6 +256,9 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  // Guard against re-entry: pressing Enter and the resulting blur (e.g. when
+  // the user clicks the toast to dismiss it) both call handleSaveEdit.
+  const isSavingRenameRef = useRef(false);
 
   // Session search state
   const [sessionSearch, setSessionSearch] = useState(searchQuery);
@@ -501,6 +505,9 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
   };
 
   const handleSaveEdit = async () => {
+    if (isSavingRenameRef.current) {
+      return;
+    }
     if (!(editingSessionId && onRenameSession)) {
       handleCancelEdit();
       return;
@@ -512,9 +519,14 @@ export const SessionsSidebar = memo(function SessionsSidebarComponent({
       return;
     }
 
-    const success = await onRenameSession(editingSessionId, trimmedTitle);
-    if (success) {
-      handleCancelEdit();
+    isSavingRenameRef.current = true;
+    try {
+      const success = await onRenameSession(editingSessionId, trimmedTitle);
+      if (success) {
+        handleCancelEdit();
+      }
+    } finally {
+      isSavingRenameRef.current = false;
     }
   };
 

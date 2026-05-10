@@ -130,6 +130,7 @@ import {
   type ApprovalResponseDecision,
   type QuestionRequestEvent,
   type SessionStatusPayload,
+  type StepRetryEvent,
   type SubagentEventWire,
   type PlanDisplayEvent,
   extractEvent,
@@ -147,11 +148,62 @@ const VIDEO_TAG_REGEX = /<video\s+path="([^"]+)"\s+content_type="([^"]+)">/i;
 const DOCUMENT_TAG_REGEX =
   /<document\s+path="([^"]+)"\s+content_type="([^"]+)">/i;
 const LEGACY_UPLOADS_REGEX = /`uploads\/([^`]+)`/;
+const TRAILING_DECIMAL_ZERO_REGEX = /\.0$/;
 const HTTP_TO_WS_REGEX = /^http/;
 const NEWLINE_REGEX = /\r?\n/;
 // Match <image path="..."> or <video path="..."> tags (path attribute only, no content_type required)
 const MEDIA_TAG_PATH_REGEX = /<(?:image|video)\s+[^>]*path="([^"]*\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/uploads\/([^"]+))"/g;
 const BROWSER_URL_PROTOCOLS = new Set(["http:", "https:", "data:", "blob:"]);
+const WIRE_PROTOCOL_VERSION = "1.10";
+
+type StepRetryPayload = StepRetryEvent["payload"];
+
+const formatStepRetryReason = (retry: StepRetryPayload): string => {
+  if (retry.status_code === 429) {
+    return "rate limit";
+  }
+  if (retry.status_code !== null && retry.status_code !== undefined && retry.status_code >= 500) {
+    return "server error";
+  }
+  switch (retry.error_type) {
+    case "APITimeoutError":
+      return "timeout";
+    case "APIConnectionError":
+      return "connection issue";
+    case "APIEmptyResponseError":
+      return "empty response";
+    default:
+      return retry.error_type;
+  }
+};
+
+const formatRetryWait = (waitS: number): string => {
+  if (!Number.isFinite(waitS)) {
+    return "soon";
+  }
+  const seconds = Math.max(0, waitS);
+  if (seconds < 10) {
+    return `${seconds.toFixed(1).replace(TRAILING_DECIMAL_ZERO_REGEX, "")}s`;
+  }
+  return `${Math.round(seconds)}s`;
+};
+
+const formatStepRetryStatus = (retry: StepRetryPayload): string =>
+  `Retrying after ${formatStepRetryReason(retry)} · attempt ${retry.next_attempt}/${retry.max_attempts} · ${formatRetryWait(retry.wait_s)}`;
+
+const discardSubagentRetryAttempt = (steps: SubagentStep[]): SubagentStep[] => {
+  const next = steps.filter(
+    (step) => !(step.kind === "tool-call" && step.status === "running"),
+  );
+  while (next.length > 0) {
+    const last = next[next.length - 1];
+    if (last.kind !== "thinking" && last.kind !== "text") {
+      break;
+    }
+    next.pop();
+  }
+  return next;
+};
 
 /** Extract the URL from a media output part (image_url or video_url) */
 const extractMediaUrl = (part: Record<string, unknown>): string => {
@@ -369,6 +421,9 @@ export function useSessionStream(
 
   // Track MCP loading indicator message so we can remove it on MCPLoadingEnd
   const mcpLoadingMessageIdRef = useRef<string | null>(null);
+
+  // Track the temporary StepRetry status so the next attempt can replace it.
+  const stepRetryStatusMessageIdRef = useRef<string | null>(null);
 
   // Wrapped setMessages
   const setMessages: typeof setMessagesInternal = useCallback((action) => {
@@ -848,9 +903,100 @@ export function useSessionStream(
     textMessageIdRef.current = null;
   }, []);
 
+  const clearStepRetryStatus = useCallback(() => {
+    const statusMessageId = stepRetryStatusMessageIdRef.current;
+    if (!statusMessageId) {
+      return;
+    }
+    stepRetryStatusMessageIdRef.current = null;
+    setMessages((prev) => prev.filter((msg) => msg.id !== statusMessageId));
+  }, [setMessages]);
+
+  const showStepRetryStatus = useCallback(
+    (retry: StepRetryPayload, isReplay: boolean) => {
+      const content = formatStepRetryStatus(retry);
+      const existingMessageId = stepRetryStatusMessageIdRef.current;
+
+      if (existingMessageId) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === existingMessageId
+              ? { ...msg, content, isStreaming: !isReplay }
+              : msg,
+          ),
+        );
+        return;
+      }
+
+      const statusMessageId = getNextMessageId("assistant");
+      stepRetryStatusMessageIdRef.current = statusMessageId;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: statusMessageId,
+          role: "assistant",
+          variant: "status",
+          content,
+          isStreaming: !isReplay,
+        },
+      ]);
+    },
+    [getNextMessageId, setMessages],
+  );
+
+  const discardRetryAttemptMessages = useCallback(() => {
+    const messageIds = new Set<string>();
+    const discardedToolCallIds = new Set<string>();
+    if (thinkingMessageIdRef.current) {
+      messageIds.add(thinkingMessageIdRef.current);
+    }
+    if (textMessageIdRef.current) {
+      messageIds.add(textMessageIdRef.current);
+    }
+    // Only discard tool calls that haven't produced a result yet — i.e. the
+    // ones still in-flight when the retry fires. Tool calls from earlier
+    // successful steps in the same turn already have `tc.result` set by
+    // ToolResult and must be preserved.
+    for (const toolCall of currentToolCallsRef.current.values()) {
+      if (toolCall.result !== undefined) {
+        continue;
+      }
+      discardedToolCallIds.add(toolCall.id);
+      if (toolCall.messageId) {
+        messageIds.add(toolCall.messageId);
+      }
+    }
+
+    resetStepState();
+    for (const id of discardedToolCallIds) {
+      currentToolCallsRef.current.delete(id);
+    }
+    if (
+      currentToolCallIdRef.current !== null &&
+      discardedToolCallIds.has(currentToolCallIdRef.current)
+    ) {
+      currentToolCallIdRef.current = null;
+    }
+    for (const [requestId, request] of pendingApprovalRequestsRef.current) {
+      if (discardedToolCallIds.has(request.toolCallId)) {
+        pendingApprovalRequestsRef.current.delete(requestId);
+      }
+    }
+    for (const [requestId, request] of pendingQuestionRequestsRef.current) {
+      if (discardedToolCallIds.has(request.toolCallId)) {
+        pendingQuestionRequestsRef.current.delete(requestId);
+      }
+    }
+
+    if (messageIds.size > 0) {
+      setMessages((prev) => prev.filter((msg) => !messageIds.has(msg.id)));
+    }
+  }, [resetStepState, setMessages]);
+
   // Reset all state
   const resetState = useCallback((preserveSlashCommands = false) => {
     resetStepState();
+    stepRetryStatusMessageIdRef.current = null;
     currentToolCallsRef.current?.clear();
     currentToolCallIdRef.current = null;
     pendingApprovalRequestsRef.current?.clear();
@@ -1021,6 +1167,13 @@ export function useSessionStream(
             break;
           }
 
+          case "StepRetry": {
+            const retainedSteps = discardSubagentRetryAttempt(steps);
+            steps.length = 0;
+            steps.push(...retainedSteps);
+            break;
+          }
+
           case "SubagentEvent": {
             // Nested subagent — deep nesting is rare in practice.
             // For now we skip nested SubagentEvents; the parent subagent's
@@ -1059,6 +1212,7 @@ export function useSessionStream(
       switch (event.type) {
         case "TurnBegin": {
           // Reset step state to ensure slash commands create new messages
+          clearStepRetryStatus();
           resetStepState();
 
           const parsedUserInput = parseUserInput(event.payload.user_input);
@@ -1100,6 +1254,7 @@ export function useSessionStream(
 
         case "StepBegin": {
           setCurrentStep(event.payload.n);
+          clearStepRetryStatus();
           resetStepState();
           if (!isReplay) {
             setStatus("streaming");
@@ -1107,7 +1262,18 @@ export function useSessionStream(
           break;
         }
 
+        case "StepRetry": {
+          discardRetryAttemptMessages();
+          showStepRetryStatus(event.payload, isReplay);
+          if (!isReplay) {
+            clearAwaitingFirstResponse();
+            setStatus("streaming");
+          }
+          break;
+        }
+
         case "ContentPart": {
+          clearStepRetryStatus();
           if (!isReplay) {
             clearAwaitingFirstResponse();
           }
@@ -1190,6 +1356,7 @@ export function useSessionStream(
         }
 
         case "ToolCall": {
+          clearStepRetryStatus();
           if (!isReplay) {
             clearAwaitingFirstResponse();
           }
@@ -1278,6 +1445,7 @@ export function useSessionStream(
         }
 
         case "ToolResult": {
+          clearStepRetryStatus();
           if (!isReplay) {
             clearAwaitingFirstResponse();
           }
@@ -1727,6 +1895,7 @@ export function useSessionStream(
         }
 
         case "StatusUpdate": {
+          clearStepRetryStatus();
           const nextContextUsage = event.payload.context_usage;
           if (typeof nextContextUsage === "number") {
             setContextUsage(nextContextUsage);
@@ -1790,6 +1959,7 @@ export function useSessionStream(
         }
 
         case "StepInterrupted": {
+          clearStepRetryStatus();
           // Clear pending approval and question requests
           pendingApprovalRequestsRef.current.clear();
           pendingQuestionRequestsRef.current.clear();
@@ -1971,6 +2141,9 @@ export function useSessionStream(
       getNextMessageId,
       setMessages,
       resetStepState,
+      clearStepRetryStatus,
+      discardRetryAttemptMessages,
+      showStepRetryStatus,
       upsertMessage,
       parseUserInput,
       safeStringify,
@@ -1991,7 +2164,7 @@ export function useSessionStream(
       method: "initialize",
       id,
       params: {
-        protocol_version: "1.9",
+        protocol_version: WIRE_PROTOCOL_VERSION,
         client: {
           name: "kiwi",
           version: kimiCliVersion,
@@ -2042,6 +2215,7 @@ export function useSessionStream(
           setError(err);
           onError?.(err);
           setStatus("error");
+          clearStepRetryStatus();
           setAwaitingFirstResponse(false);
           awaitingIdleRef.current = false;
           // Mark all streaming/subagent messages as complete
@@ -2067,6 +2241,7 @@ export function useSessionStream(
             `[SessionStream] Stream ${message.result.status}`,
           );
           setStatus("ready");
+          clearStepRetryStatus();
           setAwaitingFirstResponse(false);
           awaitingIdleRef.current = false;
           isReplayingRef.current = false;
@@ -2183,6 +2358,7 @@ export function useSessionStream(
       applySessionStatus,
       completeStreamingMessages,
       sendInitialize,
+      clearStepRetryStatus,
     ],
   );
 
@@ -2502,6 +2678,7 @@ export function useSessionStream(
         setError(err);
         onError?.(err);
         setAwaitingFirstResponse(false);
+        clearStepRetryStatus();
         awaitingIdleRef.current = false;
         pendingMessageRef.current = null; // Clear pending message on error
       };
@@ -2537,6 +2714,7 @@ export function useSessionStream(
         }
 
         // Mark all streaming/subagent messages as complete
+        clearStepRetryStatus();
         completeStreamingMessages();
         setStatus("ready");
       };
@@ -2549,6 +2727,7 @@ export function useSessionStream(
       awaitingIdleRef.current = false;
       setAwaitingFirstResponse(false);
       setStatus("error");
+      clearStepRetryStatus();
       pendingMessageRef.current = null; // Clear pending message on error
     }
   }, [
@@ -2562,6 +2741,7 @@ export function useSessionStream(
     sendPendingMessage,
     setAwaitingFirstResponse,
     completeStreamingMessages,
+    clearStepRetryStatus,
   ]);
 
   // Send cancel message to server
@@ -2585,6 +2765,7 @@ export function useSessionStream(
     awaitingIdleRef.current = false;
     setAwaitingFirstResponse(false);
     pendingMessageRef.current = null;
+    clearStepRetryStatus();
     setIsConnected(false);
     setStatus("ready");
     setSessionStatus(null);
@@ -2601,7 +2782,12 @@ export function useSessionStream(
 
     // Mark all streaming/subagent messages as complete
     completeStreamingMessages();
-  }, [completeStreamingMessages, setAwaitingFirstResponse, setMessages]);
+  }, [
+    clearStepRetryStatus,
+    completeStreamingMessages,
+    setAwaitingFirstResponse,
+    setMessages,
+  ]);
 
   // Send cancel request or disconnect if stream not ready
   const cancel = useCallback(() => {

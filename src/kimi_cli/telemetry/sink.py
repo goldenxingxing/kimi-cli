@@ -11,6 +11,7 @@ import platform
 import threading
 from typing import Any
 
+from kimi_cli.constant import NAME, get_build_sha
 from kimi_cli.telemetry.transport import AsyncTransport
 from kimi_cli.utils.logging import logger
 
@@ -35,6 +36,8 @@ class EventSink:
         self._flush_task: asyncio.Task[None] | None = None
         # Static context enrichment
         self._context: dict[str, Any] = {
+            "app_name": NAME,
+            "build_sha": get_build_sha(),
             "version": version,
             "runtime": "python",
             "platform": platform.system().lower(),
@@ -54,15 +57,6 @@ class EventSink:
         ctx = {**self._context, "ui_mode": self._ui_mode}
         if self._model:
             ctx["model"] = self._model
-        # Read the client_info tuple atomically (single pointer load) so we
-        # never observe a half-updated pair.
-        from kimi_cli.telemetry import get_client_info
-
-        client_info = get_client_info()
-        if client_info is not None:
-            ctx["client_name"] = client_info[0]
-            if client_info[1]:
-                ctx["client_version"] = client_info[1]
         enriched = {**event, "context": ctx}
 
         with self._lock:
