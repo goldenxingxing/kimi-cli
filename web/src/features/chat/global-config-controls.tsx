@@ -114,6 +114,16 @@ export function GlobalConfigControls({
 
   const attachments = usePromptInputAttachments();
 
+  // Resolve the active model entry: try model-key match first (current
+  // behaviour), then fall back to a provider-name match so configs whose
+  // ``default_model`` is actually a provider name (the new ``LLM_PROVIDERS``
+  // shape) still surface the underlying model id rather than the provider.
+  const activeModel =
+    config?.models.find((m) => m.name === config?.defaultModel) ??
+    config?.models.find((m) => m.provider === config?.defaultModel);
+  const triggerLabel =
+    activeModel?.model ?? config?.models[0]?.model ?? config?.defaultModel;
+
   return (
     <div className={cn("flex items-center gap-1", className)}>
       <Button
@@ -141,7 +151,7 @@ export function GlobalConfigControls({
           >
             <Cpu className="size-4 shrink-0" />
             <span className="truncate">
-              {config ? config.defaultModel : t("config:model.fallback")}
+              {config ? triggerLabel : t("config:model.fallback")}
             </span>
             {(isLoading || isUpdating) && (
               <Loader className="ml-auto shrink-0" size={14} />
@@ -155,11 +165,11 @@ export function GlobalConfigControls({
             <ModelSelectorGroup heading={t("config:model.heading")}>
               {(config?.models ?? []).map((m) => {
                 const isSelected = m.name === config?.defaultModel;
-                const label = `${m.name} (${m.provider})`;
+                const label = `${m.model} (${m.provider})`;
                 return (
                   <ModelSelectorItem
                     key={m.name}
-                    value={`${m.name} ${m.model} ${m.provider}`}
+                    value={`${m.model} ${m.provider}`}
                     onSelect={(_value) => handleSelectModel(m.name)}
                     className="flex items-center gap-2"
                   >
@@ -169,7 +179,7 @@ export function GlobalConfigControls({
                       <span className="size-4" />
                     )}
                     <ModelSelectorName title={label}>
-                      {m.name}
+                      {m.model}
                     </ModelSelectorName>
                     <span className="shrink-0 text-xs text-muted-foreground">
                       {m.provider}

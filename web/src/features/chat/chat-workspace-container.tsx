@@ -88,7 +88,11 @@ export function ChatWorkspaceContainer({
   const { config } = useGlobalConfig();
   const maxContextSize = useMemo(() => {
     if (!config) return undefined;
-    const model = config.models.find((m) => m.name === config.defaultModel);
+    // ``defaultModel`` is the model-key under legacy configs but a provider
+    // name under the new LLM_PROVIDERS scheme; check both to find the entry.
+    const model =
+      config.models.find((m) => m.name === config.defaultModel) ??
+      config.models.find((m) => m.provider === config.defaultModel);
     return model?.maxContextSize;
   }, [config]);
 
