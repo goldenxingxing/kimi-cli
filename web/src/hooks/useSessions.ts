@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { toast } from "sonner";
 import type {
   Session,
   UploadSessionFileResponse,
@@ -707,7 +708,10 @@ export function useSessions(): UseSessionsReturn {
         await refreshSession(sessionId);
         return true;
       } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to rename session";
         console.error("Failed to rename session:", err);
+        toast.error(message);
         return false;
       }
     },
@@ -744,7 +748,10 @@ export function useSessions(): UseSessionsReturn {
         await refreshSession(sessionId);
         return result.title;
       } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to generate title";
         console.error("Failed to generate title:", err);
+        toast.error(message);
         return null;
       }
     },
@@ -794,7 +801,10 @@ export function useSessions(): UseSessionsReturn {
 
         return true;
       } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to archive session";
         console.error("Failed to archive session:", err);
+        toast.error(message);
         return false;
       }
     },
@@ -835,7 +845,10 @@ export function useSessions(): UseSessionsReturn {
 
         return true;
       } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to unarchive session";
         console.error("Failed to unarchive session:", err);
+        toast.error(message);
         return false;
       }
     },

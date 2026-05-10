@@ -59,12 +59,12 @@ from kimi_cli.soul.dynamic_injection import (
     DynamicInjectionProvider,
     normalize_history,
 )
+from kimi_cli.soul.dynamic_injections.afk_mode import AfkModeInjectionProvider
 from kimi_cli.soul.dynamic_injections.cross_session_memory import (
     CrossSessionMemoryInjectionProvider,
 )
 from kimi_cli.soul.dynamic_injections.plan_mode import PlanModeInjectionProvider
 from kimi_cli.soul.dynamic_injections.session_memory import SessionMemoryInjectionProvider
-from kimi_cli.soul.dynamic_injections.yolo_mode import YoloModeInjectionProvider
 from kimi_cli.soul.message import check_message, system, system_reminder, tool_result_to_message
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
@@ -83,6 +83,7 @@ from kimi_cli.wire.types import (
     SteerInput,
     StepBegin,
     StepInterrupted,
+    StepRetry,
     TextPart,
     ToolResult,
     TurnBegin,
@@ -205,8 +206,8 @@ class KimiSoul:
             PlanModeInjectionProvider(),
             *(
                 []
-                if self._runtime.config.skip_yolo_prompt_injection
-                else [YoloModeInjectionProvider()]
+                if self._runtime.config.skip_afk_prompt_injection
+                else [AfkModeInjectionProvider()]
             ),
             SessionMemoryInjectionProvider(),
             # Subagents share the parent's session and don't get their own
@@ -240,8 +241,28 @@ class KimiSoul:
 
     @property
     def is_yolo(self) -> bool:
-        """Whether yolo (auto-approve / non-interactive) mode is enabled."""
+        """Whether explicit yolo mode is active."""
         return self._approval.is_yolo()
+
+    @property
+    def is_auto_approve(self) -> bool:
+        """Whether tool approvals are bypassed (explicit yolo, or implied by afk)."""
+        return self._approval.is_auto_approve()
+
+    @property
+    def is_afk(self) -> bool:
+        """Whether no user is present (away-from-keyboard)."""
+        return self._approval.is_afk()
+
+    @property
+    def is_afk_flag(self) -> bool:
+        """Whether persisted afk mode is active."""
+        return self._approval.is_afk_flag()
+
+    @property
+    def is_subagent(self) -> bool:
+        """Whether this soul is running as a subagent rather than the root session."""
+        return self._runtime.role == "subagent"
 
     @property
     def plan_mode(self) -> bool:
@@ -276,6 +297,35 @@ class KimiSoul:
                 )
         return injections
 
+    async def _notify_injection_providers_compacted(self) -> None:
+        """Notify all injection providers that the context has been compacted.
+
+        Failures are isolated per-provider so a buggy third-party provider
+        cannot abort compaction (which would skip CompactionEnd wire events
+        and PostCompact telemetry).
+        """
+        for provider in self._injection_providers:
+            try:
+                await provider.on_context_compacted()
+            except Exception:
+                logger.warning(
+                    "injection provider %s on_context_compacted failed",
+                    type(provider).__name__,
+                    exc_info=True,
+                )
+
+    async def notify_afk_changed(self, enabled: bool) -> None:
+        """Notify dynamic injection providers that afk mode changed."""
+        for provider in self._injection_providers:
+            try:
+                await provider.on_afk_changed(enabled)
+            except Exception:
+                logger.warning(
+                    "injection provider %s on_afk_changed failed",
+                    type(provider).__name__,
+                    exc_info=True,
+                )
+
     def _bind_plan_mode_tools(self) -> None:
         """Bind plan mode state to tools that support it."""
         if not isinstance(self._agent.toolset, KimiToolset):
@@ -305,21 +355,32 @@ class KimiSoul:
 
         exit_tool = self._agent.toolset.find("ExitPlanMode")
         if isinstance(exit_tool, ExitPlanMode):
-            exit_tool.bind(self.toggle_plan_mode, path_getter, checker, self._approval.is_yolo)
+            exit_tool.bind(
+                self.toggle_plan_mode,
+                path_getter,
+                checker,
+                self._approval.is_afk,
+            )
 
         # EnterPlanMode has a special bind() method
         from kimi_cli.tools.plan.enter import EnterPlanMode
 
         enter_tool = self._agent.toolset.find("EnterPlanMode")
         if isinstance(enter_tool, EnterPlanMode):
-            enter_tool.bind(self.toggle_plan_mode, path_getter, checker, self._approval.is_yolo)
+            enter_tool.bind(
+                self.toggle_plan_mode,
+                path_getter,
+                checker,
+                self._approval.is_auto_approve,
+            )
 
-        # AskUserQuestion — bind yolo checker for auto-dismiss
+        # AskUserQuestion — bind afk checker for auto-dismiss.
+        # Yolo alone keeps the tool live; only afk (no user present) dismisses.
         from kimi_cli.tools.ask_user import AskUserQuestion
 
         ask_tool = self._agent.toolset.find("AskUserQuestion")
         if isinstance(ask_tool, AskUserQuestion):
-            ask_tool.bind_approval(self._approval.is_yolo)
+            ask_tool.bind_afk(self._approval.is_afk)
 
     def _ensure_plan_session_id(self) -> None:
         """Allocate a stable plan session ID on first activation."""
@@ -428,7 +489,8 @@ class KimiSoul:
         max_size = self._runtime.llm.max_context_size if self._runtime.llm is not None else 0
         return StatusSnapshot(
             context_usage=self._context_usage,
-            yolo_enabled=self._approval.is_yolo(),
+            yolo_enabled=self._approval.is_yolo_flag(),
+            afk_enabled=self._approval.is_afk(),
             plan_mode=self._plan_mode,
             context_tokens=token_count,
             max_context_tokens=max_size,
@@ -521,12 +583,12 @@ class KimiSoul:
         skip_user_prompt_hook: bool = False,
     ):
         approval_source_token = None
+        created_approval_source: ApprovalSource | None = None
         turn_started = False
         turn_finished = False
         if get_current_approval_source_or_none() is None:
-            approval_source_token = set_current_approval_source(
-                ApprovalSource(kind="foreground_turn", id=uuid.uuid4().hex)
-            )
+            created_approval_source = ApprovalSource(kind="foreground_turn", id=uuid.uuid4().hex)
+            approval_source_token = set_current_approval_source(created_approval_source)
         try:
             # Refresh OAuth tokens on each turn to avoid idle-time expirations.
             await self._runtime.oauth.ensure_fresh(self._runtime)
@@ -636,6 +698,11 @@ class KimiSoul:
         finally:
             if turn_started and not turn_finished:
                 wire_send(TurnEnd())
+            if created_approval_source is not None and self._runtime.approval_runtime is not None:
+                self._runtime.approval_runtime.cancel_by_source(
+                    created_approval_source.kind,
+                    created_approval_source.id,
+                )
             if approval_source_token is not None:
                 reset_current_approval_source(approval_source_token)
 
@@ -936,11 +1003,17 @@ class KimiSoul:
                 on_tool_result=wire_send,
             )
 
+        max_attempts = self._loop_control.max_retries_per_step
+
+        def _before_step_retry_sleep(retry_state: RetryCallState) -> None:
+            self._retry_log("step", retry_state)
+            self._emit_step_retry(retry_state, max_attempts=max_attempts)
+
         @tenacity.retry(
             retry=retry_if_exception(self._is_retryable_error),
-            before_sleep=partial(self._retry_log, "step"),
+            before_sleep=_before_step_retry_sleep,
             wait=wait_exponential_jitter(initial=0.3, max=5, jitter=0.5),
-            stop=stop_after_attempt(self._loop_control.max_retries_per_step),
+            stop=stop_after_attempt(max_attempts),
             reraise=True,
         )
         async def _kosong_step_with_retry() -> StepResult:
@@ -1054,9 +1127,20 @@ class KimiSoul:
         await self._context.append_message(tool_messages)
         # token count of tool results are not available yet
 
-    async def compact_context(self, custom_instruction: str = "") -> None:
+    async def compact_context(
+        self,
+        *,
+        manual: bool = False,
+        custom_instruction: str = "",
+    ) -> None:
         """
         Compact the context.
+
+        Args:
+            manual: Whether the compaction was explicitly requested by the user
+                (e.g. via the ``/compact`` slash command). When ``False``, the
+                compaction is treated as auto-triggered by the system.
+            custom_instruction: Optional user instruction to guide compaction focus.
 
         Raises:
             LLMNotSet: When the LLM is not set.
@@ -1086,7 +1170,12 @@ class KimiSoul:
                 chat_provider=chat_provider,
             )
 
-        trigger_reason = "manual" if custom_instruction else "auto"
+        if not manual:
+            trigger_reason = "auto"
+        elif custom_instruction:
+            trigger_reason = "manual-with-prompt"
+        else:
+            trigger_reason = "manual"
         before_tokens = self._context.token_count
         from kimi_cli.hooks import events
 
@@ -1138,6 +1227,12 @@ class KimiSoul:
 
         # Estimate token count so context_usage is not reported as 0%
         await self._context.update_token_count(estimated_token_count)
+
+        # Notify dynamic injection providers that history has been rebuilt so
+        # they can reset any one-shot throttling state. Failures are isolated
+        # per-provider so compaction completion (wire event + telemetry) is
+        # not affected by a buggy provider.
+        await self._notify_injection_providers_compacted()
 
         wire_send(CompactionEnd())
 
@@ -1285,6 +1380,21 @@ class KimiSoul:
             sleep=retry_state.next_action.sleep
             if retry_state.next_action is not None
             else "unknown",
+        )
+
+    def _emit_step_retry(self, retry_state: RetryCallState, *, max_attempts: int) -> None:
+        error = retry_state.outcome.exception() if retry_state.outcome else None
+        next_action = retry_state.next_action
+        wait_s = next_action.sleep if next_action is not None else 0.0
+        wire_send(
+            StepRetry(
+                n=self._current_step_no,
+                next_attempt=retry_state.attempt_number + 1,
+                max_attempts=max_attempts,
+                wait_s=wait_s,
+                error_type=type(error).__name__ if error else "unknown",
+                status_code=error.status_code if isinstance(error, APIStatusError) else None,
+            )
         )
 
 

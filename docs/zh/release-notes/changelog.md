@@ -4,9 +4,34 @@
 
 ## 未发布
 
+- Shell：把 Windows 上的 Shell 后端从 PowerShell 切换到 Git Bash——Shell 工具现在通过 `bash.exe`（POSIX 语义）执行命令，而不再使用 `powershell.exe`。Windows 用户能使用与 Linux/macOS 一致的 Unix 风格语法（`&&`、`||`、`|`、`/dev/null`、`grep`、`sed` 等）。**需要先安装 Git for Windows**：kimi-cli 按以下顺序查找 `bash.exe`：环境变量 `KIMI_CLI_GIT_BASH_PATH` → `where.exe git` → 标准安装路径（`C:\Program Files\Git\bin\bash.exe`）；如果都找不到，启动时打印安装提示并退出
+- Shell：防御 Windows 上模型偶尔幻觉出的 CMD 风格 `2>nul` 重定向——在命令进入 git-bash 前自动改写为 `2>/dev/null`；如果不防御，git-bash 会真的创建一个名为 `nul` 的文件（Windows 保留设备名），破坏 `git add .` 和 `git clone`。该改写仅在 Windows 上生效；Linux/macOS 上 `>nul` 是合法的写入到名为 `nul` 文件的重定向，保持原样
+- File：`ReadFile`、`WriteFile`、`StrReplaceFile`、`Glob`、`Grep` 在 Windows 上接受 POSIX 形式的路径——除原生 Windows 路径外，这些工具现在能识别 `/c/Users/foo`（Git Bash 形式）、`/cygdrive/c/Users/foo`（Cygwin 形式）和 `\\server\share`（UNC 形式），并在文件系统操作前自动转换为原生形式
+- Shell：在 LLM 步骤重试时清除已流式输出的不完整内容——以前，如果某个步骤在流式输出中途失败（例如触发速率限制或服务器错误），被中断尝试所产生的未完成文本和未结束的工具调用块会留在屏幕上，并与新尝试的输出混在一起。现在 Shell 界面会丢弃这部分不完整状态，并打印一条重试横幅，显示失败原因、尝试次数和等待时间；Print 模式也会在重试时丢弃已缓冲的 Assistant 消息
+- Wire：协议版本升级到 1.10——新增 `StepRetry` 事件，在步骤尝试失败并即将重试时发出，携带尝试次数、等待时间和错误详情
+
+## 1.41.0 (2026-04-30)
+
+- Plugin：支持直接从 `.zip` URL 安装插件——`kimi plugin install` 现在可以接受以 `.zip` 结尾的 HTTP(S) URL（例如 GitHub/GitLab 的 archive 链接 `.../archive/refs/heads/main.zip`），下载后解压再解析 `plugin.json`，与原有的 git URL、本地目录、本地 zip 文件三种来源并列
+- Shell：在无显示环境的 Linux（如 SSH 远程）上启用剪贴板图片粘贴——当 pyperclip 不可用（例如 DISPLAY 未设置）时，Ctrl-V 现在会回退到 xclip 或 wl-paste，使远程剪贴板桥接仍能注入图片；同时防止 pyperclip 失效时内置剪贴板快捷键造成 UI 崩溃
+
+## 1.40.0 (2026-04-28)
+
+- Core：修复 `--yolo` 模式意外阻止模型调用 `AskUserQuestion` 的问题——以前 yolo 会注入一段 system reminder，告诉模型当前处于“非交互模式”，不能向用户提问；同时 ask-user 工具在 yolo 下也会自动 dismiss。这两处都是错的：yolo 只绕过权限审批，并不意味着“用户已离开”。现在 yolo 不再向模型注入指导；用户仍可通过 `AskUserQuestion` 触达
+- CLI：把权限审批绕过和无人值守执行拆分为两个正交模式——`--yolo` 表示用户仍在终端前、但绕过权限审批；`--afk` / `/afk` 表示 away-from-keyboard：`AskUserQuestion` 会被自动 dismiss，审批也会自动处理。`--print` 现在使用 runtime AFK 行为而不是 yolo，更符合它的非交互执行模型。状态栏独立显示 `yolo` 和 `afk`，`/yolo` 与 `/afk` 各自切换自身的 flag，互不干扰
+- Config：由于 yolo 不再向模型注入指导，`skip_yolo_prompt_injection` 替换为 `skip_afk_prompt_injection`。旧配置键如果仍存在会被忽略
+- Shell：修复 afk 开启时 `/yolo` 切换产生误导性 UI 文案的问题——以前 `/yolo` 读的是 yolo 和 afk 合并后的自动审批状态，afk 开着时按 `/yolo` 会说“现在需要审批”，但 afk 仍会自动处理审批。现在 `/yolo` 只读写 yolo 自身的 flag，不碰 afk
+- Web：修复 AI 标题生成在用户已手动重命名后才返回时覆盖手动标题的问题——最终写入前会重新读取状态，若另一请求已将 `title_generated` 标记为完成，则尊重新标题不再覆盖
+- Web：会话重命名、归档、取消归档、生成标题失败时弹出 toast 提示，而不仅仅是记录到 console
+- Web：折叠工具详情后仍保留工具媒体预览——工具返回的图片和视频现在渲染在工具卡片下方，而不是折叠详情区域内部，因此折叠工具后预览缩略图仍然可见
+- Kosong：修复 Kimi 供应商在 OAuth 令牌刷新后仍使用过期的 API 密钥的问题——`on_retryable_error` 现在从当前 client 读取 `api_key`，而不是缓存的 `_api_key`，因此在可重试错误后重建 client 时会保留通过 `client.api_key` 应用的 OAuth 令牌刷新
+- Core：修复审批请求 5 分钟自动超时并被误报为 `Rejected by user` 的问题；现在活跃的前台和子 Agent 审批请求都会无限等待用户响应
+- Shell：修复 `/usage` 剩余额度渲染错误——进度条、告警颜色和 `% left` 文案现在都统一基于剩余额度比例计算，剩余额度充足时显示为绿色满格，接近耗尽时显示为黄色或红色
 - Shell：在提示框状态栏显示当前正在运行的后台 Agent 任务数——原有的 `⚙ bash: N` 徽章只统计后台 Shell 任务，把后台 Agent 子代理过滤掉了，所以多个子代理同时在跑时提示框看起来像空闲，用户无法判断工作是否还在进行；现在状态栏会渲染 `⚙ bash: N` 与 `⚙ agent: N` 两个相互独立的徽章（任一计数为 0 时自动隐藏），终端太窄无法同时容纳两者时优先丢弃 agent 徽章
 - Auth：修复 OAuth 用户 access token 过期时托管模型列表刷新静默失败的问题——后台 `/models` 同步任务现在会检测 401 响应，强制进行 OAuth token 刷新并用刷新后的 token 重试；如果刷新本身失败或刷新后的 token 仍被拒绝，则回退到最初配置的静态 API 密钥，而不是跳过该 provider
 - Core：修复连接恢复后重试返回 401 时未能触发 OAuth 刷新的问题——在 `APIConnectionError` 或 `APITimeoutError` 后重建 HTTP 客户端时，重试现在会重新进入完整恢复路径，使得后续的 401 能正确刷新 OAuth token，而不是作为不可恢复的错误直接抛给用户
+- Shell：在 transcript 中回显 `/skill:*` 和 `/flow:*` 输入，工作流命令按下回车后不再消失；`/usage`、`/model` 等操作类斜杠命令仍然保持隐藏
+- Core：将默认 `max_steps_per_turn` 从 500 提升到 1000，长任务更不容易撞到单轮步数上限
 
 ## 1.39.0 (2026-04-24)
 
@@ -25,7 +50,6 @@
 - Skill：`merge_all_available_skills` 的默认值从 `false` 改为 `true`。kimi-cli 现在默认会合并用户级和项目级所有已存在的品牌 Skills 目录（`.kimi/skills`、`.claude/skills`、`.codex/skills`），而不是仅使用找到的第一个——让同时拥有多个品牌目录（例如同时保留 `~/.kimi/skills` 和 `~/.claude/skills`）的用户开箱即看到所有 Skills。**行为变更**：依赖旧默认（仅取第一个）的用户可通过在配置中显式设置 `merge_all_available_skills = false` 恢复旧行为。
 
 ## 1.38.0 (2026-04-22)
-
 - Shell：修复 approval 弹窗超时后被误报为 `Rejected by user` 的问题——300 秒安全超时后，工具调用会以 `Rejected: approval timed out` 拒绝，让离开电脑一段时间后回来的用户能分辨出这是超时而非自己的手动拒绝。经常长时间离开的话可以加 `--yolo`/`-y` 自动批准工具调用
 - Auth：修复 OAuth 用户因并发实例的 refresh token 轮换竞态被反复要求 `/login` 的问题——当另一个并发运行的 kimi-cli 实例（终端、VS Code 插件或 `kimi -p` 一次性命令）合法地轮换了 refresh token，当前实例手里过期的 refresh 请求会从服务端拿回 401，“别的实例是否刚轮换过”的磁盘检查与 `delete_tokens` 调用之间存在 TOCTOU 竞态，即使磁盘上马上会被写入一份有效的新 token，凭证文件也会被误删，迫使用户重新登录；现在依旧清理内存缓存（真正失效的 token 会在下一次请求时浮现），但保留文件，让并发实例刚写入的新 token 有机会被恢复，最终的 `/login` 仍会原子覆盖该文件
 - Kosong：修复 Anthropic 供应商将并行工具结果拆分到多个 user message 的问题——现在会将仅包含工具结果的连续 user message 合并为单条消息，以符合 Anthropic Messages API 规范（assistant 一轮中的所有 `tool_use` 必须在同一条 user message 内回答）；修复了严格兼容后端（如 DeepSeek `/anthropic` 接口）返回 400 错误的问题，并避免官方后端静默地引导模型放弃并行工具调用
