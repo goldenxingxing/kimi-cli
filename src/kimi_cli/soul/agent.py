@@ -13,7 +13,7 @@ from jinja2 import FileSystemLoader, StrictUndefined, TemplateError, UndefinedEr
 from kaos.path import KaosPath
 from kosong.tooling import Toolset
 
-from kimi_cli.agentspec import load_agent_spec
+from kimi_cli.agentspec import ResolvedAgentSpec, load_agent_spec
 from kimi_cli.approval_runtime import ApprovalRuntime
 from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.background import BackgroundTaskManager
@@ -26,6 +26,7 @@ from kimi_cli.session import Session
 from kimi_cli.skill import (
     Skill,
     discover_skills_from_roots,
+    filter_skills,
     format_skills_for_prompt,
     index_skills,
     resolve_skills_roots,
@@ -423,10 +424,11 @@ async def load_agent(
     logger.info("Loading agent: {agent_file}", agent_file=agent_file)
     agent_spec = load_agent_spec(agent_file)
 
+    prompt_builtin_args = _apply_spec_to_builtin_args(runtime, agent_spec)
     system_prompt = _load_system_prompt(
         agent_spec.system_prompt_path,
         agent_spec.system_prompt_args,
-        runtime.builtin_args,
+        prompt_builtin_args,
     )
 
     # Register built-in subagent types before loading tools because some tools render
@@ -499,6 +501,17 @@ async def load_agent(
                     )
                 except pydantic.ValidationError as e:
                     raise MCPConfigError(f"Invalid MCP config: {e}") from e
+        # Stage filter before loading so deferred startup also picks it up.
+        if (
+            agent_spec.allowed_mcp_servers is not None
+            or agent_spec.allowed_mcp_tools is not None
+            or agent_spec.excluded_mcp_tools
+        ):
+            toolset.set_pending_mcp_filter(
+                allowed_servers=agent_spec.allowed_mcp_servers,
+                allowed_tools=agent_spec.allowed_mcp_tools,
+                excluded_tools=agent_spec.excluded_mcp_tools,
+            )
         if start_mcp_loading:
             await toolset.load_mcp_tools(validated_mcp_configs, runtime, in_background=True)
         else:
@@ -510,6 +523,32 @@ async def load_agent(
         toolset=toolset,
         runtime=runtime,
     )
+
+
+def _apply_spec_to_builtin_args(
+    runtime: Runtime, spec: ResolvedAgentSpec
+) -> BuiltinSystemPromptArgs:
+    """Return builtin args overridden per *spec*'s skill filter and KB toggle.
+
+    Returns the original ``runtime.builtin_args`` unchanged when no override applies,
+    keeping the no-op path allocation-free.
+    """
+    base = runtime.builtin_args
+    overrides: dict[str, Any] = {}
+    if spec.allowed_skills is not None or spec.excluded_skills:
+        filtered = filter_skills(
+            list(runtime.skills.values()),
+            allowed=spec.allowed_skills,
+            excluded=spec.excluded_skills,
+        )
+        overrides["KIMI_SKILLS"] = format_skills_for_prompt(filtered) or "No skills found."
+    if spec.knowledge_base is False:
+        overrides["KIMI_KNOWLEDGE_BASE"] = ""
+    if not overrides:
+        return base
+    data: dict[str, Any] = {f: getattr(base, f) for f in base.__dataclass_fields__}
+    data.update(overrides)
+    return BuiltinSystemPromptArgs(**data)
 
 
 def _load_system_prompt(

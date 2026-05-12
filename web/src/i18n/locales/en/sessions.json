@@ -2,7 +2,11 @@
   "advanced": {
     "title": "Advanced settings",
     "thinkingMode": "Thinking mode",
-    "enableThinking": "Enable thinking mode"
+    "enableThinking": "Enable thinking mode",
+    "agent": "Agent",
+    "agentDefault": "Default agent",
+    "agentSourceUser": "user",
+    "agentSourceProject": "project"
   },
   "create": {
     "title": "Create New Session",

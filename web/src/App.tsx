@@ -330,8 +330,13 @@ function App() {
   );
 
   const handleCreateSession = useCallback(
-    async (workDir: string, createDir?: boolean, thinking?: boolean) => {
-      await createSession(workDir, createDir, thinking);
+    async (
+      workDir: string,
+      createDir?: boolean,
+      thinking?: boolean,
+      agentName?: string | null,
+    ) => {
+      await createSession(workDir, createDir, thinking, agentName);
     },
     [createSession],
   );

@@ -2,7 +2,11 @@
   "advanced": {
     "title": "高级设置",
     "thinkingMode": "思考模式",
-    "enableThinking": "开启思考模式"
+    "enableThinking": "开启思考模式",
+    "agent": "智能体",
+    "agentDefault": "默认 Agent",
+    "agentSourceUser": "用户",
+    "agentSourceProject": "项目"
   },
   "create": {
     "title": "新建会话",
