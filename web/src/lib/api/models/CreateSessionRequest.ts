@@ -37,6 +37,12 @@ export interface CreateSessionRequest {
      * @memberof CreateSessionRequest
      */
     thinking?: boolean | null;
+    /**
+     * Name of a discovered agent spec; null/undefined = use default agent
+     * @type {string}
+     * @memberof CreateSessionRequest
+     */
+    agentName?: string | null;
 }
 
 /**
@@ -59,6 +65,7 @@ export function CreateSessionRequestFromJSONTyped(json: any, ignoreDiscriminator
         'workDir': json['work_dir'] == null ? undefined : json['work_dir'],
         'createDir': json['create_dir'] == null ? undefined : json['create_dir'],
         'thinking': json['thinking'] == null ? undefined : json['thinking'],
+        'agentName': json['agent_name'] == null ? undefined : json['agent_name'],
     };
 }
 
@@ -76,6 +83,7 @@ export function CreateSessionRequestToJSONTyped(value?: CreateSessionRequest | n
         'work_dir': value['workDir'],
         'create_dir': value['createDir'],
         'thinking': value['thinking'],
+        'agent_name': value['agentName'],
     };
 }
 

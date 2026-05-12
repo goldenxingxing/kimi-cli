@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -28,7 +29,8 @@ SkillScope = Literal["builtin", "user", "project", "extra"]
 - ``user``: from the user's home (``~/.kimi/skills``, ``~/.agents/skills``, ...)
 - ``project``: from the current project's working directory
   (``<work_dir>/.kimi/skills``, ``<work_dir>/.agents/skills``, ...)
-- ``extra``: from ``extra_skill_dirs`` config or ``--skills-dir`` override
+- ``extra``: from ``extra_skill_dirs`` config, ``--skills-dir`` override,
+  or the ``CUSTOM_SKILLS_HOST_PATH`` environment variable
 """
 
 
@@ -254,24 +256,37 @@ async def resolve_skills_roots(
         for d in await find_user_skills_dirs(merge_brands=merge_brands):
             _append(d, "user")
 
-    if extra_skill_dirs:
+    # ``CUSTOM_SKILLS_HOST_PATH`` lets the desktop launcher feed a user-picked
+    # skills directory into local-mode discovery, mirroring how the same env
+    # var bind-mounts a host directory into the Docker sandbox. Handled in the
+    # same priority tier as ``extra_skill_dirs`` entries; ``_append``'s seen-set
+    # dedup collapses the case where a path is supplied both ways.
+    env_skill_dir = os.environ.get("CUSTOM_SKILLS_HOST_PATH")
+    needs_project_root = bool(extra_skill_dirs) or bool(env_skill_dir)
+    if needs_project_root:
         project_root = await find_project_root(work_dir)
-        for raw in extra_skill_dirs:
+
+        async def _try_append_extra(raw: str) -> None:
             resolved = _resolve_extra_skill_dir(raw, project_root)
             if resolved is None:
-                continue
+                return
             try:
                 is_dir = await resolved.is_dir()
             except OSError as exc:
                 logger.info(
-                    "Skipping extra_skill_dirs entry {path}: {error}",
+                    "Skipping extra skill dir entry {path}: {error}",
                     path=resolved,
                     error=exc,
                 )
-                continue
+                return
             if not is_dir:
-                continue
+                return
             _append(resolved, "extra")
+
+        for raw in extra_skill_dirs or ():
+            await _try_append_extra(raw)
+        if env_skill_dir:
+            await _try_append_extra(env_skill_dir)
 
     # Plugins are always discoverable; treat as "extra" origin for prompt
     # grouping but place them below config-declared extras (user intent wins).
@@ -313,6 +328,31 @@ def _resolve_extra_skill_dir(raw: str, project_root: KaosPath) -> KaosPath | Non
 def normalize_skill_name(name: str) -> str:
     """Normalize a skill name for lookup."""
     return name.casefold()
+
+
+def filter_skills(
+    skills: list[Skill],
+    *,
+    allowed: list[str] | None,
+    excluded: list[str],
+) -> list[Skill]:
+    """Filter *skills* by allow/exclude lists. Names compared case-fold.
+
+    ``allowed=None`` skips the allowlist; ``allowed=[]`` rejects everything.
+    """
+    excluded_norm = {normalize_skill_name(n) for n in excluded}
+    allowed_norm: set[str] | None = (
+        {normalize_skill_name(n) for n in allowed} if allowed is not None else None
+    )
+    result: list[Skill] = []
+    for skill in skills:
+        key = normalize_skill_name(skill.name)
+        if key in excluded_norm:
+            continue
+        if allowed_norm is not None and key not in allowed_norm:
+            continue
+        result.append(skill)
+    return result
 
 
 def index_skills(skills: Iterable[Skill]) -> dict[str, Skill]:

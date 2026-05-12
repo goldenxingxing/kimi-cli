@@ -7,6 +7,7 @@ from kimi_cli.web.api import branding as branding_module
 config_router = config.router
 sessions_router = sessions.router
 work_dirs_router = sessions.work_dirs_router
+agents_router = sessions.agents_router
 open_in_router = open_in.router
 auth_router = auth_user.router
 admin_router = admin_module.router
@@ -16,6 +17,7 @@ memory_router = memory.router
 
 __all__ = [
     "admin_router",
+    "agents_router",
     "auth_router",
     "branding_admin_router",
     "branding_public_router",

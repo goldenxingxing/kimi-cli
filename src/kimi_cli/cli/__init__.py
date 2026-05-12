@@ -282,10 +282,14 @@ def kimi(
     ] = False,
     # Customization
     agent: Annotated[
-        Literal["default", "okabe"] | None,
+        str | None,
         typer.Option(
             "--agent",
-            help="Builtin agent specification to use. Default: builtin default agent.",
+            help=(
+                "Agent specification to use. Built-in: `default`, `okabe`. "
+                "Or the name of a YAML spec under `<work-dir>/.kimi/agents/` "
+                "or `~/.kimi/agents/` (project shadows user)."
+            ),
         ),
     ] = None,
     agent_file: Annotated[
@@ -465,6 +469,19 @@ def kimi(
                 agent_file = DEFAULT_AGENT_FILE
             case "okabe":
                 agent_file = OKABE_AGENT_FILE
+            case _:
+                from kimi_cli.agentspec import discover_user_agent_specs
+
+                _resolve_work_dir = local_work_dir or Path.cwd()
+                _discovered = {s.name: s for s in discover_user_agent_specs(_resolve_work_dir)}
+                _spec = _discovered.get(agent)
+                if _spec is None:
+                    raise typer.BadParameter(
+                        f"Unknown agent: {agent!r}. "
+                        f"Available: default, okabe, {', '.join(sorted(_discovered)) or '(none)'}.",
+                        param_hint="--agent",
+                    )
+                agent_file = _spec.path
 
     ui: UIMode = "shell"
     if print_mode:

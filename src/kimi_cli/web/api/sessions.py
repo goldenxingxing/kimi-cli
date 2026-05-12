@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from kimi_cli import logger
+from kimi_cli.agentspec import discover_user_agent_specs
 from kimi_cli.metadata import load_metadata, save_metadata
 from kimi_cli.session import Session as KimiCLISession
 from kimi_cli.utils.subprocess_env import get_clean_env
@@ -57,6 +58,7 @@ from kimi_cli.wire.types import is_request
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 work_dirs_router = APIRouter(prefix="/api/work-dirs", tags=["work-dirs"])
+agents_router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 # Constants
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB
@@ -364,12 +366,29 @@ async def create_session(
             work_dir = KaosPath.unsafe_from_local_path(default_path)
         else:
             work_dir = KaosPath.unsafe_from_local_path(Path.home())
+    # Resolve agent_name → absolute spec path before session is created so we
+    # can reject early if the name is unknown.
+    agent_spec_path: Path | None = None
+    if request is not None and request.agent_name:
+        discovered = discover_user_agent_specs(Path(str(work_dir)))
+        match = next((d for d in discovered if d.name == request.agent_name), None)
+        if match is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown agent: {request.agent_name}",
+            )
+        agent_spec_path = match.path.resolve()
+
     kimi_cli_session = await KimiCLISession.create(work_dir=work_dir)
     context_file = kimi_cli_session.dir / "context.jsonl"
 
-    # Persist per-session config (thinking override)
+    # Persist per-session config (thinking override + agent spec path)
+    _cfg: dict[str, Any] = {}
     if request is not None and request.thinking is not None:
-        _cfg = {"thinking": request.thinking}
+        _cfg["thinking"] = request.thinking
+    if agent_spec_path is not None:
+        _cfg["agent_spec_path"] = str(agent_spec_path)
+    if _cfg:
         (kimi_cli_session.dir / "session_config.json").write_text(
             json.dumps(_cfg), encoding="utf-8"
         )
@@ -412,6 +431,7 @@ class CreateSessionRequest(BaseModel):
     work_dir: str | None = None
     create_dir: bool = False  # Whether to auto-create directory if it doesn't exist
     thinking: bool | None = None  # Per-session thinking override; None = use global config
+    agent_name: str | None = None  # Name of a discovered agent spec
 
 
 class ForkSessionRequest(BaseModel):
@@ -1352,6 +1372,28 @@ async def get_work_dirs() -> list[str]:
 async def get_startup_dir(request: Request) -> str:
     """Get the directory where kimi web was started."""
     return request.app.state.startup_dir
+
+
+class DiscoveredAgent(BaseModel):
+    """A discovered agent spec, exposed to the frontend."""
+
+    name: str
+    path: str
+    source: str
+
+
+def _discover_agents_sync(work_dir: str | None) -> list[DiscoveredAgent]:
+    # No work_dir → only return user-global specs. Pass a non-existent path;
+    # discover_user_agent_specs silently skips missing project dirs.
+    wd_path = Path(work_dir).expanduser() if work_dir else Path("/nonexistent")
+    discovered = discover_user_agent_specs(wd_path)
+    return [DiscoveredAgent(name=d.name, path=str(d.path), source=d.source) for d in discovered]
+
+
+@agents_router.get("/discovered", summary="List discovered agent specs")
+async def get_discovered_agents(work_dir: str | None = None) -> list[DiscoveredAgent]:
+    """List discovered agent specs from ~/.kimi/agents and optional project dir."""
+    return await asyncio.to_thread(_discover_agents_sync, work_dir)
 
 
 @router.get("/{session_id}/git-diff", summary="Get git diff stats")

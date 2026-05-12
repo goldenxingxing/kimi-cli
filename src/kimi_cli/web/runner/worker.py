@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -49,15 +50,26 @@ async def run_worker(session_id: UUID) -> None:
     # vs a brand-new session that should honor config.default_plan_mode.
     resumed = (session.dir / "state.json").exists()
 
-    # Read per-session config (thinking override); None → falls back to global config
+    # Read per-session config (thinking override, agent spec path);
+    # None → falls back to global config / default agent.
     session_thinking: bool | None = None
+    agent_file: Path | None = None
+    _agent_spec_path: str | None = None
     _cfg_file = session.dir / "session_config.json"
     if _cfg_file.exists():
         try:
             _cfg = json.loads(_cfg_file.read_text(encoding="utf-8"))
             session_thinking = _cfg.get("thinking")
+            _agent_spec_path = _cfg.get("agent_spec_path")
         except Exception:
             pass
+    if _agent_spec_path:
+        _path = Path(_agent_spec_path)
+        if not _path.is_file():
+            raise FileNotFoundError(
+                f"Agent spec file recorded in session_config.json no longer exists: {_path}"
+            )
+        agent_file = _path
 
     # Create KimiCLI instance with MCP configuration
     try:
@@ -67,6 +79,7 @@ async def run_worker(session_id: UUID) -> None:
             resumed=resumed,
             ui_mode="wire",
             thinking=session_thinking,
+            agent_file=agent_file,
         )
     except MCPConfigError as exc:
         logger.warning(
@@ -75,7 +88,12 @@ async def run_worker(session_id: UUID) -> None:
             error=exc,
         )
         kimi_cli = await KimiCLI.create(
-            session, mcp_configs=None, resumed=resumed, ui_mode="wire", thinking=session_thinking
+            session,
+            mcp_configs=None,
+            resumed=resumed,
+            ui_mode="wire",
+            thinking=session_thinking,
+            agent_file=agent_file,
         )
 
     # Run in wire stdio mode

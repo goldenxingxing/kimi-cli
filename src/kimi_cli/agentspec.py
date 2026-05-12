@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import yaml
 from pydantic import BaseModel, Field
@@ -49,6 +49,25 @@ class AgentSpec(BaseModel):
     subagents: dict[str, SubagentSpec] | None | Inherit = Field(
         default=inherit, description="Subagents"
     )
+    # ``None`` = no allowlist filter; ``[]`` = strict empty (nothing passes).
+    allowed_skills: list[str] | None | Inherit = Field(
+        default=inherit, description="Skills allowlist"
+    )
+    excluded_skills: list[str] | None | Inherit = Field(
+        default=inherit, description="Skills to exclude"
+    )
+    allowed_mcp_servers: list[str] | None | Inherit = Field(
+        default=inherit, description="MCP servers allowlist"
+    )
+    allowed_mcp_tools: list[str] | None | Inherit = Field(
+        default=inherit, description='MCP tools allowlist ("server:tool")'
+    )
+    excluded_mcp_tools: list[str] | None | Inherit = Field(
+        default=inherit, description='MCP tools to exclude ("server:tool")'
+    )
+    knowledge_base: bool | Inherit = Field(
+        default=inherit, description="Inject the project knowledge base"
+    )
 
 
 class SubagentSpec(BaseModel):
@@ -71,6 +90,21 @@ class ResolvedAgentSpec:
     allowed_tools: list[str] | None
     exclude_tools: list[str]
     subagents: dict[str, SubagentSpec]
+    allowed_skills: list[str] | None = None
+    excluded_skills: list[str] = field(default_factory=list[str])
+    allowed_mcp_servers: list[str] | None = None
+    allowed_mcp_tools: list[str] | None = None
+    excluded_mcp_tools: list[str] = field(default_factory=list[str])
+    knowledge_base: bool = True
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DiscoveredSpec:
+    """A user-discovered agent spec file."""
+
+    name: str
+    path: Path
+    source: Literal["user", "project"]
 
 
 def load_agent_spec(agent_file: Path) -> ResolvedAgentSpec:
@@ -95,6 +129,18 @@ def load_agent_spec(agent_file: Path) -> ResolvedAgentSpec:
         agent_spec.exclude_tools = []
     if isinstance(agent_spec.subagents, Inherit):
         agent_spec.subagents = {}
+    if isinstance(agent_spec.allowed_skills, Inherit):
+        agent_spec.allowed_skills = None
+    if isinstance(agent_spec.excluded_skills, Inherit):
+        agent_spec.excluded_skills = []
+    if isinstance(agent_spec.allowed_mcp_servers, Inherit):
+        agent_spec.allowed_mcp_servers = None
+    if isinstance(agent_spec.allowed_mcp_tools, Inherit):
+        agent_spec.allowed_mcp_tools = None
+    if isinstance(agent_spec.excluded_mcp_tools, Inherit):
+        agent_spec.excluded_mcp_tools = []
+    if isinstance(agent_spec.knowledge_base, Inherit):
+        agent_spec.knowledge_base = True
     return ResolvedAgentSpec(
         name=agent_spec.name,
         system_prompt_path=agent_spec.system_prompt_path,
@@ -105,6 +151,12 @@ def load_agent_spec(agent_file: Path) -> ResolvedAgentSpec:
         allowed_tools=agent_spec.allowed_tools,
         exclude_tools=agent_spec.exclude_tools or [],
         subagents=agent_spec.subagents or {},
+        allowed_skills=agent_spec.allowed_skills,
+        excluded_skills=agent_spec.excluded_skills or [],
+        allowed_mcp_servers=agent_spec.allowed_mcp_servers,
+        allowed_mcp_tools=agent_spec.allowed_mcp_tools,
+        excluded_mcp_tools=agent_spec.excluded_mcp_tools or [],
+        knowledge_base=agent_spec.knowledge_base,
     )
 
 
@@ -156,5 +208,57 @@ def _load_agent_spec(agent_file: Path) -> AgentSpec:
             base_agent_spec.exclude_tools = agent_spec.exclude_tools
         if not isinstance(agent_spec.subagents, Inherit):
             base_agent_spec.subagents = agent_spec.subagents
+        if not isinstance(agent_spec.allowed_skills, Inherit):
+            base_agent_spec.allowed_skills = agent_spec.allowed_skills
+        if not isinstance(agent_spec.excluded_skills, Inherit):
+            base_agent_spec.excluded_skills = agent_spec.excluded_skills
+        if not isinstance(agent_spec.allowed_mcp_servers, Inherit):
+            base_agent_spec.allowed_mcp_servers = agent_spec.allowed_mcp_servers
+        if not isinstance(agent_spec.allowed_mcp_tools, Inherit):
+            base_agent_spec.allowed_mcp_tools = agent_spec.allowed_mcp_tools
+        if not isinstance(agent_spec.excluded_mcp_tools, Inherit):
+            base_agent_spec.excluded_mcp_tools = agent_spec.excluded_mcp_tools
+        if not isinstance(agent_spec.knowledge_base, Inherit):
+            base_agent_spec.knowledge_base = agent_spec.knowledge_base
         agent_spec = base_agent_spec
     return agent_spec
+
+
+def discover_user_agent_specs(work_dir: Path) -> list[DiscoveredSpec]:
+    """Discover agent spec YAMLs in <work_dir>/.kimi/agents and ~/.kimi/agents.
+
+    Project entries shadow user entries with the same name.
+    """
+    seen: dict[str, DiscoveredSpec] = {}
+    sources: tuple[tuple[Path, Literal["user", "project"]], ...] = (
+        (work_dir / ".kimi" / "agents", "project"),
+        (Path.home() / ".kimi" / "agents", "user"),
+    )
+    for root, source in sources:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.yaml")):
+            if not path.is_file():
+                continue
+            name = _read_spec_name(path) or path.stem
+            seen.setdefault(name, DiscoveredSpec(name=name, path=path, source=source))
+    return list(seen.values())
+
+
+def _read_spec_name(path: Path) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    data: dict[str, Any] = raw  # type: ignore[assignment]
+    agent_raw = data.get("agent")
+    if not isinstance(agent_raw, dict):
+        return None
+    agent: dict[str, Any] = agent_raw  # type: ignore[assignment]
+    name = agent.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None

@@ -98,6 +98,9 @@ class KimiToolset:
         self._mcp_loading_task: asyncio.Task[None] | None = None
         self._deferred_mcp_load: tuple[list[MCPConfig], Runtime] | None = None
         self._hook_engine: HookEngine = HookEngine()
+        # Pending MCP filter spec applied after load_mcp_tools resolves (covers the
+        # deferred load path too, where filtering must run as a continuation).
+        self._mcp_filter: tuple[list[str] | None, list[str] | None, list[str]] | None = None
 
     def set_hook_engine(self, engine: HookEngine) -> None:
         self._hook_engine = engine
@@ -501,6 +504,13 @@ class KimiToolset:
             if failed_servers:
                 _toast_mcp("mcp connection failed")
                 raise MCPRuntimeError(f"Failed to connect MCP servers: {failed_servers}")
+            if self._mcp_filter is not None:
+                allowed_servers, allowed_tools, excluded_tools = self._mcp_filter
+                self.filter_mcp_tools(
+                    allowed_servers=allowed_servers,
+                    allowed_tools=allowed_tools,
+                    excluded_tools=excluded_tools,
+                )
             if unauthorized_servers:
                 _toast_mcp("mcp authorization needed")
             else:
@@ -528,6 +538,59 @@ class KimiToolset:
     def has_pending_mcp_tools(self) -> bool:
         """Return True if the background MCP tool-loading task is still running."""
         return self._mcp_loading_task is not None and not self._mcp_loading_task.done()
+
+    def set_pending_mcp_filter(
+        self,
+        *,
+        allowed_servers: list[str] | None,
+        allowed_tools: list[str] | None,
+        excluded_tools: list[str],
+    ) -> None:
+        """Stage a filter that auto-runs after every load_mcp_tools resolves."""
+        self._mcp_filter = (allowed_servers, allowed_tools, excluded_tools)
+
+    def filter_mcp_tools(
+        self,
+        *,
+        allowed_servers: list[str] | None,
+        allowed_tools: list[str] | None,
+        excluded_tools: list[str],
+    ) -> None:
+        """Drop MCP tools that fail the spec's server/tool filter, in place.
+
+        Tool identifiers use ``"server:tool"``. MCPTool.name carries only the raw
+        tool name (no server prefix), so we look up the owning server via
+        ``self._mcp_servers``. Server-only allowlist drops all tools from
+        non-listed servers; ``excluded_tools`` always wins over ``allowed_tools``.
+        """
+        allowed_servers_set: set[str] | None = (
+            set(allowed_servers) if allowed_servers is not None else None
+        )
+        allowed_tools_set: set[str] | None = (
+            set(allowed_tools) if allowed_tools is not None else None
+        )
+        excluded_tools_set: set[str] = set(excluded_tools)
+
+        to_remove: list[tuple[str, MCPTool[Any]]] = []
+        for server_name, server_info in self._mcp_servers.items():
+            kept: list[MCPTool[Any]] = []
+            for tool in server_info.tools:
+                qualified = f"{server_name}:{tool.name}"
+                if qualified in excluded_tools_set:
+                    to_remove.append((server_name, tool))
+                    continue
+                if allowed_servers_set is not None and server_name not in allowed_servers_set:
+                    to_remove.append((server_name, tool))
+                    continue
+                if allowed_tools_set is not None and qualified not in allowed_tools_set:
+                    to_remove.append((server_name, tool))
+                    continue
+                kept.append(tool)
+            server_info.tools = kept
+
+        for _server_name, tool in to_remove:
+            self._tool_dict.pop(tool.name, None)
+            self._hidden_tools.discard(tool.name)
 
     async def wait_for_mcp_tools(self) -> None:
         """Wait for background MCP tool loading to finish."""

@@ -38,9 +38,26 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { ChevronDown, FolderOpen, Home, Loader2 } from "lucide-react";
+import { getAuthHeader } from "@/lib/auth";
+import { getApiBaseUrl } from "@/hooks/utils";
 import { cn } from "@/lib/utils";
+
+type DiscoveredAgent = {
+  name: string;
+  path: string;
+  source: "user" | "project";
+};
+
+const AGENT_DEBOUNCE_MS = 250;
 
 const HOME_DIR_REGEX = /^(\/Users\/[^/]+|\/home\/[^/]+)/;
 const TRAILING_SLASH_REGEX = /\/$/;
@@ -48,7 +65,12 @@ const TRAILING_SLASH_REGEX = /\/$/;
 type CreateSessionDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (workDir: string, createDir?: boolean, thinking?: boolean) => Promise<void>;
+  onConfirm: (
+    workDir: string,
+    createDir?: boolean,
+    thinking?: boolean,
+    agentName?: string | null,
+  ) => Promise<void>;
   fetchWorkDirs: () => Promise<string[]>;
   fetchStartupDir: () => Promise<string>;
 };
@@ -101,6 +123,10 @@ export function CreateSessionDialog({
   const [commandValue, setCommandValue] = useState("");
   const [thinking, setThinking] = useState(true);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const [agents, setAgents] = useState<DiscoveredAgent[]>([]);
+  const agentCacheRef = useRef<Map<string, DiscoveredAgent[]>>(new Map());
+  const agentFetchTimerRef = useRef<number | null>(null);
   const isCreatingRef = useRef(false);
   const commandListRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation(["sessions", "common"]);
@@ -157,8 +183,73 @@ export function CreateSessionDialog({
       isCreatingRef.current = false;
       setThinking(true);
       setIsAdvancedOpen(false);
+      setAgentName(null);
+      setAgents([]);
+      agentCacheRef.current.clear();
+      if (agentFetchTimerRef.current !== null) {
+        window.clearTimeout(agentFetchTimerRef.current);
+        agentFetchTimerRef.current = null;
+      }
     }
   }, [open]);
+
+  // Fetch discovered agents (user-global on open, project-scoped on work-dir change)
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const fetchAgents = async (workDir: string | null) => {
+      const cacheKey = workDir ?? "";
+      const cached = agentCacheRef.current.get(cacheKey);
+      if (cached) {
+        setAgents(cached);
+        return;
+      }
+
+      try {
+        const basePath = getApiBaseUrl();
+        const url = workDir
+          ? `${basePath}/api/agents/discovered?work_dir=${encodeURIComponent(workDir)}`
+          : `${basePath}/api/agents/discovered`;
+        const response = await fetch(url, { headers: getAuthHeader() });
+        if (!response.ok) {
+          return;
+        }
+        const data: DiscoveredAgent[] = await response.json();
+        agentCacheRef.current.set(cacheKey, data);
+        setAgents(data);
+      } catch (err) {
+        console.error("Failed to fetch discovered agents:", err);
+      }
+    };
+
+    // commandValue is the highlighted/selected path in the Command list. Treat
+    // the dialog-open / no-highlight case as a user-global fetch.
+    const candidate = commandValue.trim();
+    const isPath = candidate.startsWith("/") || candidate.startsWith("~");
+
+    if (!isPath) {
+      fetchAgents(null);
+      return;
+    }
+
+    // Debounce work-dir-dependent refetches as the highlight changes.
+    if (agentFetchTimerRef.current !== null) {
+      window.clearTimeout(agentFetchTimerRef.current);
+    }
+    agentFetchTimerRef.current = window.setTimeout(() => {
+      fetchAgents(candidate);
+      agentFetchTimerRef.current = null;
+    }, AGENT_DEBOUNCE_MS);
+
+    return () => {
+      if (agentFetchTimerRef.current !== null) {
+        window.clearTimeout(agentFetchTimerRef.current);
+        agentFetchTimerRef.current = null;
+      }
+    };
+  }, [open, commandValue]);
 
   const handleSelect = useCallback(
     async (dir: string) => {
@@ -166,7 +257,7 @@ export function CreateSessionDialog({
       isCreatingRef.current = true;
       setIsCreating(true);
       try {
-        await onConfirm(dir, undefined, thinking);
+        await onConfirm(dir, undefined, thinking, agentName);
         onOpenChange(false);
       } catch (err) {
         if (
@@ -182,7 +273,7 @@ export function CreateSessionDialog({
         isCreatingRef.current = false;
       }
     },
-    [onConfirm, onOpenChange, thinking],
+    [onConfirm, onOpenChange, thinking, agentName],
   );
 
   const handleInputSubmit = useCallback(() => {
@@ -200,7 +291,7 @@ export function CreateSessionDialog({
     setIsCreating(true);
     isCreatingRef.current = true;
     try {
-      await onConfirm(pendingPath, true, thinking);
+      await onConfirm(pendingPath, true, thinking, agentName);
       onOpenChange(false);
     } catch (err) {
       console.error("Failed to create directory:", err);
@@ -209,7 +300,7 @@ export function CreateSessionDialog({
       isCreatingRef.current = false;
       setPendingPath("");
     }
-  }, [pendingPath, onConfirm, onOpenChange, thinking]);
+  }, [pendingPath, onConfirm, onOpenChange, thinking, agentName]);
 
   const handleCancelCreateDir = useCallback(() => {
     setShowConfirmCreate(false);
@@ -374,6 +465,38 @@ export function CreateSessionDialog({
                 <ChevronDown className={cn("size-3 transition-transform", isAdvancedOpen && "rotate-180")} />
               </CollapsibleTrigger>
               <CollapsibleContent>
+                <div className="flex items-center justify-between gap-2 px-2 py-2">
+                  <span className="text-xs text-muted-foreground">{t("sessions:advanced.agent")}</span>
+                  <Select
+                    value={agentName ?? "__default__"}
+                    onValueChange={(value) =>
+                      setAgentName(value === "__default__" ? null : value)
+                    }
+                  >
+                    <SelectTrigger size="sm" className="max-w-[60%]">
+                      <SelectValue placeholder={t("sessions:advanced.agentDefault")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">
+                        {t("sessions:advanced.agentDefault")}
+                      </SelectItem>
+                      {agents.map((agent) => (
+                        <SelectItem key={`${agent.source}:${agent.name}`} value={agent.name}>
+                          <span className="flex items-center gap-2">
+                            <span>{agent.name}</span>
+                            <span className="text-[10px] text-muted-foreground">
+                              (
+                              {agent.source === "project"
+                                ? t("sessions:advanced.agentSourceProject")
+                                : t("sessions:advanced.agentSourceUser")}
+                              )
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="flex items-center justify-between px-2 py-2">
                   <span className="text-xs text-muted-foreground">{t("sessions:advanced.thinkingMode")}</span>
                   <Switch
