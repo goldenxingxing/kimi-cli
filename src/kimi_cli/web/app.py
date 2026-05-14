@@ -166,7 +166,11 @@ def create_app(
         except Exception as _e:  # pragma: no cover
             logger.warning("Failed to initialise user database: {err}", err=_e)
 
-        app.state.startup_dir = os.getcwd()
+        # Prefer the user-configured default work dir over the process CWD.
+        # When launched via the macOS .app bundle, uvicorn runs with cwd set
+        # to ~/Library/Application Support/<AppName>, which is not what the
+        # user thinks of as their starting directory.
+        app.state.startup_dir = os.environ.get("KIMI_DEFAULT_WORK_DIR") or os.getcwd()
         app.state.session_token = session_token
         app.state.allowed_origins = allowed_origins
         app.state.enforce_origin = enforce_origin
