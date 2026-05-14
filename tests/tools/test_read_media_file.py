@@ -130,6 +130,33 @@ async def test_read_text_file(read_media_file_tool: ReadMediaFile, temp_work_dir
     assert result.brief == snapshot("Unsupported file type")
 
 
+async def test_read_heic_image_transcoded_to_jpeg(
+    read_media_file_tool: ReadMediaFile, temp_work_dir: KaosPath
+):
+    """HEIC images should be transcoded to JPEG so vision LLMs accept them."""
+    Image = pytest.importorskip("PIL.Image")
+    pytest.importorskip("pillow_heif")
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+
+    image_file = temp_work_dir / "sample.heic"
+    image = Image.new("RGB", (12, 9), color=(255, 128, 0))
+    buf = BytesIO()
+    image.save(buf, format="HEIF")
+    await image_file.write_bytes(buf.getvalue())
+
+    result = await read_media_file_tool(Params(path=str(image_file)))
+
+    assert not result.is_error
+    assert isinstance(result.output, list)
+    part = result.output[1]
+    assert isinstance(part, ImageURLPart)
+    # Critical: served as JPEG, not HEIC, so the LLM API won't 422.
+    assert part.image_url.url.startswith("data:image/jpeg;base64,")
+    assert "image/jpeg" in (result.message or "")
+
+
 async def test_read_video_file_without_capability(runtime: Runtime, temp_work_dir: KaosPath):
     """Test reading a video file without video capability."""
     assert runtime.llm is not None

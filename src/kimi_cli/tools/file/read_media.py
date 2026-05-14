@@ -17,7 +17,38 @@ from kimi_cli.utils.media_tags import wrap_media_part
 from kimi_cli.utils.path import is_within_workspace, kaos_path_from_user_input
 from kimi_cli.wire.types import ImageURLPart, VideoURLPart
 
+# Register HEIF/HEIC/AVIF opener with Pillow at import time so HEIC images
+# can be transcoded for vision LLMs that don't accept image/heic.
+try:
+    from pillow_heif import register_heif_opener  # type: ignore[import-not-found]
+
+    register_heif_opener()
+except Exception:  # pragma: no cover - degraded mode if pillow-heif missing
+    logger.debug("pillow-heif not available; HEIC/HEIF/AVIF will not be transcoded")
+
 MAX_MEDIA_MEGABYTES = 100
+
+# Image MIMEs that vision LLMs commonly reject; transcode to JPEG before sending.
+_LLM_UNSAFE_IMAGE_MIMES = frozenset({"image/heic", "image/heif", "image/avif"})
+
+
+def _transcode_image_to_jpeg(data: bytes) -> bytes | None:
+    """Decode an image and re-encode as JPEG. Returns None on failure."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            if image.mode not in ("RGB", "L"):
+                image = image.convert("RGB")
+            buf = BytesIO()
+            image.save(buf, format="JPEG", quality=90)
+            return buf.getvalue()
+    except Exception as e:
+        logger.warning("Image transcode to JPEG failed: {error}", error=e)
+        return None
 
 
 def _to_data_url(mime_type: str, data: bytes) -> str:
@@ -112,10 +143,31 @@ class ReadMediaFile(CallableTool2[Params]):
         match file_type.kind:
             case "image":
                 data = await path.read_bytes()
-                data_url = _to_data_url(file_type.mime_type, data)
+                effective_mime = file_type.mime_type
+                if effective_mime in _LLM_UNSAFE_IMAGE_MIMES:
+                    transcoded = _transcode_image_to_jpeg(data)
+                    if transcoded is None:
+                        return ToolError(
+                            message=(
+                                f"`{path}` is {effective_mime}, which the model does not "
+                                "accept, and on-the-fly transcoding to JPEG failed."
+                            ),
+                            brief="Unsupported image format",
+                        )
+                    logger.info(
+                        "Transcoded {mime} -> image/jpeg for {path} ({old}B -> {new}B)",
+                        mime=effective_mime,
+                        path=media_path,
+                        old=len(data),
+                        new=len(transcoded),
+                    )
+                    data = transcoded
+                    effective_mime = "image/jpeg"
+                data_url = _to_data_url(effective_mime, data)
                 part = ImageURLPart(image_url=ImageURLPart.ImageURL(url=data_url))
                 wrapped = wrap_media_part(part, tag="image", attrs={"path": media_path})
                 image_size = _extract_image_size(data)
+                file_type = FileType(kind="image", mime_type=effective_mime)
             case "video":
                 data = await path.read_bytes()
                 if (llm := self._runtime.llm) and isinstance(llm.chat_provider, Kimi):

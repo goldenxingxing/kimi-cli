@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from io import BytesIO
+
 from inline_snapshot import snapshot
 from kosong.message import Message
 from kosong.tooling import ToolError, ToolOk
 
 from kimi_cli.llm import ModelCapability
-from kimi_cli.soul.message import check_message, system, tool_result_to_message
+from kimi_cli.soul.message import (
+    check_message,
+    sanitize_image_parts,
+    system,
+    tool_result_to_message,
+)
 from kimi_cli.wire.types import (
     AudioURLPart,
     ImageURLPart,
@@ -331,3 +338,71 @@ def test_check_message_with_text_only():
     missing_capabilities = check_message(message, model_capabilities)
 
     assert missing_capabilities == set()
+
+
+def test_sanitize_image_parts_passes_through_safe_mimes():
+    """JPEG/PNG/WebP/GIF image parts must not be touched."""
+    import base64
+
+    jpeg_url = f"data:image/jpeg;base64,{base64.b64encode(b'fake').decode()}"
+    part = ImageURLPart(image_url=ImageURLPart.ImageURL(url=jpeg_url))
+    msg = Message(role="user", content=[TextPart(text="hi"), part])
+
+    out = sanitize_image_parts([msg])
+
+    assert len(out) == 1
+    # Same object identity when nothing changed
+    assert out[0] is msg
+
+
+def test_sanitize_image_parts_transcodes_heic_to_jpeg():
+    """HEIC data URLs must be transcoded to JPEG before reaching the LLM."""
+    import base64
+
+    Image = __import__("PIL.Image", fromlist=["Image"])
+    pillow_heif = __import__("pillow_heif")
+    pillow_heif.register_heif_opener()
+
+    img = Image.new("RGB", (4, 5), color=(10, 20, 30))
+    buf = BytesIO()
+    img.save(buf, format="HEIF")
+    heic_url = f"data:image/heic;base64,{base64.b64encode(buf.getvalue()).decode()}"
+    part = ImageURLPart(image_url=ImageURLPart.ImageURL(url=heic_url, id="x"))
+    msg = Message(role="user", content=[part])
+
+    out = sanitize_image_parts([msg])
+
+    assert len(out) == 1
+    new_part = out[0].content[0]
+    assert isinstance(new_part, ImageURLPart)
+    assert new_part.image_url.url.startswith("data:image/jpeg;base64,")
+    assert new_part.image_url.id == "x"
+    # Original message untouched
+    assert msg.content[0].image_url.url.startswith("data:image/heic;base64,")
+
+
+def test_sanitize_image_parts_replaces_undecodable_with_text():
+    """Garbage-bytes HEIC must fall back to a text placeholder, not crash."""
+    import base64
+
+    bad_url = f"data:image/heic;base64,{base64.b64encode(b'not really heic').decode()}"
+    part = ImageURLPart(image_url=ImageURLPart.ImageURL(url=bad_url))
+    msg = Message(role="user", content=[part, TextPart(text="caption")])
+
+    out = sanitize_image_parts([msg])
+
+    assert len(out) == 1
+    new_content = out[0].content
+    assert isinstance(new_content[0], TextPart)
+    assert "unsupported format image/heic" in new_content[0].text
+    assert new_content[1] == TextPart(text="caption")
+
+
+def test_sanitize_image_parts_leaves_remote_urls_alone():
+    """Non-data URLs are the provider's problem, not ours."""
+    part = ImageURLPart(image_url=ImageURLPart.ImageURL(url="https://example.com/x.heic"))
+    msg = Message(role="user", content=[part])
+
+    out = sanitize_image_parts([msg])
+
+    assert out[0] is msg
