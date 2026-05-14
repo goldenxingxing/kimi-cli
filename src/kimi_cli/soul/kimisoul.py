@@ -65,7 +65,13 @@ from kimi_cli.soul.dynamic_injections.cross_session_memory import (
 )
 from kimi_cli.soul.dynamic_injections.plan_mode import PlanModeInjectionProvider
 from kimi_cli.soul.dynamic_injections.session_memory import SessionMemoryInjectionProvider
-from kimi_cli.soul.message import check_message, system, system_reminder, tool_result_to_message
+from kimi_cli.soul.message import (
+    check_message,
+    sanitize_image_parts,
+    system,
+    system_reminder,
+    tool_result_to_message,
+)
 from kimi_cli.soul.slash import registry as soul_slash_registry
 from kimi_cli.soul.toolset import KimiToolset
 from kimi_cli.tools.dmail import NAME as SendDMail_NAME
@@ -991,6 +997,10 @@ class KimiSoul:
 
         # Normalize: merge adjacent user messages for clean API input
         effective_history = normalize_history(self._context.history)
+        # Last-line defence: strip any image MIME (HEIC/HEIF/AVIF/...) that
+        # vision LLMs reject. Operates on a copy — history keeps the original
+        # so the UI continues to show what the user uploaded.
+        effective_history = sanitize_image_parts(effective_history)
 
         async def _run_step_once() -> StepResult:
             # run an LLM step (may be interrupted)

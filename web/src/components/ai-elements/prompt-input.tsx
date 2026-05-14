@@ -35,6 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { transcodeHeicFiles } from "@/lib/heic";
 import { IMAGE_CONFIG, VIDEO_CONFIG, MEDIA_CONFIG } from "@/config/media";
 import { useVideoThumbnail } from "@/hooks/useVideoThumbnail";
 import type { ChatStatus, FileUIPart } from "ai";
@@ -159,15 +160,23 @@ export function PromptInputProvider({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const openRef = useRef<() => void>(() => {});
 
-  const add = useCallback((files: File[] | FileList) => {
+  const add = useCallback(async (files: File[] | FileList) => {
     const incoming = Array.from(files);
     if (incoming.length === 0) {
       return;
     }
 
+    // Transcode HEIC/HEIF -> JPEG before they ever enter attachments, so
+    // both the thumbnail (<img src="blob:...">) and the wire payload stay
+    // in a format vision models accept.
+    const processed = await transcodeHeicFiles(incoming);
+    if (processed.length === 0) {
+      return;
+    }
+
     setAttachments((prev) =>
       prev.concat(
-        incoming.map((file) => ({
+        processed.map((file) => ({
           id: nanoid(),
           type: "file" as const,
           url: URL.createObjectURL(file),
@@ -630,18 +639,27 @@ export const PromptInput = ({
   );
 
   const addLocal = useCallback(
-    (fileList: File[] | FileList) => {
+    async (fileList: File[] | FileList) => {
       const validatedFiles = validateAndFilterFiles(fileList);
       if (validatedFiles.length === 0) {
+        return;
+      }
+
+      // Transcode HEIC/HEIF -> JPEG up front. Validation already happened
+      // against the original MIME (which still lists image/heic*), and the
+      // size cap is unlikely to flip after re-encoding, so it's safe to
+      // convert post-validation.
+      const transcoded = await transcodeHeicFiles(validatedFiles);
+      if (transcoded.length === 0) {
         return;
       }
 
       setItems((prev) => {
         const effectiveMaxFiles = maxFiles ?? MEDIA_CONFIG.maxCount;
         const capacity = Math.max(0, effectiveMaxFiles - prev.length);
-        const capped = validatedFiles.slice(0, capacity);
+        const capped = transcoded.slice(0, capacity);
 
-        if (validatedFiles.length > capacity) {
+        if (transcoded.length > capacity) {
           onError?.({
             code: "max_files",
             message: `Too many files. Maximum ${effectiveMaxFiles} files allowed.`,
