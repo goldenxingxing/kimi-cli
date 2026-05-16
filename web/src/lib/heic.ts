@@ -1,5 +1,3 @@
-import { toast } from "sonner";
-
 const HEIC_MIME_TYPES = new Set(["image/heic", "image/heif"]);
 const HEIC_EXT_RE = /\.(heic|heif)$/i;
 
@@ -35,8 +33,9 @@ async function convertHeicToJpeg(file: File): Promise<File> {
 
 /**
  * Walk a File[] / FileList and transparently transcode any HEIC/HEIF entries
- * to JPEG. Non-HEIC files pass through untouched. Files that fail to convert
- * are dropped and the user is notified via a toast.
+ * to JPEG. Non-HEIC files pass through untouched. If client-side conversion
+ * fails (heic2any has poor compatibility with some Apple HEIC variants), the
+ * raw file is passed through so the server can decode it with pillow-heif.
  */
 export async function transcodeHeicFiles(
   files: File[] | FileList,
@@ -52,11 +51,15 @@ export async function transcodeHeicFiles(
       const converted = await convertHeicToJpeg(file);
       out.push(converted);
     } catch (err) {
-      console.error("[heic] conversion failed", file.name, err);
-      toast.error("Failed to convert HEIC image", {
-        description: file.name,
-      });
-      // Skip the bad file so it never makes it into attachments / the wire.
+      // Client-side heic2any has poor compatibility with some Apple HEIC
+      // variants (especially HEVC). Pass the raw file through so the server
+      // (which has pillow-heif) can do the transcoding.
+      console.warn(
+        "[heic] client conversion failed; falling back to server-side decode",
+        file.name,
+        err,
+      );
+      out.push(file);
     }
   }
   return out;
