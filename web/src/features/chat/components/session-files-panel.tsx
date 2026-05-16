@@ -15,6 +15,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { SessionFileEntry } from "@/hooks/useSessions";
 import { cn } from "@/lib/utils";
 
@@ -219,7 +224,7 @@ export function SessionFilesPanel({
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea className="min-h-0 flex-1 [&>[data-radix-scroll-area-viewport]>div]:!block">
         <div className="space-y-2 p-3">
           {isLoading && entries.length === 0 ? (
             <div className="flex min-h-40 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -278,12 +283,16 @@ export function SessionFilesPanel({
                     )}
 
                     <div className="min-w-0 flex-1">
-                      <div
-                        className="truncate text-sm font-medium"
-                        title={entry.name}
-                      >
-                        {entry.name}
-                      </div>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div className="block max-w-full truncate text-sm font-medium">
+                            {entry.name}
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-xs break-all">
+                          {entry.name}
+                        </TooltipContent>
+                      </Tooltip>
                       <div className="text-xs text-muted-foreground">
                         {isDirectory
                           ? t("files.directory")
@@ -296,13 +305,19 @@ export function SessionFilesPanel({
                         type="button"
                         variant="ghost"
                         size="icon-xs"
+                        className="shrink-0"
                         onClick={() => handleOpenDirectory(itemPath)}
                         aria-label={t("files.openDir", { name: entry.name })}
                       >
                         <ChevronRightIcon className="size-3.5" />
                       </Button>
                     ) : onGetSessionFileUrl ? (
-                      <Button asChild variant="ghost" size="icon-xs">
+                      <Button
+                        asChild
+                        variant="ghost"
+                        size="icon-xs"
+                        className="shrink-0"
+                      >
                         <a
                           href={onGetSessionFileUrl(sessionId, itemPath)}
                           download={entry.name}
