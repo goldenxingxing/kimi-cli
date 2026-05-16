@@ -33,6 +33,7 @@ from kimi_cli.web.api import (
     auth_router,
     branding_admin_router,
     branding_public_router,
+    capabilities_router,
     config_router,
     memory_router,
     open_in_router,
@@ -245,6 +246,7 @@ def create_app(
     application.include_router(work_dirs_router)
     application.include_router(agents_router)
     application.include_router(memory_router)
+    application.include_router(capabilities_router)
     if not restrict_sensitive_apis:
         application.include_router(open_in_router)
 

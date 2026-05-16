@@ -169,5 +169,11 @@
     "sessionDirectory": "Session Directory",
     "info": "Session info",
     "copy": "Copy {{label}}"
+  },
+  "system": {
+    "gitBashMissingTitle": "Git for Windows is required",
+    "gitBashMissing": "Shell commands require Git for Windows. Install it from <installLink>{{link}}</installLink> to enable the shell tool.",
+    "gitBashInstall": "Install Git for Windows",
+    "gitBashRefresh": "Refresh"
   }
 }

@@ -169,5 +169,11 @@
     "sessionDirectory": "会话目录",
     "info": "会话信息",
     "copy": "复制{{label}}"
+  },
+  "system": {
+    "gitBashMissingTitle": "需要安装 Git for Windows",
+    "gitBashMissing": "Shell 工具需要 Git for Windows。从 <installLink>{{link}}</installLink> 安装后可启用 shell 命令。",
+    "gitBashInstall": "安装 Git for Windows",
+    "gitBashRefresh": "刷新"
   }
 }
