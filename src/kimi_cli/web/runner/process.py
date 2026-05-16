@@ -24,6 +24,13 @@ from pydantic import TypeAdapter
 from starlette.websockets import WebSocket, WebSocketState
 
 from kimi_cli import logger
+
+try:
+    from pillow_heif import register_heif_opener  # type: ignore[import-not-found]
+
+    register_heif_opener()
+except Exception:  # pragma: no cover - degraded mode if pillow-heif missing
+    logger.debug("pillow-heif not available; uploaded HEIC/HEIF will fail to decode")
 from kimi_cli.config import LLMModel, load_config
 from kimi_cli.llm import ModelCapability, derive_model_capabilities
 from kimi_cli.utils.subprocess_env import get_clean_env
@@ -494,8 +501,7 @@ class SessionProcess:
                         )
                         yield TextPart(text="</image>\n\n")
                 except Exception:
-                    # Skip files that fail to encode - don't block the upload
-                    pass
+                    logger.exception("Failed to encode uploaded image %s", file_path)
             elif is_video_in and mime_type.startswith("video/"):
                 # For video files, emit a <video> tag for frontend display but don't embed content.
                 # The agent will use ReadMediaFile tool to read it, which handles video uploads
