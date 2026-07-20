@@ -4,6 +4,26 @@ This page documents breaking changes in Kimi Code CLI releases and provides migr
 
 ## Unreleased
 
+## 1.49.0
+
+### Kimi no longer sends legacy `reasoning_effort` automatically
+
+Kimi thinking configuration now uses `thinking.type` exclusively. `Kimi.with_thinking(...)` no longer adds the legacy `reasoning_effort` parameter to requests.
+
+- **Affected**: Applications using Kosong's Kimi provider with older Kimi-compatible endpoints that require `reasoning_effort`
+- **Migration**: Update the endpoint to support `thinking.type`. If an older endpoint still requires the legacy parameter, pass it explicitly with `with_generation_kwargs(reasoning_effort="...")`
+
+## 1.43.0
+
+### MCP OAuth token cache moved to `~/.kimi/mcp-oauth/`
+
+Kimi Code CLI now uses FastMCP 3's persistent OAuth storage API for MCP servers and stores MCP OAuth tokens under `~/.kimi/mcp-oauth/`. Tokens from the old FastMCP 2.x cache location are not migrated automatically.
+
+- **Affected**: Users who authorized OAuth MCP servers before upgrading
+- **Migration**: If `kimi mcp list` shows an OAuth server as requiring authorization, run `kimi mcp auth <name>` once to create a new token in `~/.kimi/mcp-oauth/`. Use `kimi mcp reset-auth <name>` before re-authorizing if the stored token becomes invalid or corrupted
+
+## 1.42.0
+
 ### Windows shell backend changed from PowerShell to Git Bash
 
 The Shell tool on Windows now runs commands through `bash.exe` (POSIX semantics) instead of `powershell.exe`. Windows users gain the same Unix-style command syntax as Linux/macOS, but must have Git for Windows installed.

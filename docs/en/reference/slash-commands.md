@@ -216,8 +216,8 @@ Execute a specific flow skill. Flow skills embed an Agent Flow diagram in `SKILL
 
 For example:
 
-- `/flow:code-review`: Execute code review workflow
-- `/flow:release`: Execute release workflow
+- `/flow:pull-request`: Execute the pull-request creation workflow
+- `/flow:code-review`: Execute a code review workflow
 
 ::: tip
 Flow skills can also be invoked via `/skill:<name>`, which loads the content as a standard skill without automatically executing the flow.
@@ -325,6 +325,19 @@ Switch to Web UI. Kimi Code CLI will start a Web UI server and open the current 
 ### `/vis`
 
 Switch to the Agent Tracing Visualizer. Kimi Code CLI will start the visualizer server and open the current session's tracing view in the browser, where you can inspect Wire event timelines, context messages, and usage statistics. See [Agent Tracing Visualizer](./kimi-vis.md) for details.
+
+### `/upgrade`
+
+Install the new Kimi Code — the faster, more powerful successor. Running it shows the install command and asks whether to install immediately:
+
+- Install now: Kimi Code CLI runs the install script, and your existing config and sessions are migrated automatically
+- Install later: only the install command is shown so you can run it manually
+
+After installation, open a new terminal and run `kimi` to start the new Kimi Code.
+
+::: tip Note
+This command is only available in interactive shell mode.
+:::
 
 ## Command completion
 

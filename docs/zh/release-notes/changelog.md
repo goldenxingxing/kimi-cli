@@ -4,11 +4,53 @@
 
 ## 未发布
 
+## 1.49.0 (2026-07-16)
+
+**亮点**：Kimi 供应商的补全 token 预算现在会根据模型剩余上下文窗口动态调整，减少长轮次中的上下文超限错误
+
+- LLM：将 Kimi 的补全 token 预算钳制在模型剩余上下文窗口内——CLI 不再固定发送 `max_tokens=32000`，而是按每次请求估算剩余上下文并据此设置 `max_completion_tokens` 上限。可通过新的环境变量 `KIMI_MODEL_MAX_COMPLETION_TOKENS` 设置显式硬上限（`KIMI_MODEL_MAX_TOKENS` 仍为兼容别名；设为 `0` 或负值可关闭钳制）
+- Kosong：配置 Thinking 模式时不再自动向 Kimi 请求发送旧版 `reasoning_effort` 参数——请求现在仅使用 `thinking.type`，同时保留显式传递旧版参数的兼容能力
+- Kosong：修复 Thinking 模型返回的空字符串 `reasoning_content` 被从历史中丢弃的问题——此前「思考过但内容为空」的回复会被当作「没有思考」，导致要求每条 Assistant 消息都携带 `reasoning_content` 的 Preserved Thinking 后端在下一次请求时返回 400
+
+## 1.47.0 (2026-06-05)
+
+- Shell：引导用户升级到新版独立 Kimi Code——新增 `/upgrade` 命令一键安装（自动迁移现有配置与会话），并新增欢迎界面提示与每天一次的退出提示
+- Shell：命令执行失败时在工具错误简报中显示末尾输出
+
+## 1.46.0 (2026-05-28)
+
+- Shell：欢迎提示支持样式化文本
+- ACP：加载时回放会话历史
+- Core：修复退出时 TTY 挂起的问题
+- Core：在关闭期间断开 MCP 连接
+
+## 1.45.0 (2026-05-26)
+
+- Shell：`/clear` 现在成为 `/new` 的别名——两者都会启动新会话；此前 `/clear` 仅清空上下文而不创建新会话
+- Shell：修复 403 响应一律显示 "Quota exceeded" 前缀的问题
+
+## 1.44.0 (2026-05-13)
+
+- Shell：新增斜杠命令别名解析——别名（如 `/h`、`?`、`status`）现在能正确解析到对应的正式命令（`/help`、`/usage`）；补全器和帮助输出会将别名匹配项显示为 `/name (alias)`，方便识别
+- Shell：修复 `/usage` 的别名注册——别名原先被错误地登记为 `"/status"` 而非 `"status"`，导致别名查找失败
+
+## 1.43.0 (2026-05-12)
+
+- Security：将 pillow 升级到 12.2.0 以修复 CVE-2026-25990（加载 PSD 图像时存在越界写入）；解除在依赖审查严格的环境下因旧版本被阻断而无法安装的限制
+- Shell：修复终端界面中多处视觉间距丢失的问题——在用户输入回显、内容块、工具调用结果、通知、错误面板和 steer 输入等场景后补充空行，避免相邻元素挤在一起
+- Shell：恢复 Markdown 链接高亮样式（链接文本为亮蓝色下划线，URL 为青色下划线），并为 h2-h6 标题添加下划线分隔符；调整表格渲染为带可见边框的方形样式
+- Core：后台任务完成时的系统通知现在包含完成时间戳和运行时长，通知 payload 中新增 `finished_at` 和 `duration_s` 字段，方便追踪
+- MCP：将 MCP 客户端栈升级到 FastMCP 3.2.4，避免 FastMCP OAuth 启动路径打印 Authlib 弃用警告
+- MCP：使用 FastMCP 3 的持久化存储 API，将 OAuth MCP token 存储在 `~/.kimi/mcp-oauth/`；已有 OAuth MCP 授权的用户升级后可能需要重新运行一次 `kimi mcp auth <name>`
+
+## 1.42.0 (2026-05-11)
+
 - Shell：把 Windows 上的 Shell 后端从 PowerShell 切换到 Git Bash——Shell 工具现在通过 `bash.exe`（POSIX 语义）执行命令，而不再使用 `powershell.exe`。Windows 用户能使用与 Linux/macOS 一致的 Unix 风格语法（`&&`、`||`、`|`、`/dev/null`、`grep`、`sed` 等）。**需要先安装 Git for Windows**：kimi-cli 按以下顺序查找 `bash.exe`：环境变量 `KIMI_CLI_GIT_BASH_PATH` → `where.exe git` → 标准安装路径（`C:\Program Files\Git\bin\bash.exe`）；如果都找不到，启动时打印安装提示并退出
 - Shell：防御 Windows 上模型偶尔幻觉出的 CMD 风格 `2>nul` 重定向——在命令进入 git-bash 前自动改写为 `2>/dev/null`；如果不防御，git-bash 会真的创建一个名为 `nul` 的文件（Windows 保留设备名），破坏 `git add .` 和 `git clone`。该改写仅在 Windows 上生效；Linux/macOS 上 `>nul` 是合法的写入到名为 `nul` 文件的重定向，保持原样
 - File：`ReadFile`、`WriteFile`、`StrReplaceFile`、`Glob`、`Grep` 在 Windows 上接受 POSIX 形式的路径——除原生 Windows 路径外，这些工具现在能识别 `/c/Users/foo`（Git Bash 形式）、`/cygdrive/c/Users/foo`（Cygwin 形式）和 `\\server\share`（UNC 形式），并在文件系统操作前自动转换为原生形式
 - Shell：在 LLM 步骤重试时清除已流式输出的不完整内容——以前，如果某个步骤在流式输出中途失败（例如触发速率限制或服务器错误），被中断尝试所产生的未完成文本和未结束的工具调用块会留在屏幕上，并与新尝试的输出混在一起。现在 Shell 界面会丢弃这部分不完整状态，并打印一条重试横幅，显示失败原因、尝试次数和等待时间；Print 模式也会在重试时丢弃已缓冲的 Assistant 消息
 - Wire：协议版本升级到 1.10——新增 `StepRetry` 事件，在步骤尝试失败并即将重试时发出，携带尝试次数、等待时间和错误详情
+- Core：不再向子代理注入 plan 模式和 afk 模式的工作流 prompt——子代理会共享会话级模式状态以支持持久化和恢复，但其 YAML 通常不包含 `EnterPlanMode`、`ExitPlanMode`、`AskUserQuestion` 等 root 工作流工具。现在这些 prompt injection 只注入给 root agent。Plan 模式下工具层的只读检查保持不变，行为兼容性不受影响
 
 ## 1.41.0 (2026-04-30)
 

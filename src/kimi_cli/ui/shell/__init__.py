@@ -32,6 +32,7 @@ from kimi_cli.ui.shell import update as _update_mod
 from kimi_cli.ui.shell.console import console
 from kimi_cli.ui.shell.echo import render_user_echo_text
 from kimi_cli.ui.shell.mcp_status import render_mcp_prompt
+from kimi_cli.ui.shell.migration_nudge import print_migration_goodbye
 from kimi_cli.ui.shell.prompt import (
     BgTaskCounts,
     CustomPromptSession,
@@ -200,16 +201,38 @@ class Shell:
         self._current_prompt_approval_request: ApprovalRequest | None = None
         self._approval_modal: ApprovalPromptDelegate | None = None
         self._exit_after_run = False
+        soul_slash_commands = list(soul.available_slash_commands)
+        shell_slash_commands = shell_slash_registry.list_commands()
         self._available_slash_commands: dict[str, SlashCommand[Any]] = {
-            **{cmd.name: cmd for cmd in soul.available_slash_commands},
-            **{cmd.name: cmd for cmd in shell_slash_registry.list_commands()},
+            **{cmd.name: cmd for cmd in soul_slash_commands},
+            **{cmd.name: cmd for cmd in shell_slash_commands},
         }
-        """Shell-level slash commands + soul-level slash commands. Name to command mapping."""
+        """Shell-level slash commands + soul-level slash commands. Primary name mapping."""
+        self._available_slash_command_index = self._index_slash_commands(
+            [*soul_slash_commands, *shell_slash_commands]
+        )
+        """Shell-level slash commands + soul-level slash commands.
+        Primary name and alias mapping.
+        """
 
     @property
     def available_slash_commands(self) -> dict[str, SlashCommand[Any]]:
         """Get all available slash commands, including shell-level and soul-level commands."""
         return self._available_slash_commands
+
+    @staticmethod
+    def _index_slash_commands(commands: list[SlashCommand[Any]]) -> dict[str, SlashCommand[Any]]:
+        indexed: dict[str, SlashCommand[Any]] = {}
+        for command in commands:
+            indexed[command.name] = command
+            for alias in command.aliases:
+                indexed[alias] = command
+        return indexed
+
+    def _find_available_slash_command(self, name: str) -> SlashCommand[Any] | None:
+        return self._available_slash_command_index.get(name) or self._available_slash_commands.get(
+            name
+        )
 
     def _print_cwd_lost_crash(self) -> None:
         """Print a crash report when the working directory is no longer accessible."""
@@ -281,6 +304,7 @@ class Shell:
     @staticmethod
     def _echo_agent_input(user_input: UserInput) -> None:
         console.print(render_user_echo_text(user_input.command))
+        console.print()
 
     def _bind_running_input(
         self,
@@ -555,7 +579,7 @@ class Shell:
                         else:
                             bg_auto_failures = 0
                         if self._exit_after_run:
-                            console.print("Bye!")
+                            print_migration_goodbye(console)
                             break
                         continue
 
@@ -573,7 +597,7 @@ class Shell:
                         continue
 
                     if event.kind == "eof":
-                        console.print("Bye!")
+                        print_migration_goodbye(console)
                         break
 
                     if event.kind == "cwd_lost":
@@ -600,7 +624,7 @@ class Shell:
 
                     if self._should_exit_input(user_input):
                         logger.debug("Exiting by slash command")
-                        console.print("Bye!")
+                        print_migration_goodbye(console)
                         break
 
                     if user_input.mode == PromptMode.SHELL:
@@ -621,9 +645,6 @@ class Shell:
                     )
                     action = classify_input(input_text, is_streaming=False)
                     if action.kind == InputAction.BTW and isinstance(self.soul, KimiSoul):
-                        from kimi_cli.telemetry import track
-
-                        track("input_btw")
                         await self._run_btw_modal(action.args, prompt_session)
                         resume_prompt.set()
                         continue
@@ -633,20 +654,22 @@ class Shell:
                         continue
 
                     if slash_cmd_call := self._agent_slash_command_call(user_input):
+                        available_command = self._find_available_slash_command(slash_cmd_call.name)
                         is_soul_slash = (
-                            slash_cmd_call.name in self._available_slash_commands
+                            available_command is not None
                             and shell_slash_registry.find_command(slash_cmd_call.name) is None
                         )
                         if is_soul_slash:
                             from kimi_cli.telemetry import track
 
-                            track("input_command", command=slash_cmd_call.name)
+                            assert available_command is not None
+                            track("input_command", command=available_command.name)
                             background_autotrigger_armed = True
                             resume_prompt.set()
                             await self.run_soul_command(slash_cmd_call.raw_input)
                             console.print()
                             if self._exit_after_run:
-                                console.print("Bye!")
+                                print_migration_goodbye(console)
                                 break
                         else:
                             await self._run_slash_command(slash_cmd_call)
@@ -658,7 +681,7 @@ class Shell:
                     await self.run_soul_command(user_input.content)
                     console.print()
                     if self._exit_after_run:
-                        console.print("Bye!")
+                        print_migration_goodbye(console)
                         break
             finally:
                 prompt_task.cancel()
@@ -754,7 +777,8 @@ class Shell:
         from kimi_cli.cli import Reload, SwitchToVis, SwitchToWeb
         from kimi_cli.telemetry import track
 
-        if command_call.name not in self._available_slash_commands:
+        available_command = self._find_available_slash_command(command_call.name)
+        if available_command is None:
             logger.info("Unknown slash command /{command}", command=command_call.name)
             track("input_command_invalid")
             console.print(
@@ -763,7 +787,7 @@ class Shell:
             )
             return
 
-        track("input_command", command=command_call.name)
+        track("input_command", command=available_command.name)
 
         command = shell_slash_registry.find_command(command_call.name)
         if command is None:
@@ -818,6 +842,14 @@ class Shell:
 
         captured_view: _PromptLiveView | None = None
         pending: list[UserInput] = []  # queued messages being drained
+        get_trace_id: Callable[[], str | None] | None = None
+        if isinstance(self.soul, KimiSoul):
+            root_soul = self.soul
+
+            def get_root_trace_id() -> str | None:
+                return root_soul.root_trace_id
+
+            get_trace_id = get_root_trace_id
 
         try:
             snap = self.soul.status
@@ -847,6 +879,7 @@ class Shell:
                     cancel_event=cancel_event,
                     prompt_session=self._prompt_session,
                     steer=self.soul.steer if isinstance(self.soul, KimiSoul) else None,
+                    get_trace_id=get_trace_id,
                     btw_runner=self._make_btw_runner(),
                     bind_running_input=self._bind_running_input,
                     unbind_running_input=self._unbind_running_input,
@@ -885,6 +918,7 @@ class Shell:
                     break
                 queued = pending.pop(0)
                 console.print(render_user_echo_text(queued.command))
+                console.print()
                 await run_soul(
                     self.soul,
                     queued.content,
@@ -899,6 +933,7 @@ class Shell:
                         cancel_event=cancel_event,
                         prompt_session=self._prompt_session,
                         steer=self.soul.steer if isinstance(self.soul, KimiSoul) else None,
+                        get_trace_id=get_trace_id,
                         btw_runner=self._make_btw_runner(),
                         bind_running_input=self._bind_running_input,
                         unbind_running_input=self._unbind_running_input,
@@ -947,10 +982,7 @@ class Shell:
                     f"[red]Membership expired, please renew your plan[/red]\n[dim]Server: {e}[/dim]"
                 )
             elif isinstance(e, APIStatusError) and e.status_code == 403:
-                console.print(
-                    "[red]Quota exceeded, please upgrade your plan or retry later[/red]\n"
-                    f"[dim]Server: {e}[/dim]"
-                )
+                console.print(f"[red]Server: {e}[/red]")
             elif isinstance(e, APIConnectionError):
                 console.print(
                     f"[red]Network connection failed: {e}[/red]\n"
@@ -982,12 +1014,6 @@ class Shell:
             )
         except RunCancelled:
             logger.info("Cancelled by user")
-            from kimi_cli.telemetry import track
-
-            _at_step = (
-                getattr(self.soul, "_current_step_no", 0) if isinstance(self.soul, KimiSoul) else 0
-            )
-            track("turn_interrupted", at_step=_at_step)
             console.print("[red]Interrupted by user[/red]")
         except Exception as e:
             logger.exception("Unexpected error:")
@@ -1460,7 +1486,7 @@ class WelcomeInfoItem:
         ERROR = "red"
 
     name: str
-    value: str
+    value: str | Text
     level: Level = Level.INFO
 
 
@@ -1480,7 +1506,10 @@ def _print_welcome_info(name: str, info_items: list[WelcomeInfoItem]) -> None:
     if info_items:
         rows.append(Text(""))  # empty line
     for item in info_items:
-        rows.append(Text(f"{item.name}: {item.value}", style=item.level.value))
+        if isinstance(item.value, Text):
+            rows.append(Text.assemble(f"{item.name}: ", item.value, style=item.level.value))
+        else:
+            rows.append(Text(f"{item.name}: {item.value}", style=item.level.value))
 
     if LATEST_VERSION_FILE.exists():
         from kimi_cli.constant import VERSION as current_version

@@ -130,8 +130,9 @@ Support for levels above ``high`` varies by provider:
 - **OpenAI**: ``xhigh`` is accepted natively for reasoning-capable models
   after ``gpt-5.1-codex-max`` and passes through unchanged. ``max`` is
   Anthropic-specific and clamps to ``xhigh`` (OpenAI's ceiling).
-- **Kimi / Gemini**: ``xhigh`` and ``max`` clamp to ``high`` (no native
-  support).
+- **Kimi**: requests only serialize thinking as enabled or disabled; the
+  caller-provided effort remains unchanged as provider state.
+- **Gemini**: ``xhigh`` and ``max`` clamp to ``high`` (no native support).
 """
 
 
@@ -155,11 +156,20 @@ class APIStatusError(ChatProviderError):
 
     status_code: int
     request_id: str | None
+    trace_id: str | None
 
-    def __init__(self, status_code: int, message: str, *, request_id: str | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.request_id = request_id
+        self.trace_id = trace_id
 
 
 class APIEmptyResponseError(ChatProviderError):
@@ -182,5 +192,8 @@ def convert_httpx_error(error: httpx.HTTPError) -> ChatProviderError:
         return APIConnectionError(str(error))
     if isinstance(error, httpx.HTTPStatusError):
         req_id = error.response.headers.get("x-request-id")
-        return APIStatusError(error.response.status_code, str(error), request_id=req_id)
+        trace_id = error.response.headers.get("x-trace-id")
+        return APIStatusError(
+            error.response.status_code, str(error), request_id=req_id, trace_id=trace_id
+        )
     return ChatProviderError(f"HTTP error: {error}")
