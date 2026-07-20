@@ -39,6 +39,8 @@ export type VirtualizedMessageListProps = {
   onAtBottomChange?: (atBottom: boolean) => void;
   /** Callback to fork session from before a specific turn */
   onForkSession?: (turnIndex: number) => void;
+  /** True while history is being replayed into the list */
+  isReplayingHistory?: boolean;
 };
 
 export type VirtualizedMessageListHandle = {
@@ -156,6 +158,7 @@ function VirtualizedMessageListComponent(
     highlightedMessageIndex = -1,
     onAtBottomChange,
     onForkSession,
+    isReplayingHistory = false,
   }: VirtualizedMessageListProps,
   ref: React.Ref<VirtualizedMessageListHandle>,
 ) {
@@ -194,6 +197,11 @@ function VirtualizedMessageListComponent(
   // default tight threshold for the scroll-to-bottom button.
   const handleFollowOutput = useCallback(
     (isAtBottom: boolean) => {
+      // During history replay the list is rebuilt from empty and hundreds
+      // of messages stream in within a few frames.  The scroll gap easily
+      // exceeds the 1500px tolerance below, which would permanently pin
+      // the viewport to the top — always stick to the bottom instead.
+      if (isReplayingHistory) return "auto" as const;
       if (isAtBottom) return "auto" as const;
       const scroller = scrollerRef.current;
       if (scroller) {
@@ -203,7 +211,7 @@ function VirtualizedMessageListComponent(
       }
       return false;
     },
-    [],
+    [isReplayingHistory],
   );
 
   useImperativeHandle(

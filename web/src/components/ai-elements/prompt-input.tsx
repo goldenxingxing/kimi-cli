@@ -986,6 +986,10 @@ export const PromptInputTextarea = forwardRef<
         if (e.shiftKey) {
           return;
         }
+        // Ctrl+Enter / Cmd+Enter inserts a newline instead of submitting
+        if (e.ctrlKey || e.metaKey) {
+          return;
+        }
         e.preventDefault();
 
         // Check if the submit button is disabled before submitting

@@ -94,7 +94,7 @@ export const UserMessageContent = ({
   return (
     <div
       className={cn(
-        "w-full rounded-2xl bg-secondary/50 px-4 py-3 text-sm",
+        "ml-auto w-fit max-w-[85%] rounded-2xl bg-secondary/50 px-4 py-3 text-sm",
         "dark:bg-secondary/30",
         className,
       )}

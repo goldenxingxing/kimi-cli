@@ -476,19 +476,62 @@ export function useSessionStream(
   // approval/question dialogs.  Called only when the backend confirms no
   // active turn (idle / stopped / error), so it won't dismiss legitimate
   // pending approvals on a busy session (e.g. after a tab switch).
-  const interruptStaleToolCalls = useCallback(() => {
-    pendingApprovalRequestsRef.current.clear();
-    pendingQuestionRequestsRef.current.clear();
-    setMessages((prev) =>
-      prev.map((msg) => {
-        if (msg.variant !== "tool" || !msg.toolCall) return msg;
-        const state = msg.toolCall.state;
-        if (
-          state === "approval-requested" ||
-          state === "question-requested" ||
-          state === "input-streaming" ||
-          state === "input-available"
-        ) {
+  //
+  // preserveUnsubmitted: on a bare "idle" snapshot (e.g. after a worker
+  // restart cleared the backend's in-flight set) keep approvals/questions
+  // that are still registered as actionable.  The worker may re-issue the
+  // request once it resumes; killing the dialog here would leave the user
+  // stuck with no way to answer.  Explicit stop/error still clears all.
+  const interruptStaleToolCalls = useCallback(
+    (options?: { preserveUnsubmitted?: boolean }) => {
+      const preserve = options?.preserveUnsubmitted ?? false;
+      const liveApprovalIds = new Set<string>();
+      const liveQuestionIds = new Set<string>();
+      if (preserve) {
+        for (const [id, p] of pendingApprovalRequestsRef.current) {
+          if (p.submitted) {
+            pendingApprovalRequestsRef.current.delete(id);
+          } else {
+            liveApprovalIds.add(p.requestId);
+          }
+        }
+        for (const [id, p] of pendingQuestionRequestsRef.current) {
+          if (p.submitted) {
+            pendingQuestionRequestsRef.current.delete(id);
+          } else {
+            liveQuestionIds.add(p.requestId);
+          }
+        }
+      } else {
+        pendingApprovalRequestsRef.current.clear();
+        pendingQuestionRequestsRef.current.clear();
+      }
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.variant !== "tool" || !msg.toolCall) return msg;
+          const state = msg.toolCall.state;
+          if (
+            preserve &&
+            state === "approval-requested" &&
+            msg.toolCall.approval &&
+            liveApprovalIds.has(msg.toolCall.approval.id)
+          ) {
+            return msg;
+          }
+          if (
+            preserve &&
+            state === "question-requested" &&
+            msg.toolCall.question &&
+            liveQuestionIds.has(msg.toolCall.question.id)
+          ) {
+            return msg;
+          }
+          if (
+            state === "approval-requested" ||
+            state === "question-requested" ||
+            state === "input-streaming" ||
+            state === "input-available"
+          ) {
           return {
             ...msg,
             isStreaming: false,
@@ -518,10 +561,12 @@ export function useSessionStream(
             },
           };
         }
-        return msg;
-      }),
-    );
-  }, [setMessages]);
+          return msg;
+        }),
+      );
+    },
+    [setMessages],
+  );
 
   const applySessionStatus = useCallback(
     (payload: SessionStatusPayload) => {
@@ -561,7 +606,13 @@ export function useSessionStream(
           setAwaitingFirstResponse(false);
           awaitingIdleRef.current = false;
           completeStreamingMessages();
-          interruptStaleToolCalls();
+          // A bare "idle" may be a post-restart snapshot where the backend
+          // lost its in-flight set but the worker can still re-issue pending
+          // approvals — keep those dialogs alive.  An explicit "stopped"
+          // (user cancel) clears everything.
+          interruptStaleToolCalls({
+            preserveUnsubmitted: normalized.state === "idle",
+          });
 
           // Trigger onFirstTurnComplete only after at least one turn has completed
           if (hasTurnStartedRef.current && !firstTurnCompleteCalledRef.current) {
@@ -1425,18 +1476,27 @@ export function useSessionStream(
                 }
 
                 setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === messageId && msg.toolCall
-                      ? {
-                          ...msg,
-                          toolCall: {
-                            ...msg.toolCall,
-                            state: "input-available" as ToolUIPart["state"],
-                            input: parsedInput,
-                          },
-                        }
-                      : msg,
-                  ),
+                  prev.map((msg) => {
+                    if (msg.id !== messageId || !msg.toolCall) return msg;
+                    // Never downgrade a pending approval back to
+                    // "input-available" — a late/duplicate arguments part
+                    // would otherwise silently dismiss the approval dialog
+                    // while the backend is still waiting for an answer.
+                    if (
+                      msg.toolCall.state === "approval-requested" &&
+                      !msg.toolCall.approval?.submitted
+                    ) {
+                      return msg;
+                    }
+                    return {
+                      ...msg,
+                      toolCall: {
+                        ...msg.toolCall,
+                        state: "input-available" as ToolUIPart["state"],
+                        input: parsedInput,
+                      },
+                    };
+                  }),
                 );
               }
             }
@@ -1555,8 +1615,12 @@ export function useSessionStream(
             );
           }
 
-          // Extract todo list from display blocks
-          if (!isReplay && Array.isArray(return_value.display)) {
+          // Extract todo list from display blocks.  Also run during replay:
+          // the wire is replayed in order, so the LAST todo block wins and
+          // restores the latest task state when (re)opening a session —
+          // otherwise the Tasks panel stays empty/stale after a session
+          // switch until the agent happens to call SetTodoList again.
+          if (Array.isArray(return_value.display)) {
             const todoBlock = return_value.display.find(
               (d: { type: string }) => d.type === "todo",
             );

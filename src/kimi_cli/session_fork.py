@@ -265,9 +265,10 @@ async def fork_session(
         for line in truncated_context_lines:
             f.write(line + "\n")
 
-    # Set title
+    # Set title and inherit ownership (without owner_id the forked session is
+    # filtered out of the session list for authenticated users — looks "killed")
+    src_state = load_session_state(source_session_dir)
     if source_title is None:
-        src_state = load_session_state(source_session_dir)
         source_title = src_state.custom_title or "Untitled"
 
     fork_title = f"{title_prefix}: {source_title}"
@@ -276,6 +277,7 @@ async def fork_session(
     new_state.custom_title = fork_title
     new_state.title_generated = True
     new_state.wire_mtime = new_wire_path.stat().st_mtime
+    new_state.owner_id = src_state.owner_id
     save_session_state(new_state, new_session_dir)
 
     return new_session.id

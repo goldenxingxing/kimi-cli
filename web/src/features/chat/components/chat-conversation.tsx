@@ -191,6 +191,7 @@ export function ChatConversation({
             highlightedMessageIndex={highlightedIndex}
             onAtBottomChange={setIsAtBottom}
             onForkSession={onForkSession}
+            isReplayingHistory={isReplayingHistory}
           />
         </div>
       )}
