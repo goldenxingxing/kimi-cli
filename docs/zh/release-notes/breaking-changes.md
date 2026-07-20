@@ -4,6 +4,26 @@
 
 ## 未发布
 
+## 1.49.0
+
+### Kimi 不再自动发送旧版 `reasoning_effort`
+
+Kimi 的 Thinking 配置现在仅使用 `thinking.type`。`Kimi.with_thinking(...)` 不再自动把旧版 `reasoning_effort` 参数加入请求。
+
+- **受影响**：通过 Kosong 的 Kimi 供应商连接仍要求 `reasoning_effort` 的旧版 Kimi 兼容端点的应用
+- **迁移**：将端点升级为支持 `thinking.type`。如果旧版端点仍要求该参数，请通过 `with_generation_kwargs(reasoning_effort="...")` 显式传入
+
+## 1.43.0
+
+### MCP OAuth token 缓存迁移到 `~/.kimi/mcp-oauth/`
+
+Kimi Code CLI 现在为 MCP 服务器使用 FastMCP 3 的持久化 OAuth 存储 API，并将 MCP OAuth token 存储在 `~/.kimi/mcp-oauth/`。旧 FastMCP 2.x 缓存位置中的 token 不会自动迁移。
+
+- **受影响**：升级前已经授权过 OAuth MCP 服务器的用户
+- **迁移**：如果 `kimi mcp list` 显示某个 OAuth 服务器需要授权，请运行一次 `kimi mcp auth <name>`，在 `~/.kimi/mcp-oauth/` 中创建新的 token。如果已存储的 token 失效或损坏，可先运行 `kimi mcp reset-auth <name>` 再重新授权
+
+## 1.42.0
+
 ### Windows Shell 后端从 PowerShell 切换为 Git Bash
 
 Windows 上的 Shell 工具现在通过 `bash.exe`（POSIX 语义）执行命令，不再使用 `powershell.exe`。Windows 用户获得与 Linux/macOS 一致的 Unix 风格命令语法，但需要先安装 Git for Windows。

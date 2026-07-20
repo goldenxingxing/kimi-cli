@@ -11,11 +11,53 @@ Only write entries that are worth mentioning to users.
 
 ## Unreleased
 
+## 1.49.0 (2026-07-16)
+
+**Highlights**: The completion-token budget for Kimi providers now adapts to the model's remaining context window, reducing context-length overflow errors on long turns
+
+- LLM: Clamp the Kimi completion-token budget to the model's remaining context window — the CLI no longer sends a fixed `max_tokens=32000` but estimates the remaining context for each request and caps `max_completion_tokens` accordingly. Set the new `KIMI_MODEL_MAX_COMPLETION_TOKENS` env var for an explicit hard cap (`KIMI_MODEL_MAX_TOKENS` remains a compatibility alias; `0` or a negative value disables clamping)
+- Kosong: Stop Kimi from automatically sending the legacy `reasoning_effort` parameter when configuring thinking — requests now use `thinking.type` exclusively while preserving explicit legacy passthrough
+- Kosong: Fix empty-string `reasoning_content` from thinking models being dropped from history — a reply that reasoned but ended with empty reasoning was recorded as having no reasoning at all, so Preserved Thinking backends that require `reasoning_content` on every assistant message rejected the next request with a 400
+
+## 1.47.0 (2026-06-05)
+
+- Shell: Guide users to the new standalone Kimi Code — adds a `/upgrade` command that installs it (migrating your config & sessions automatically), a welcome-screen nudge, and a once-per-day tip shown on exit
+- Shell: Show trailing output in tool error briefs when commands fail
+
+## 1.46.0 (2026-05-28)
+
+- Shell: Support styled text in welcome tips
+- ACP: Replay session history on load
+- Core: Prevent TTY hang on exit
+- Core: Close MCP connections during shutdown
+
+## 1.45.0 (2026-05-26)
+
+- Shell: `/clear` is now an alias for `/new` — both commands start a new session; previously `/clear` only cleared context without creating a new session
+- Shell: Fix misleading "Quota exceeded" prefix shown on every 403 error
+
+## 1.44.0 (2026-05-13)
+
+- Shell: Add slash command alias resolution — aliases such as `/h`, `?`, and `status` now resolve to their canonical commands (`/help`, `/usage`); the completer and help output display alias matches as `/name (alias)` for clarity
+- Shell: Fix `/usage` alias registration — the alias was incorrectly stored as `"/status"` instead of `"status"`, causing alias lookup to fail
+
+## 1.43.0 (2026-05-12)
+
+- Security: Bump pillow to 12.2.0 to address CVE-2026-25990 (out-of-bounds write when loading PSD images); unblocks installs in environments that gate on the older pinned version
+- Shell: Fix missing visual spacing in the shell UI — add blank lines after user input echoes, content blocks, tool call results, notifications, error panels, and steer inputs so consecutive elements no longer collapse together
+- Shell: Restore markdown link highlighting (bright blue underlined text and cyan underlined URLs) and add underline separators to h2-h6 headings; adjust table rendering to use square box borders with visible edges
+- Core: Include completion timestamp and elapsed duration in background task terminal notifications, and add `finished_at` and `duration_s` to the notification payload for easier tracking
+- MCP: Stop FastMCP OAuth startup from printing Authlib deprecation warnings by upgrading the MCP client stack to FastMCP 3.2.4
+- MCP: Store OAuth MCP tokens in `~/.kimi/mcp-oauth/` using FastMCP 3's persistent storage API; users with existing OAuth MCP authorizations may need to run `kimi mcp auth <name>` once after upgrading
+
+## 1.42.0 (2026-05-11)
+
 - Shell: Switch the Windows shell backend from PowerShell to Git Bash, so the Shell tool now runs commands through `bash.exe` (POSIX semantics) instead of `powershell.exe`. Windows users get the same Unix-style command syntax (`&&`, `||`, `|`, `/dev/null`, `grep`, `sed`, etc.) as Linux/macOS. **Requires Git for Windows installed**: kimi-cli locates `bash.exe` via the `KIMI_CLI_GIT_BASH_PATH` env override → `where.exe git` → standard install paths (`C:\Program Files\Git\bin\bash.exe`); if none resolve, kimi-cli prints an install hint and exits at startup
 - Shell: Defend against hallucinated CMD-style `2>nul` redirects on Windows by rewriting them to `2>/dev/null` before reaching git-bash — without this defense git-bash would create a file literally named `nul` (a Windows reserved device name) that breaks `git add .` and `git clone`; on Linux/macOS, `>nul` is a legitimate redirect to a file named `nul` and is left untouched
 - File: Accept POSIX-form paths on Windows in `ReadFile`, `WriteFile`, `StrReplaceFile`, `Glob`, and `Grep` — these tools now recognize `/c/Users/foo` (Git Bash style), `/cygdrive/c/Users/foo` (Cygwin style), and `\\server\share` (UNC) in addition to native Windows paths, automatically converting to native form for filesystem operations
 - Shell: Clear partial streamed output when an LLM step is retried — previously, if a step failed mid-stream (e.g. rate limit or server error), the incomplete text and unfinished tool-call blocks from the aborted attempt would remain on screen and be mixed with the new attempt's output. The shell UI now discards the partial state and prints a retry banner showing the reason, attempt count, and wait time; print mode also discards buffered assistant messages on retry
 - Wire: Bump protocol version to 1.10 — add `StepRetry` event emitted when a step attempt fails and will be retried, carrying attempt count, wait time, and error details
+- Core: Stop plan-mode and afk-mode workflow prompts from being injected into subagents — subagents share session-level mode state for persistence, but their YAMLs typically exclude root workflow tools such as `EnterPlanMode`, `ExitPlanMode`, and `AskUserQuestion`. These prompt injections are now root-only. Tool-level read-only checks under plan mode are unchanged, so behavior compatibility is preserved
 
 ## 1.41.0 (2026-04-30)
 

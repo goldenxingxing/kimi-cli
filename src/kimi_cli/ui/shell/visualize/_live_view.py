@@ -130,9 +130,11 @@ class _LiveView:
         initial_status: StatusUpdate,
         cancel_event: asyncio.Event | None = None,
         *,
+        get_trace_id: Callable[[], str | None] | None = None,
         show_thinking_stream: bool = False,
     ):
         self._cancel_event = cancel_event
+        self._get_trace_id = get_trace_id
         self._show_thinking_stream = show_thinking_stream
 
         self._mooning_spinner = Spinner("moon", "")
@@ -160,6 +162,9 @@ class _LiveView:
 
         self._need_recompose = False
         self._external_messages: Queue[WireMessage] = Queue()
+
+    def _current_trace_id(self) -> str | None:
+        return self._get_trace_id() if self._get_trace_id is not None else None
 
     def _reset_live_shape(self, live: Live) -> None:
         # Rich doesn't expose a public API to clear Live's cached render height.
@@ -442,6 +447,7 @@ class _LiveView:
                 else:
                     content = [TextPart(text=user_input)]
                 console.print(render_user_echo(Message(role="user", content=content)))
+                console.print()
             case TurnEnd():
                 self._active_turn_depth = max(0, self._active_turn_depth - 1)
             case CompactionBegin():
@@ -475,6 +481,7 @@ class _LiveView:
                             padding=(0, 1),
                         )
                     )
+                    console.print()
                 elif error:
                     console.print(
                         Panel(
@@ -484,6 +491,7 @@ class _LiveView:
                             padding=(0, 1),
                         )
                     )
+                    console.print()
                 self.refresh_soon()
             case StatusUpdate():
                 self._status_block.update(msg)
@@ -550,7 +558,12 @@ class _LiveView:
         if all_done:
             from kimi_cli.telemetry import track
 
-            track("question_answered", method=method)
+            track(
+                "question_answered",
+                method=method,
+                answered=len(panel.get_answers()),
+                **({"trace_id": tid} if (tid := self._current_trace_id()) else {}),
+            )
             panel.request.resolve(panel.get_answers())
             self.show_next_question_request()
 
@@ -577,7 +590,10 @@ class _LiveView:
                 case KeyEvent.ESCAPE:
                     from kimi_cli.telemetry import track
 
-                    track("question_dismissed")
+                    track(
+                        "question_dismissed",
+                        **({"trace_id": tid} if (tid := self._current_trace_id()) else {}),
+                    )
                     self._current_question_panel.request.resolve({})
                     self.show_next_question_request()
                 case (
@@ -614,7 +630,13 @@ class _LiveView:
         if event == KeyEvent.ESCAPE and self._cancel_event is not None:
             from kimi_cli.telemetry import track
 
-            track("cancel")
+            track(
+                "cancel",
+                **{
+                    "from": "compacting" if self._compacting_spinner is not None else "streaming",
+                    **({"trace_id": tid} if (tid := self._current_trace_id()) else {}),
+                },
+            )
             self._cancel_event.set()
             return
 
@@ -701,6 +723,7 @@ class _LiveView:
         if self._current_content_block is not None:
             if self._current_content_block.has_pending():
                 console.print(self._current_content_block.compose_final())
+                console.print()
             self._current_content_block = None
             self.refresh_soon()
 
@@ -714,6 +737,7 @@ class _LiveView:
 
             self._tool_call_blocks.pop(tool_call_id)
             console.print(block.compose())
+            console.print()
             if self._last_tool_call_block == block:
                 self._last_tool_call_block = None
             self.refresh_soon()
@@ -723,6 +747,7 @@ class _LiveView:
         self._live_notification_blocks.clear()
         while self._notification_blocks:
             console.print(self._notification_blocks.popleft().compose())
+            console.print()
             self.refresh_soon()
 
     def append_content(self, part: ContentPart) -> None:
@@ -841,6 +866,7 @@ class _LiveView:
             padding=(1, 2),
         )
         console.print(panel)
+        console.print()
 
     def request_question(self, request: QuestionRequest) -> None:
         self._question_request_queue.append(request)

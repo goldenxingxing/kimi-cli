@@ -201,8 +201,10 @@ class OpenAILegacy:
         message = message.model_copy(deep=True)
         reasoning_content: str = ""
         content: list[ContentPart] = []
+        has_reasoning = False
         for part in message.content:
             if isinstance(part, ThinkPart):
+                has_reasoning = True
                 reasoning_content += part.think
             else:
                 content.append(part)
@@ -213,7 +215,7 @@ class OpenAILegacy:
         else:
             message.content = content
         dumped_message = message.model_dump(exclude_none=True)
-        if reasoning_content and self._reasoning_key:
+        if has_reasoning and self._reasoning_key:
             dumped_message[self._reasoning_key] = reasoning_content
         return cast(ChatCompletionMessageParam, dumped_message)
 
@@ -239,6 +241,10 @@ class OpenAILegacyStreamedMessage:
     @property
     def id(self) -> str | None:
         return self._id
+
+    @property
+    def trace_id(self) -> str | None:
+        return None
 
     @property
     def usage(self) -> TokenUsage | None:

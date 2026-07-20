@@ -443,6 +443,231 @@ class TestExecuteSideQuestion:
         assert chunks == ["chunk1", "chunk2"]
         assert response == "chunk1chunk2"
 
+    def test_applies_kimi_request_provider_from_soul(self):
+        """Regression: /btw must apply the per-call budget to its request provider."""
+        soul = MagicMock()
+        soul._runtime.llm.chat_provider = MagicMock()
+        soul._compute_completion_overrides.return_value = {"max_completion_tokens": 4096}
+        soul._agent.system_prompt = "sys"
+        soul._agent.toolset.tools = []
+        soul.context.history = []
+        soul.context.token_count_with_pending = 100
+
+        request_provider = MagicMock()
+        captured_providers: list[object] = []
+
+        async def fake_step(provider, sys_prompt, toolset, history, **kw):
+            captured_providers.append(provider)
+            if kw.get("on_message_part"):
+                kw["on_message_part"](TextPart(text="ok"))
+            return _text_result("ok")
+
+        with (
+            patch("kimi_cli.soul.btw.kosong.step", side_effect=fake_step),
+            patch(
+                "kimi_cli.soul.btw.with_kimi_generation_overrides",
+                return_value=request_provider,
+            ) as adapt_provider,
+        ):
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response == "ok"
+        assert error is None
+        assert captured_providers == [request_provider]
+        adapt_provider.assert_called_once_with(
+            soul._runtime.llm.chat_provider,
+            {"max_completion_tokens": 4096},
+        )
+        soul._compute_completion_overrides.assert_called_once()
+        call = soul._compute_completion_overrides.call_args
+        assert call.args == (soul._runtime.llm.chat_provider,)
+        assert call.kwargs["system_prompt"] == "sys"
+        assert call.kwargs["history"][-1].role == "user"
+        assert call.kwargs["input_tokens_floor"] > 100
+
+    def test_recomputes_generation_overrides_after_tool_round(self):
+        soul = MagicMock()
+        soul._runtime.llm.chat_provider = MagicMock()
+        soul._compute_completion_overrides.side_effect = [
+            {"max_completion_tokens": 4096},
+            {"max_completion_tokens": 2048},
+        ]
+        soul._agent.system_prompt = "sys"
+        soul._agent.toolset.tools = []
+        soul.context.history = []
+        soul.context.token_count_with_pending = 100
+
+        request_providers = [MagicMock(), MagicMock()]
+        captured_providers: list[object] = []
+        call_count = 0
+
+        async def fake_step(provider, sys_prompt, toolset, history, **kw):
+            nonlocal call_count
+            call_count += 1
+            captured_providers.append(provider)
+            if call_count == 1:
+                return _tool_call_result("Read")
+            if kw.get("on_message_part"):
+                kw["on_message_part"](TextPart(text="ok"))
+            return _text_result("ok")
+
+        with (
+            patch("kimi_cli.soul.btw.kosong.step", side_effect=fake_step),
+            patch(
+                "kimi_cli.soul.btw.with_kimi_generation_overrides",
+                side_effect=request_providers,
+            ) as adapt_provider,
+        ):
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response == "ok"
+        assert error is None
+        assert captured_providers == request_providers
+        assert [call.args[1] for call in adapt_provider.call_args_list] == [
+            {"max_completion_tokens": 4096},
+            {"max_completion_tokens": 2048},
+        ]
+        assert soul._compute_completion_overrides.call_count == 2
+        first_floor = soul._compute_completion_overrides.call_args_list[0].kwargs[
+            "input_tokens_floor"
+        ]
+        second_floor = soul._compute_completion_overrides.call_args_list[1].kwargs[
+            "input_tokens_floor"
+        ]
+        assert second_floor > first_floor
+
+
+# ---------------------------------------------------------------------------
+# Telemetry tracking for execute_side_question
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteSideQuestionTelemetry:
+    @staticmethod
+    def _make_soul():
+        soul = MagicMock()
+        soul._runtime.llm.chat_provider = MagicMock()
+        soul._agent.system_prompt = "sys"
+        soul._agent.toolset.tools = []
+        soul.context.history = []
+        return soul
+
+    def test_tracks_success(self):
+        """Success → track tool_call with outcome=success."""
+        soul = self._make_soul()
+
+        async def fake_step(*args, **kw):
+            if kw.get("on_message_part"):
+                kw["on_message_part"](TextPart(text="Hello!"))
+            return _text_result("Hello!")
+
+        with (
+            patch("kimi_cli.soul.btw.kosong.step", side_effect=fake_step),
+            patch("kimi_cli.telemetry.track") as mock_track,
+        ):
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response == "Hello!"
+        assert error is None
+        mock_track.assert_called_once()
+        call_args = mock_track.call_args
+        assert call_args[0][0] == "tool_call"
+        assert call_args.kwargs["tool_name"] == "btw"
+        assert call_args.kwargs["outcome"] == "success"
+        assert call_args.kwargs["dup_type"] == "normal"
+        assert "duration_ms" in call_args.kwargs
+        assert call_args.kwargs["duration_ms"] >= 0
+        assert "error_type" not in call_args.kwargs
+
+    def test_tracks_llm_not_set(self):
+        """LLM not set → track tool_call with outcome=error, error_type=LLMNotSet."""
+        soul = MagicMock()
+        soul._runtime.llm = None
+
+        with patch("kimi_cli.telemetry.track") as mock_track:
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response is None
+        assert "LLM is not set" in (error or "")
+        mock_track.assert_called_once()
+        call_args = mock_track.call_args
+        assert call_args[0][0] == "tool_call"
+        assert call_args.kwargs["tool_name"] == "btw"
+        assert call_args.kwargs["outcome"] == "error"
+        assert call_args.kwargs["error_type"] == "LLMNotSet"
+        assert call_args.kwargs["dup_type"] == "normal"
+        assert call_args.kwargs["duration_ms"] >= 0
+
+    def test_tracks_tool_call_denied(self):
+        """LLM calls tools on both turns → track tool_call with outcome=error, error_type=ToolCallDenied."""
+        soul = self._make_soul()
+
+        async def fake_step(*args, **kw):
+            return _tool_call_result("Bash")
+
+        with (
+            patch("kimi_cli.soul.btw.kosong.step", side_effect=fake_step),
+            patch("kimi_cli.telemetry.track") as mock_track,
+        ):
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response is None
+        assert error is not None
+        mock_track.assert_called_once()
+        call_args = mock_track.call_args
+        assert call_args[0][0] == "tool_call"
+        assert call_args.kwargs["tool_name"] == "btw"
+        assert call_args.kwargs["outcome"] == "error"
+        assert call_args.kwargs["error_type"] == "ToolCallDenied"
+        assert call_args.kwargs["dup_type"] == "normal"
+        assert "duration_ms" in call_args.kwargs
+
+    def test_tracks_no_response(self):
+        """LLM returns nothing → track tool_call with outcome=error, error_type=NoResponse."""
+        soul = self._make_soul()
+
+        async def fake_step(*args, **kw):
+            return _text_result("")  # Empty response
+
+        with (
+            patch("kimi_cli.soul.btw.kosong.step", side_effect=fake_step),
+            patch("kimi_cli.telemetry.track") as mock_track,
+        ):
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response is None
+        assert error is not None
+        mock_track.assert_called_once()
+        call_args = mock_track.call_args
+        assert call_args[0][0] == "tool_call"
+        assert call_args.kwargs["tool_name"] == "btw"
+        assert call_args.kwargs["outcome"] == "error"
+        assert call_args.kwargs["error_type"] == "NoResponse"
+        assert call_args.kwargs["dup_type"] == "normal"
+
+    def test_tracks_exception(self):
+        """LLM call raises exception → track tool_call with outcome=error, error_type=exception name."""
+        soul = self._make_soul()
+
+        async def fake_step(*args, **kw):
+            raise RuntimeError("API timeout")
+
+        with (
+            patch("kimi_cli.soul.btw.kosong.step", side_effect=fake_step),
+            patch("kimi_cli.telemetry.track") as mock_track,
+        ):
+            response, error = asyncio.run(execute_side_question(soul, "hi"))
+
+        assert response is None
+        assert "API timeout" in (error or "")
+        mock_track.assert_called_once()
+        call_args = mock_track.call_args
+        assert call_args[0][0] == "tool_call"
+        assert call_args.kwargs["tool_name"] == "btw"
+        assert call_args.kwargs["outcome"] == "error"
+        assert call_args.kwargs["error_type"] == "RuntimeError"
+        assert call_args.kwargs["dup_type"] == "normal"
+
 
 # ---------------------------------------------------------------------------
 # _BtwModalDelegate

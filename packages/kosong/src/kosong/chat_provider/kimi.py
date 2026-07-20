@@ -1,8 +1,9 @@
 import copy
+import inspect
 import mimetypes
 import os
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, Unpack, cast
 
 import httpx
@@ -85,7 +86,9 @@ class Kimi:
         See https://platform.moonshot.ai/docs/api/chat#request-body.
         """
 
+        max_completion_tokens: int | None
         max_tokens: int | None
+        """Deprecated alias. Normalized to ``max_completion_tokens`` before requests."""
         temperature: float | None
         top_p: float | None
         n: int | None
@@ -94,7 +97,7 @@ class Kimi:
         stop: str | list[str] | None
         prompt_cache_key: str | None
         reasoning_effort: str | None
-        """Legacy thinking parameter. Use `extra_body.thinking` instead."""
+        """Legacy explicit passthrough. `with_thinking` uses `extra_body.thinking` instead."""
         extra_body: ExtraBody | None
 
     def __init__(
@@ -129,6 +132,8 @@ class Kimi:
         )
         """The underlying `AsyncOpenAI` client."""
         self._generation_kwargs: Kimi.GenerationKwargs = {}
+        self._thinking_effort: ThinkingEffort | None = None
+        """Thinking state kept separately from parameters serialized onto the wire."""
 
     @property
     def model_name(self) -> str:
@@ -136,46 +141,59 @@ class Kimi:
 
     @property
     def thinking_effort(self) -> ThinkingEffort | None:
-        reasoning_effort = self._generation_kwargs.get("reasoning_effort")
-        if reasoning_effort is None:
-            return None
-        match reasoning_effort:
-            case "low":
-                return "low"
-            case "medium":
-                return "medium"
-            case "high":
-                return "high"
-            case _:
-                return "off"
+        return self._thinking_effort
 
     async def generate(
         self,
         system_prompt: str,
         tools: Sequence[Tool],
         history: Sequence[Message],
+        *,
+        generation_overrides: Mapping[str, Any] | None = None,
     ) -> "KimiStreamedMessage":
         messages: list[ChatCompletionMessageParam] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(_convert_message(message) for message in history)
 
-        generation_kwargs: dict[str, Any] = {
-            # default kimi generation kwargs
-            "max_tokens": 32000,
-        }
-        generation_kwargs.update(self._generation_kwargs)
+        generation_kwargs: dict[str, Any] = dict(self._generation_kwargs)
+        if generation_overrides:
+            generation_kwargs.update(
+                _normalize_generation_kwargs(
+                    cast(Kimi.GenerationKwargs, dict(generation_overrides))
+                )
+            )
+        if generation_kwargs.get("max_completion_tokens") is None:
+            generation_kwargs.pop("max_completion_tokens", None)
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=(_convert_tool(tool) for tool in tools),
-                stream=self.stream,
-                stream_options={"include_usage": True} if self.stream else omit,
-                **generation_kwargs,
-            )
-            return KimiStreamedMessage(response)
+            if self.stream:
+                # ``with_raw_response`` eagerly reads the response body in the
+                # OpenAI SDK. Use the normal streaming path so callers receive
+                # the AsyncStream as soon as response headers arrive.
+                parsed_response = await cast(Any, self.client.chat.completions.create)(
+                    model=self.model,
+                    messages=messages,
+                    tools=(_convert_tool(tool) for tool in tools),
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    **generation_kwargs,
+                )
+                trace_id = parsed_response.response.headers.get("x-trace-id")
+            else:
+                raw_response = await self.client.chat.completions.with_raw_response.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=(_convert_tool(tool) for tool in tools),
+                    stream=False,
+                    stream_options=omit,
+                    **generation_kwargs,
+                )
+                trace_id = raw_response.headers.get("x-trace-id")
+                parsed_response = raw_response.parse()
+                if inspect.isawaitable(parsed_response):
+                    parsed_response = await parsed_response
+            return KimiStreamedMessage(parsed_response, trace_id=trace_id)
         except (OpenAIError, httpx.HTTPError) as e:
             raise convert_error(e) from e
 
@@ -194,23 +212,15 @@ class Kimi:
         return True
 
     def with_thinking(self, effort: ThinkingEffort) -> Self:
-        match effort:
-            case "off":
-                reasoning_effort = None
-            case "low":
-                reasoning_effort = "low"
-            case "medium":
-                reasoning_effort = "medium"
-            case "high" | "xhigh" | "max":
-                # Kimi's API caps at "high"; xhigh/max are Anthropic-specific.
-                reasoning_effort = "high"
-        return self.with_generation_kwargs(reasoning_effort=reasoning_effort).with_extra_body(
+        new_self = self.with_extra_body(
             {
                 "thinking": {
                     "type": "enabled" if effort != "off" else "disabled",
                 }
             }
         )
+        new_self._thinking_effort = effort
+        return new_self
 
     def with_generation_kwargs(self, **kwargs: Unpack[GenerationKwargs]) -> Self:
         """
@@ -221,7 +231,7 @@ class Kimi:
         """
         new_self = copy.copy(self)
         new_self._generation_kwargs = copy.deepcopy(self._generation_kwargs)
-        new_self._generation_kwargs.update(kwargs)
+        new_self._generation_kwargs.update(_normalize_generation_kwargs(kwargs))
         return new_self
 
     def with_extra_body(self, extra_body: ExtraBody) -> Self:
@@ -304,12 +314,23 @@ def _guess_filename(mime_type: str) -> str:
     return f"upload{extension}"
 
 
+def _normalize_generation_kwargs(kwargs: Kimi.GenerationKwargs) -> Kimi.GenerationKwargs:
+    normalized: dict[str, Any] = dict(kwargs)
+    if "max_tokens" in normalized:
+        max_tokens = normalized.pop("max_tokens")
+        if "max_completion_tokens" not in normalized:
+            normalized["max_completion_tokens"] = max_tokens
+    return cast(Kimi.GenerationKwargs, normalized)
+
+
 def _convert_message(message: Message) -> ChatCompletionMessageParam:
     message = message.model_copy(deep=True)
     reasoning_content: str = ""
     content: list[ContentPart] = []
+    has_reasoning = False
     for part in message.content:
         if isinstance(part, ThinkPart):
+            has_reasoning = True
             reasoning_content += part.think
         else:
             content.append(part)
@@ -327,7 +348,7 @@ def _convert_message(message: Message) -> ChatCompletionMessageParam:
         # Dropping `content` entirely is always accepted, so do that whenever
         # the visible content is effectively empty alongside a tool call.
         dumped_message.pop("content", None)
-    if reasoning_content:
+    if has_reasoning:
         dumped_message["reasoning_content"] = reasoning_content
     return cast(ChatCompletionMessageParam, dumped_message)
 
@@ -370,13 +391,19 @@ def _convert_tool(tool: Tool) -> ChatCompletionToolParam:
 class KimiStreamedMessage:
     """The streamed message of the Kimi chat provider."""
 
-    def __init__(self, response: ChatCompletion | AsyncStream[ChatCompletionChunk]):
+    def __init__(
+        self,
+        response: ChatCompletion | AsyncStream[ChatCompletionChunk],
+        *,
+        trace_id: str | None = None,
+    ):
         if isinstance(response, ChatCompletion):
             self._iter = self._convert_non_stream_response(response)
         else:
             self._iter = self._convert_stream_response(response)
         self._id: str | None = None
         self._usage: CompletionUsage | None = None
+        self._trace_id = trace_id
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
@@ -387,6 +414,10 @@ class KimiStreamedMessage:
     @property
     def id(self) -> str | None:
         return self._id
+
+    @property
+    def trace_id(self) -> str | None:
+        return self._trace_id
 
     @property
     def usage(self) -> TokenUsage | None:
@@ -418,7 +449,8 @@ class KimiStreamedMessage:
         self._id = response.id
         self._usage = response.usage
         message = response.choices[0].message
-        if reasoning_content := getattr(message, "reasoning_content", None):
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content is not None:
             assert isinstance(reasoning_content, str)
             yield ThinkPart(think=reasoning_content)
         if message.content:
@@ -450,8 +482,12 @@ class KimiStreamedMessage:
 
                 delta = chunk.choices[0].delta
 
-                # convert thinking content
-                if reasoning_content := getattr(delta, "reasoning_content", None):
+                # convert thinking content — an empty string means "reasoned
+                # but empty", not "no reasoning": keep it as a ThinkPart so
+                # the distinction round-trips to the server (preserved-thinking
+                # backends require reasoning_content on every assistant turn)
+                reasoning_content = getattr(delta, "reasoning_content", None)
+                if reasoning_content is not None:
                     assert isinstance(reasoning_content, str)
                     yield ThinkPart(think=reasoning_content)
 
@@ -507,7 +543,7 @@ if __name__ == "__main__":
         ]
         stream = await chat.with_generation_kwargs(
             temperature=0,
-            max_tokens=1000,
+            max_completion_tokens=1000,
         ).generate(system_prompt, [], history)
         async for part in stream:
             print(part.model_dump(exclude_none=True))
