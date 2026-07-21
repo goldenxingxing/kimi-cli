@@ -192,3 +192,54 @@ def sanitize_image_parts(messages: Sequence[Message]) -> list[Message]:
         else:
             sanitized.append(msg.model_copy(update={"content": new_parts}))
     return sanitized
+
+
+STRIPPED_IMAGE_PLACEHOLDER = "[1 张图片已从上下文中移除以减小请求体积，可用 ReadMediaFile 重新读取]"
+
+
+def strip_image_parts(
+    messages: Sequence[Message], *, keep_last_user_message: bool = True
+) -> tuple[list[Message], int]:
+    """Return a copy of ``messages`` with ``ImageURLPart``s replaced by placeholders.
+
+    Last-resort defence when the serialized request body exceeds the provider's
+    hard byte limit (typically caused by large base64 images). When
+    ``keep_last_user_message`` is True, the most recent user message keeps its
+    images so the model can still see what the user just sent.
+
+    The originals are not mutated. Returns the new message list and the number
+    of stripped image parts.
+    """
+    last_user_index = -1
+    if keep_last_user_message:
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].role == "user":
+                last_user_index = index
+                break
+
+    stripped_count = 0
+    stripped: list[Message] = []
+    for index, msg in enumerate(messages):
+        if index == last_user_index:
+            stripped.append(msg)
+            continue
+        new_parts: list[ContentPart] | None = None
+        for part_idx, part in enumerate(msg.content):
+            if not isinstance(part, ImageURLPart):
+                if new_parts is not None:
+                    new_parts.append(part)
+                continue
+            if new_parts is None:
+                new_parts = list(msg.content[:part_idx])
+            stripped_count += 1
+            new_parts.append(TextPart(text=STRIPPED_IMAGE_PLACEHOLDER))
+        if new_parts is None:
+            stripped.append(msg)
+        else:
+            stripped.append(msg.model_copy(update={"content": new_parts}))
+    if stripped_count:
+        logger.info(
+            "Stripped {count} image part(s) from history to reduce request body size",
+            count=stripped_count,
+        )
+    return stripped, stripped_count

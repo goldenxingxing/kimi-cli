@@ -64,6 +64,7 @@ from kimi_cli.soul.compaction import (
     Compaction,
     CompactionResult,
     SimpleCompaction,
+    estimate_message_bytes,
     estimate_text_tokens,
     should_auto_compact,
 )
@@ -82,6 +83,7 @@ from kimi_cli.soul.dynamic_injections.session_memory import SessionMemoryInjecti
 from kimi_cli.soul.message import (
     check_message,
     sanitize_image_parts,
+    strip_image_parts,
     system,
     system_reminder,
     tool_result_to_message,
@@ -150,6 +152,7 @@ def classify_api_error(e: Exception) -> tuple[str, int | None]:
                 or "max tokens" in msg_lower
                 or "maximum context" in msg_lower
                 or "too many tokens" in msg_lower
+                or ("message size" in msg_lower and "exceeds limit" in msg_lower)
             ):
                 return "context_overflow", status_code
             return "4xx_client", status_code
@@ -164,6 +167,18 @@ def classify_api_error(e: Exception) -> tuple[str, int | None]:
 
 
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+
+
+def _is_request_too_large_error(e: Exception) -> bool:
+    """Whether the error is a 400 "total message size ... exceeds limit" rejection.
+
+    The provider enforces a hard request-body byte limit (2 MiB on Moonshot);
+    this is recoverable by shrinking the request (compaction / image stripping).
+    """
+    if not isinstance(e, APIStatusError) or e.status_code != 400:
+        return False
+    msg_lower = str(e).lower()
+    return "message size" in msg_lower and "exceeds limit" in msg_lower
 
 
 def is_retryable_api_error(e: Exception) -> bool:
@@ -1011,6 +1026,7 @@ class KimiSoul:
         # ═══════════════════════════════════════════════════════════════════════
         step_no = 0
         self._current_step_no = 0
+        oversized_request_retried = False
         while True:
             step_no += 1
 
@@ -1032,6 +1048,8 @@ class KimiSoul:
                     self._runtime.llm.max_context_size,
                     trigger_ratio=self._loop_control.compaction_trigger_ratio,
                     reserved_context_size=self._loop_control.reserved_context_size,
+                    request_bytes=self._estimated_request_bytes(),
+                    max_request_bytes=self._loop_control.max_request_bytes,
                 ):
                     logger.info("Context too long, compacting...")
                     try:
@@ -1058,6 +1076,17 @@ class KimiSoul:
                 back_to_the_future = e
 
             except Exception as e:
+                # ── 2f-0. Oversized request self-heal (400 message-size limit) ──
+                if not oversized_request_retried and _is_request_too_large_error(e):
+                    oversized_request_retried = True
+                    logger.warning(
+                        "Request body exceeded the provider size limit at step {step_no}; "
+                        "attempting self-heal (compaction / image stripping)",
+                        step_no=step_no,
+                    )
+                    if await self._self_heal_oversized_request():
+                        continue
+
                 # ── 2f-ii. Fatal step error ───────────────────────────────────
                 req_id = getattr(e, "request_id", None)
                 logger.error(
@@ -1427,6 +1456,61 @@ class KimiSoul:
         await self._context.append_message(tool_messages)
         # token count of tool results are not available yet
 
+    def _estimated_request_bytes(self) -> int:
+        """Estimated serialized byte size of the next LLM request body."""
+        return len(self._agent.system_prompt.encode("utf-8")) + estimate_message_bytes(
+            self._context.history
+        )
+
+    async def _replace_context_history(self, messages: Sequence[Message]) -> None:
+        """Rebuild the context with ``messages`` (system prompt is re-asserted)."""
+        await self._context.clear()
+        await self._context.write_system_prompt(self._agent.system_prompt)
+        await self._checkpoint()
+        await self._context.append_message(messages)
+        # rough estimate; corrected by the real usage on the next LLM call
+        await self._context.update_token_count(estimate_text_tokens(messages))
+
+    async def _self_heal_oversized_request(self) -> bool:
+        """Shrink the context after a 400 "message size exceeds limit" error.
+
+        Strategy, in order:
+        1. Run compaction (preferred — it preserves information as a summary).
+        2. If the request is still over the byte threshold, strip image parts
+           from all but the last user message, then compact again best-effort.
+
+        Returns True when the context was changed and the step should be retried.
+        """
+        max_request_bytes = self._loop_control.max_request_bytes
+        changed = False
+        try:
+            await self.compact_context()
+            changed = True
+        except Exception as compact_err:
+            logger.warning(
+                "Compaction failed during oversized-request self-heal: {error_type}: {error}",
+                error_type=type(compact_err).__name__,
+                error=compact_err,
+            )
+        if changed and self._estimated_request_bytes() <= max_request_bytes:
+            return True
+
+        stripped, n_stripped = strip_image_parts(self._context.history, keep_last_user_message=True)
+        if n_stripped == 0:
+            # Nothing left to strip; only retry if compaction already changed things.
+            return changed
+        await self._replace_context_history(stripped)
+        try:
+            await self.compact_context()
+        except Exception as compact_err:
+            logger.warning(
+                "Post-strip compaction failed during oversized-request self-heal: "
+                "{error_type}: {error}",
+                error_type=type(compact_err).__name__,
+                error=compact_err,
+            )
+        return True
+
     async def compact_context(
         self,
         *,
@@ -1448,10 +1532,18 @@ class KimiSoul:
         """
 
         chat_provider = self._runtime.llm.chat_provider if self._runtime.llm is not None else None
+
+        # The compaction request itself must fit the provider's request-body
+        # limit (see upstream issue #2402): when the history is already over
+        # the byte threshold, strip images first so compaction can't 400.
+        history = self._context.history
+        if estimate_message_bytes(history) > self._loop_control.max_request_bytes:
+            history, _ = strip_image_parts(history, keep_last_user_message=True)
+
         compaction_overrides = None
         if chat_provider is not None and isinstance(self._compaction, SimpleCompaction):
             compact_message, to_preserve = self._compaction.prepare(
-                self._context.history,
+                history,
                 custom_instruction=custom_instruction,
             )
             if compact_message is not None:
@@ -1509,7 +1601,7 @@ class KimiSoul:
                 chat_provider=request_provider,
             )
             return await self._compaction.compact(
-                self._context.history,
+                history,
                 compaction_llm,
                 custom_instruction=custom_instruction,
             )

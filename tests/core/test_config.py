@@ -35,7 +35,8 @@ def test_default_config_dump():
                 "max_retries_per_step": 3,
                 "max_ralph_iterations": 0,
                 "reserved_context_size": 50000,
-                "compaction_trigger_ratio": 0.85,
+                "compaction_trigger_ratio": 0.95,
+                "max_request_bytes": 1800000,
             },
             "background": {
                 "max_running_tasks": 4,
@@ -131,7 +132,7 @@ def test_load_config_compaction_trigger_ratio():
 
 def test_load_config_compaction_trigger_ratio_default():
     config = load_config_from_string("{}")
-    assert config.loop_control.compaction_trigger_ratio == 0.85
+    assert config.loop_control.compaction_trigger_ratio == 0.95
 
 
 def test_load_config_compaction_trigger_ratio_too_low():
@@ -142,3 +143,18 @@ def test_load_config_compaction_trigger_ratio_too_low():
 def test_load_config_compaction_trigger_ratio_too_high():
     with pytest.raises(ConfigError, match="compaction_trigger_ratio"):
         load_config_from_string('{"loop_control": {"compaction_trigger_ratio": 1.0}}')
+
+
+def test_load_config_max_request_bytes():
+    config = load_config_from_string('{"loop_control": {"max_request_bytes": 1500000}}')
+    assert config.loop_control.max_request_bytes == 1500000
+
+
+def test_load_config_max_request_bytes_default():
+    config = load_config_from_string("{}")
+    assert config.loop_control.max_request_bytes == 1800000
+
+
+def test_load_config_max_request_bytes_too_low():
+    with pytest.raises(ConfigError, match="max_request_bytes"):
+        load_config_from_string('{"loop_control": {"max_request_bytes": 1000}}')

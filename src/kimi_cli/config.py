@@ -89,10 +89,16 @@ class LoopControl(BaseModel):
     """Reserved token count for LLM response generation. Auto-compaction triggers when
     either context_tokens + reserved_context_size >= max_context_size or
     context_tokens >= max_context_size * compaction_trigger_ratio. Default is 50000."""
-    compaction_trigger_ratio: float = Field(default=0.85, ge=0.5, le=0.99)
-    """Context usage ratio threshold for auto-compaction. Default is 0.85 (85%).
+    compaction_trigger_ratio: float = Field(default=0.95, ge=0.5, le=0.99)
+    """Context usage ratio threshold for auto-compaction. Default is 0.95 (95%).
     Auto-compaction triggers when context_tokens >= max_context_size * compaction_trigger_ratio
     or when context_tokens + reserved_context_size >= max_context_size."""
+    max_request_bytes: int = Field(default=1_800_000, ge=100_000)
+    """Approximate request-body byte budget for a single LLM request. The provider
+    enforces a hard request-body limit (2 MiB on Moonshot); when the estimated
+    serialized size of system prompt + history exceeds this threshold, auto-compaction
+    triggers even if the token-based thresholds are not reached. Default is 1800000,
+    leaving ~300 KiB headroom for tool schemas and generation parameters."""
 
 
 class BackgroundConfig(BaseModel):
