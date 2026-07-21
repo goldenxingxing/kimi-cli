@@ -1,6 +1,16 @@
-import { Toaster as Sonner } from "sonner";
+import { Toaster as Sonner, toast } from "sonner";
 
 type ToasterProps = React.ComponentProps<typeof Sonner>;
+
+// Error toasts must not auto-dismiss: keep them visible until the user
+// explicitly closes them via the close button.
+const originalToastError = toast.error.bind(toast);
+toast.error = ((message: Parameters<typeof toast.error>[0], options?: Parameters<typeof toast.error>[1]) =>
+  originalToastError(message, {
+    duration: Number.POSITIVE_INFINITY,
+    closeButton: true,
+    ...options,
+  })) as typeof toast.error;
 
 const Toaster = ({ ...props }: ToasterProps) => {
   return (
