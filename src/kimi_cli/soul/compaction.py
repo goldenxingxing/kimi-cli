@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
@@ -12,7 +13,7 @@ import kimi_cli.prompts as prompts
 from kimi_cli.llm import LLM
 from kimi_cli.soul.message import system
 from kimi_cli.utils.logging import logger
-from kimi_cli.wire.types import ContentPart, TextPart, ThinkPart
+from kimi_cli.wire.types import ContentPart, ImageURLPart, TextPart, ThinkPart
 
 COMPACTION_SYSTEM_PROMPT = "You are a helpful assistant that compacts conversation context."
 COMPACTION_OUTPUT_PREFIX = "Previous context has been compacted. Here is the compaction output:"
@@ -57,19 +58,70 @@ def estimate_text_tokens(messages: Sequence[Message]) -> int:
     return total_chars // 4
 
 
+def estimate_message_bytes(messages: Sequence[Message]) -> int:
+    """Estimate the serialized request-body size (in bytes) of ``messages``.
+
+    The provider enforces a hard request-body byte limit (2 MiB on Moonshot)
+    that token-based estimates miss entirely: base64 media, thinking blocks,
+    and tool-call arguments count for ~0 tokens but dominate the byte size.
+    This estimate sums the UTF-8 byte length of every serialized part so
+    byte-heavy content (especially images) is accounted for. Approximation
+    within ~10% is intentional — the goal is the right order of magnitude.
+    """
+    total = 0
+    for msg in messages:
+        total += len(msg.role.encode("utf-8"))
+        if msg.name:
+            total += len(msg.name.encode("utf-8"))
+        if msg.tool_call_id:
+            total += len(msg.tool_call_id.encode("utf-8"))
+        for part in msg.content:
+            if isinstance(part, TextPart):
+                total += len(part.text.encode("utf-8"))
+            elif isinstance(part, ThinkPart):
+                total += len(part.think.encode("utf-8"))
+                if part.encrypted:
+                    total += len(part.encrypted.encode("utf-8"))
+            elif isinstance(part, ImageURLPart):
+                # base64 data URL body is the dominant term for images
+                total += len(part.image_url.url.encode("utf-8"))
+            else:
+                total += len(part.model_dump_json(exclude_none=True).encode("utf-8"))
+        for tool_call in msg.tool_calls or ():
+            total += len(tool_call.id.encode("utf-8"))
+            total += len(tool_call.function.name.encode("utf-8"))
+            if tool_call.function.arguments:
+                total += len(tool_call.function.arguments.encode("utf-8"))
+            if tool_call.extras:
+                total += len(json.dumps(tool_call.extras, ensure_ascii=False).encode("utf-8"))
+    return total
+
+
 def should_auto_compact(
     token_count: int,
     max_context_size: int,
     *,
     trigger_ratio: float,
     reserved_context_size: int,
+    request_bytes: int | None = None,
+    max_request_bytes: int | None = None,
 ) -> bool:
     """Determine whether auto-compaction should be triggered.
 
-    Returns True when either condition is met (whichever fires first):
+    Returns True when any condition is met (whichever fires first):
     - Ratio-based: token_count >= max_context_size * trigger_ratio
     - Reserved-based: token_count + reserved_context_size >= max_context_size
+    - Bytes-based: request_bytes > max_request_bytes (when both are provided).
+      The provider rejects request bodies over a hard byte limit regardless of
+      token count, so byte-heavy histories (e.g. base64 images) must compact
+      even when the token estimate is still low.
     """
+    if (
+        request_bytes is not None
+        and max_request_bytes is not None
+        and request_bytes > max_request_bytes
+    ):
+        return True
     return (
         token_count >= max_context_size * trigger_ratio
         or token_count + reserved_context_size >= max_context_size

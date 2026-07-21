@@ -2124,7 +2124,7 @@ export function useSessionStream(
               role: "assistant",
               variant: "status",
               content: "Compacting conversation history…",
-              isStreaming: true,
+              isStreaming: !isReplay,
             },
           ]);
           break;
@@ -2133,19 +2133,20 @@ export function useSessionStream(
         case "CompactionEnd": {
           const compactMsgId = compactionMessageIdRef.current;
           compactionMessageIdRef.current = null;
-          // Clear old messages after compaction, only keep the current turn
-          // Also remove the compaction indicator message
-          setMessages((prev) => {
-            let lastUserMsgIndex = -1;
-            for (let i = prev.length - 1; i >= 0; i--) {
-              if (prev[i].role === "user") {
-                lastUserMsgIndex = i;
-                break;
-              }
-            }
-            const kept = lastUserMsgIndex >= 0 ? prev.slice(lastUserMsgIndex) : [];
-            return compactMsgId ? kept.filter((m) => m.id !== compactMsgId) : kept;
-          });
+          // Keep the conversation visible: history is preserved in wire.jsonl,
+          // so just flip the compaction indicator to a finished state instead
+          // of clearing all previous messages.
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === compactMsgId
+                ? {
+                    ...m,
+                    content: "Conversation history compacted.",
+                    isStreaming: false,
+                  }
+                : m,
+            ),
+          );
           break;
         }
 
