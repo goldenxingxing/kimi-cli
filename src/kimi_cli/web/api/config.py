@@ -388,9 +388,7 @@ async def update_config_toml(
         # idle workers so provider edits apply to live sessions instead of
         # silently staying stale until the next server restart.
         try:
-            summary = await runner.restart_running_workers(
-                reason="config_update", force=False
-            )
+            summary = await runner.restart_running_workers(reason="config_update", force=False)
             if summary.skipped_busy_session_ids:
                 logger.info(
                     "config.toml updated; {n} busy session(s) keep the old "
