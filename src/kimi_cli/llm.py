@@ -96,6 +96,8 @@ def parse_llm_providers_env() -> list[dict[str, Any]] | None:
         logger.warning("LLM_PROVIDERS must be a YAML list, got {type}", type=type(data).__name__)
         return None
     return cast(list[dict[str, Any]], data)
+
+
 class _GenerationOverrideProvider(Protocol):
     async def generate(
         self,

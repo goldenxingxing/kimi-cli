@@ -29,7 +29,7 @@
     "body": "Are you sure you want to delete \"{{name}}\"? This action cannot be undone.",
     "cancel": "Cancel",
     "confirm": "Delete"
-  }, 
+  },
   "createDir": {
     "title": "Directory Not Found",
     "body": "The directory <pathCode>{{path}}</pathCode> does not exist. Would you like to create it?",
