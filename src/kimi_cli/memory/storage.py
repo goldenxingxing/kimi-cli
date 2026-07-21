@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import os
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.utils.logging import logger
@@ -15,21 +20,34 @@ from kimi_cli.utils.logging import logger
 
 @contextlib.contextmanager
 def _locked(path: Path, exclusive: bool) -> Iterator[None]:
-    """Acquire an advisory ``fcntl`` lock on a sidecar file.
+    """Acquire an advisory lock on a sidecar file.
 
     The lock is held on a ``<path>.lock`` file rather than on the data file
     itself so the data file can be replaced atomically while the lock is held.
+    POSIX uses ``fcntl.flock`` (shared or exclusive); Windows uses
+    ``msvcrt.locking``, which has no shared mode, so every lock is exclusive.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
     flag = os.O_RDWR | os.O_CREAT
     fd = os.open(lock_path, flag, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        if sys.platform == "win32":
+            # msvcrt.locking requires bytes to exist at the lock position.
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         yield
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if sys.platform == "win32":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
