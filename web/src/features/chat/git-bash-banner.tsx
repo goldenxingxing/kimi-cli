@@ -57,10 +57,12 @@ export function GitBashBanner() {
             values={{ link: installUrl }}
             components={{
               installLink: (
+                // biome-ignore lint/a11y/useAnchorContent: link text is injected by <Trans> from the i18n message at runtime
                 <a
                   href={installUrl}
                   target="_blank"
                   rel="noopener noreferrer"
+                  aria-label={installUrl}
                   className="font-medium underline underline-offset-2 hover:text-amber-700 dark:hover:text-amber-300"
                 />
               ),
