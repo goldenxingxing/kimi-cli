@@ -369,6 +369,7 @@ async def get_config_toml(http_request: Request) -> ConfigToml:
 async def update_config_toml(
     request: UpdateConfigTomlRequest,
     http_request: Request,
+    runner: KimiCLIRunner = Depends(_get_runner),
 ) -> UpdateConfigTomlResponse:
     """Update kimi-cli config.toml."""
     from kimi_cli.config import load_config_from_string
@@ -382,6 +383,22 @@ async def update_config_toml(
         config_file = get_config_file()
         config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text(request.content, encoding="utf-8")
+
+        # Config only reaches a session worker when it (re)starts; restart
+        # idle workers so provider edits apply to live sessions instead of
+        # silently staying stale until the next server restart.
+        try:
+            summary = await runner.restart_running_workers(
+                reason="config_update", force=False
+            )
+            if summary.skipped_busy_session_ids:
+                logger.info(
+                    "config.toml updated; {n} busy session(s) keep the old "
+                    "config until their next restart",
+                    n=len(summary.skipped_busy_session_ids),
+                )
+        except Exception as e:
+            logger.warning(f"Failed to restart workers after config.toml update: {e}")
 
         return UpdateConfigTomlResponse(success=True)
     except Exception as e:
