@@ -165,6 +165,15 @@ function VirtualizedMessageListComponent(
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
 
+  // When the list is rebuilt from empty (WS reconnect / worker restart
+  // clears messages, then history streams back in), stick to the bottom
+  // until the viewport has settled there once.  This is independent of
+  // the isReplayingHistory flag, which a session_status event can clear
+  // prematurely while replay events are still in flight — without this
+  // guard the 1500px gap rule below would pin the viewport to the top.
+  const catchUpRef = useRef(true);
+  const prevItemCountRef = useRef(0);
+
   // Filtered messages list (excluding message-id) aligned with listItems indices
   const filteredMessages = useMemo(
     () => messages.filter((m) => m.variant !== "message-id"),
@@ -177,8 +186,20 @@ function VirtualizedMessageListComponent(
     [filteredMessages],
   );
 
+  // Detect an empty -> non-empty transition (rebuild from scratch).
+  // Assigned during render so the flag is set before Virtuoso invokes
+  // followOutput for the incoming items (a useEffect would run after
+  // Virtuoso's own effects — too late).
+  if (prevItemCountRef.current === 0 && listItems.length > 0) {
+    catchUpRef.current = true;
+  }
+  prevItemCountRef.current = listItems.length;
+
   const handleAtBottomChange = useCallback(
     (atBottom: boolean) => {
+      // Catch-up complete once the viewport actually reaches the bottom;
+      // afterwards the normal gap rule decides whether to follow.
+      if (atBottom) catchUpRef.current = false;
       onAtBottomChange?.(atBottom);
     },
     [onAtBottomChange],
@@ -201,7 +222,9 @@ function VirtualizedMessageListComponent(
       // of messages stream in within a few frames.  The scroll gap easily
       // exceeds the 1500px tolerance below, which would permanently pin
       // the viewport to the top — always stick to the bottom instead.
-      if (isReplayingHistory) return "auto" as const;
+      // catchUpRef covers the same window even if isReplayingHistory was
+      // cleared early by a session_status event arriving mid-replay.
+      if (isReplayingHistory || catchUpRef.current) return "auto" as const;
       if (isAtBottom) return "auto" as const;
       const scroller = scrollerRef.current;
       if (scroller) {
