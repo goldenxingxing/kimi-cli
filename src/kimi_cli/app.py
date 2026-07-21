@@ -222,7 +222,7 @@ class KimiCLI:
             provider = config.providers[model.provider]
 
         if not model:
-            model = LLMModel(provider="", model="", max_context_size=100_000)
+            model = LLMModel(provider="", model="", max_context_size=1_000_000)
             provider = LLMProvider(type="kimi", base_url="", api_key=SecretStr(""))
 
         # try overwrite with environment variables

@@ -175,7 +175,7 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
     return newStatus;
   }, [status, isAwaitingFirstResponse, isReplayingHistory, isUploadingFiles, messages, errorMessage, t]);
 
-  const maxTokens = maxContextSize ?? 64000;
+  const maxTokens = maxContextSize ?? 1000000;
   const usedTokens = Math.round(contextUsage * maxTokens);
   const usagePercent = Math.round(contextUsage * 1000) / 10;
 

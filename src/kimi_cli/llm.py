@@ -74,7 +74,7 @@ def parse_llm_providers_env() -> list[dict[str, Any]] | None:
           api_key: sk-...
           base_url: https://api.moonshot.cn/v1
           model: kimi-k2
-          max_context_size: 262144
+          max_context_size: 1000000
           capabilities:
             - thinking
             - image_in

@@ -108,7 +108,7 @@ def _build_global_config() -> GlobalConfig:
             api_key = p.get("api_key", "")
             base_url = p.get("base_url", "")
             model_name = p.get("model")
-            max_ctx = p.get("max_context_size", 262144)
+            max_ctx = p.get("max_context_size", 1000000)
             caps_raw: Any = p.get("capabilities", [])
 
             if not name or not provider_type or not model_name:
@@ -121,7 +121,7 @@ def _build_global_config() -> GlobalConfig:
             try:
                 max_ctx_int = int(max_ctx)
             except (TypeError, ValueError):
-                max_ctx_int = 262144
+                max_ctx_int = 1000000
 
             caps_set: set[str] = set()
             if isinstance(caps_raw, list):
@@ -171,7 +171,7 @@ def _build_global_config() -> GlobalConfig:
         kimi_key = os.environ.get("KIMI_API_KEY")
         if kimi_key:
             model_name = os.environ.get("KIMI_MODEL_NAME", "kimi-k2")
-            max_ctx = int(os.environ.get("KIMI_MODEL_MAX_CONTEXT_SIZE", "262144"))
+            max_ctx = int(os.environ.get("KIMI_MODEL_MAX_CONTEXT_SIZE", "1000000"))
             if model_name not in config.models:
                 config.models[model_name] = LLMModel(
                     provider="kimi",
