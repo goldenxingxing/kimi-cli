@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import cast
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -109,7 +109,7 @@ def _build_global_config() -> GlobalConfig:
             base_url = p.get("base_url", "")
             model_name = p.get("model")
             max_ctx = p.get("max_context_size", 262144)
-            caps_raw = p.get("capabilities", [])
+            caps_raw: Any = p.get("capabilities", [])
 
             if not name or not provider_type or not model_name:
                 logger.warning(
@@ -125,13 +125,14 @@ def _build_global_config() -> GlobalConfig:
 
             caps_set: set[str] = set()
             if isinstance(caps_raw, list):
-                caps_set = {str(c).strip().lower() for c in caps_raw if c}
+                caps_list = cast(list[Any], caps_raw)
+                caps_set = {str(c).strip().lower() for c in caps_list if c}
             elif isinstance(caps_raw, str):
                 caps_set = {c.strip().lower() for c in caps_raw.split(",") if c.strip()}
 
-            model_caps = set(
-                cast(ModelCapability, c) for c in caps_set if c in ALL_MODEL_CAPABILITIES
-            )
+            model_caps: set[ModelCapability] = {
+                cap for cap in ALL_MODEL_CAPABILITIES if cap in caps_set
+            }
 
             # Add provider if not already present
             if name not in config.providers:

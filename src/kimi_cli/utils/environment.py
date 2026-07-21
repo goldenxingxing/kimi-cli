@@ -53,7 +53,7 @@ class Environment:
         os_version = platform.version()
 
         if os_kind == "Windows":
-            shell_path = await _find_git_bash_path()
+            shell_path = await find_git_bash_path()
             shell_name: Literal["bash", "sh"] = "bash"
         else:
             possible_paths = [
@@ -85,7 +85,7 @@ def is_windows() -> bool:
     return platform.system() == "Windows"
 
 
-async def _find_git_bash_path() -> KaosPath:
+async def find_git_bash_path() -> KaosPath:
     """Locate ``bash.exe`` from Git for Windows.
 
     Resolution order:

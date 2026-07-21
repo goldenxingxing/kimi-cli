@@ -14,7 +14,7 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from kimi_cli.utils.environment import GitBashNotFoundError, _find_git_bash_path
+from kimi_cli.utils.environment import GitBashNotFoundError, find_git_bash_path
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -65,13 +65,13 @@ async def _detect_git_bash() -> bool:
 
     Returns:
         True on non-Windows (irrelevant — shell tool uses /bin/bash or /bin/sh).
-        True on Windows when ``_find_git_bash_path()`` resolves.
+        True on Windows when ``find_git_bash_path()`` resolves.
         False on Windows when the resolver raises ``GitBashNotFoundError``.
     """
     if _normalized_platform() != "win32":
         return True
     try:
-        await _find_git_bash_path()
+        await find_git_bash_path()
         return True
     except GitBashNotFoundError:
         return False

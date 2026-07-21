@@ -11,7 +11,7 @@ from kaos.path import KaosPath
 from kimi_cli.utils.environment import (
     Environment,
     GitBashNotFoundError,
-    _find_git_bash_path,
+    find_git_bash_path,
     is_windows,
 )
 
@@ -247,7 +247,7 @@ async def test_find_git_bash_path_directly(monkeypatch):
 
     monkeypatch.setattr(KaosPath, "is_file", _mock_is_file)
 
-    path = await _find_git_bash_path()
+    path = await find_git_bash_path()
     assert str(path) == r"E:\git\bash.exe"
 
 
