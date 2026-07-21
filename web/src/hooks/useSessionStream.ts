@@ -472,6 +472,24 @@ export function useSessionStream(
     );
   }, [setMessages]);
 
+  // Resolve a dangling compaction indicator. The backend only emits
+  // CompactionEnd on success; if compaction fails or the turn is
+  // interrupted, the "Compacting conversation history…" status message
+  // would otherwise stay on screen forever.
+  const resolveStaleCompaction = useCallback(
+    (content: string) => {
+      const compactMsgId = compactionMessageIdRef.current;
+      if (!compactMsgId) return;
+      compactionMessageIdRef.current = null;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === compactMsgId ? { ...m, content, isStreaming: false } : m,
+        ),
+      );
+    },
+    [setMessages],
+  );
+
   // Mark all non-terminal tool calls as interrupted and dismiss stale
   // approval/question dialogs.  Called only when the backend confirms no
   // active turn (idle / stopped / error), so it won't dismiss legitimate
@@ -596,6 +614,7 @@ export function useSessionStream(
           setStatus("error");
           setAwaitingFirstResponse(false);
           awaitingIdleRef.current = false;
+          resolveStaleCompaction("Compaction failed.");
           completeStreamingMessages();
           interruptStaleToolCalls();
           break;
@@ -605,6 +624,7 @@ export function useSessionStream(
           setStatus("ready");
           setAwaitingFirstResponse(false);
           awaitingIdleRef.current = false;
+          resolveStaleCompaction("Compaction did not complete.");
           completeStreamingMessages();
           // A bare "idle" may be a post-restart snapshot where the backend
           // lost its in-flight set but the worker can still re-issue pending
@@ -625,6 +645,7 @@ export function useSessionStream(
     },
     [
       completeStreamingMessages,
+      resolveStaleCompaction,
       interruptStaleToolCalls,
       normalizeSessionStatus,
       onSessionStatus,
@@ -2283,6 +2304,7 @@ export function useSessionStream(
           clearStepRetryStatus();
           setAwaitingFirstResponse(false);
           awaitingIdleRef.current = false;
+          resolveStaleCompaction("Compaction failed.");
           // Mark all streaming/subagent messages as complete
           completeStreamingMessages();
           return;
@@ -2311,6 +2333,7 @@ export function useSessionStream(
           awaitingIdleRef.current = false;
           isReplayingRef.current = false;
           setIsReplayingHistory(false);
+          resolveStaleCompaction("Compaction did not complete.");
           completeStreamingMessages();
           return;
         }
@@ -2422,6 +2445,7 @@ export function useSessionStream(
       setAwaitingFirstResponse,
       applySessionStatus,
       completeStreamingMessages,
+      resolveStaleCompaction,
       sendInitialize,
       clearStepRetryStatus,
     ],
