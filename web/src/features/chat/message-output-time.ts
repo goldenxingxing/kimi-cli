@@ -1,4 +1,5 @@
 import { createElement, useEffect, useState } from "react";
+import type { LiveMessage } from "../../hooks/types";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -56,5 +57,16 @@ export function MessageOutputTime({
       title: date.toLocaleString(),
     },
     formatMessageOutputTime(completedAt, currentTime),
+  );
+}
+
+export function shouldShowMessageOutputTime(
+  message: LiveMessage,
+): boolean {
+  return (
+    message.role === "assistant" &&
+    !message.isStreaming &&
+    (!message.variant || message.variant === "text") &&
+    message.completedAt !== undefined
   );
 }
