@@ -19,7 +19,6 @@ export function KimiCliBrand({
   const logoSrc = config?.logo ?? BRANDING_DEFAULTS.logo;
   const logoUrl = config?.logo_url ?? BRANDING_DEFAULTS.logo_url;
   const mainVersion = config?.version || kimiCliVersion;
-  const agentVersion = kimiCliVersion;
 
   const textSizeClass = size === "sm" ? "text-base" : "text-lg";
   const versionPadding = size === "sm" ? "text-xs" : "text-sm";
@@ -46,23 +45,11 @@ export function KimiCliBrand({
         </span>
       </a>
       {showVersion && (
-        <>
-          <span
-            className={cn("text-muted-foreground font-medium", versionPadding)}
-          >
-            v{mainVersion}
-          </span>
-          {mainVersion !== agentVersion && (
-            <span
-              className={cn(
-                "text-muted-foreground font-medium opacity-70",
-                versionPadding,
-              )}
-            >
-              agent: {agentVersion}
-            </span>
-          )}
-        </>
+        <span
+          className={cn("text-muted-foreground font-medium", versionPadding)}
+        >
+          v{mainVersion}
+        </span>
       )}
     </div>
   );
