@@ -140,6 +140,7 @@ import { kimiCliVersion } from "@/lib/version";
 import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/tool/store";
 import { reconcileApprovalRequestIds } from "@/lib/approval-snapshot";
 import { v4 as uuidV4 } from "uuid";
+import { setMessageOutputTime } from "./message-output-time";
 
 // Regex patterns moved to top level for performance
 const DATA_URL_MEDIA_TYPE_REGEX = /^data:([^;,]+)[;,]/;
@@ -1281,7 +1282,12 @@ export function useSessionStream(
 
   // Process a single wire event
   const processEvent = useCallback(
-    (event: WireEvent, isReplay = false, rpcMessageId?: string | number) => {
+    (
+      event: WireEvent,
+      isReplay = false,
+      rpcMessageId?: string | number,
+      eventTimestamp?: number,
+    ) => {
       switch (event.type) {
         case "TurnBegin": {
           // Reset step state to ensure slash commands create new messages
@@ -1413,14 +1419,19 @@ export function useSessionStream(
                 variant: "text",
                 turnIndex: turnCounterRef.current > 0 ? turnCounterRef.current - 1 : undefined,
                 content: currentTextRef.current,
+                completedAt: eventTimestamp,
                 isStreaming: !isReplay,
               });
             } else {
               setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === textMessageIdRef.current
-                    ? { ...msg, content: currentTextRef.current }
-                    : msg,
+                setMessageOutputTime(
+                  prev.map((msg) =>
+                    msg.id === textMessageIdRef.current
+                      ? { ...msg, content: currentTextRef.current }
+                      : msg,
+                  ),
+                  textMessageIdRef.current,
+                  eventTimestamp,
                 ),
               );
             }
@@ -2492,7 +2503,16 @@ export function useSessionStream(
         // Process event
         const event = extractEvent(message);
         if (event) {
-          processEvent(event, isReplayingRef.current);
+          const eventTimestamp =
+            typeof message.timestamp === "number"
+              ? message.timestamp * 1000
+              : undefined;
+          processEvent(
+            event,
+            isReplayingRef.current,
+            undefined,
+            eventTimestamp,
+          );
         }
       } catch (err) {
         console.warn(
