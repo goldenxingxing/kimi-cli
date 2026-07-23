@@ -9,6 +9,8 @@ export type JsonRpcRequest = {
   method: string;
   id?: string | number;
   params?: unknown;
+  /** Server event time in Unix seconds (Wire 1.8+). */
+  timestamp?: number;
 };
 
 export type JsonRpcResponse = {
@@ -289,6 +291,8 @@ export type WireEvent =
 // Parsed wire message
 export type WireMessage = {
   jsonrpc: "2.0";
+  /** Server event time in Unix seconds (Wire 1.8+). */
+  timestamp?: number;
   method?:
     | "event"
     | "prompt"

@@ -49,6 +49,8 @@ export type LiveMessage = {
   turnIndex?: number;
   role: "user" | "assistant";
   content?: string;
+  /** Completion time for an assistant text message, Unix milliseconds. */
+  completedAt?: number;
   attachments?: MessageAttachmentPart[];
   isStreaming?: boolean;
   variant?:
