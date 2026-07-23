@@ -1,4 +1,5 @@
 import inspect
+import time
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ from inline_snapshot import snapshot
 from pydantic import BaseModel
 
 from kimi_cli.wire.file import WireMessageRecord
+from kimi_cli.wire.jsonrpc import JSONRPCEventMessage
 from kimi_cli.wire.serde import deserialize_wire_message, serialize_wire_message
 from kimi_cli.wire.types import (
     ApprovalRequest,
@@ -44,6 +46,24 @@ from kimi_cli.wire.types import (
     is_request,
     is_wire_message,
 )
+
+
+def test_jsonrpc_event_assigns_live_timestamp() -> None:
+    before = time.time()
+    message = JSONRPCEventMessage(params=StepBegin(n=1))
+    after = time.time()
+
+    assert before <= message.timestamp <= after
+    assert message.model_dump(mode="json")["timestamp"] == message.timestamp
+
+
+def test_jsonrpc_event_preserves_replay_timestamp() -> None:
+    message = JSONRPCEventMessage(
+        params=StepBegin(n=1),
+        timestamp=1_721_234_567.25,
+    )
+
+    assert message.timestamp == 1_721_234_567.25
 
 
 def _test_serde(msg: WireMessage):

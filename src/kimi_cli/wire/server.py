@@ -863,7 +863,12 @@ class WireServer:
                     await self._send_msg(JSONRPCRequestMessage(id=wire_msg.id, params=wire_msg))
                     requests += 1
                 elif is_event(wire_msg):
-                    await self._send_msg(JSONRPCEventMessage(params=wire_msg))
+                    await self._send_msg(
+                        JSONRPCEventMessage(
+                            params=wire_msg,
+                            timestamp=record.timestamp,
+                        )
+                    )
                     events += 1
                 else:
                     # Not reachable for valid WireMessage, but keep a guard for corrupted data.
