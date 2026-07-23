@@ -5,6 +5,8 @@ import {
   retrySessionListRequest,
 } from "../src/lib/session-list-request.ts";
 
+const VALIDATION_FAILED_REGEX = /validation failed/;
+
 function createFetchError(message: string): Error {
   return Object.assign(new Error(message), {
     name: "FetchError",
@@ -47,7 +49,7 @@ test("does not retry a non-FetchError", async () => {
         assert.fail("delay must not run");
       },
     ),
-    /validation failed/,
+    VALIDATION_FAILED_REGEX,
   );
 
   assert.equal(attempts, 1);

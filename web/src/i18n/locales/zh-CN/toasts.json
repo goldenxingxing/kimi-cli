@@ -15,7 +15,8 @@
     "fallbackError": "重启忙碌会话失败"
   },
   "session": {
-    "errorTitle": "会话错误"
+    "errorTitle": "会话错误",
+    "networkError": "暂时无法连接本地服务，服务可能正在重启，请稍后重试。"
   },
   "chatUpload": {
     "successTitle": "文件已上传",

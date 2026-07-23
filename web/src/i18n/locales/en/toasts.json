@@ -15,7 +15,8 @@
     "fallbackError": "Failed to restart busy sessions"
   },
   "session": {
-    "errorTitle": "Session Error"
+    "errorTitle": "Session Error",
+    "networkError": "Unable to connect to the local service. It may be restarting; please try again shortly."
   },
   "chatUpload": {
     "successTitle": "Files uploaded",
