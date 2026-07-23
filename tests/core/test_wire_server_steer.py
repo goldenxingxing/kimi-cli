@@ -21,13 +21,14 @@ from kimi_cli.wire.jsonrpc import (
     JSONRPCEventMessage,
     JSONRPCInitializeMessage,
     JSONRPCPromptMessage,
+    JSONRPCReplayMessage,
     JSONRPCRequestMessage,
     JSONRPCSteerMessage,
     JSONRPCSuccessResponse,
     Statuses,
 )
 from kimi_cli.wire.server import WireServer
-from kimi_cli.wire.types import ApprovalRequest, ApprovalResponse, TextPart
+from kimi_cli.wire.types import ApprovalRequest, ApprovalResponse, StepBegin, TextPart
 
 
 def _make_soul(runtime: Runtime, tmp_path: Path) -> KimiSoul:
@@ -48,6 +49,35 @@ def _reset_telemetry() -> None:
     telemetry_mod._session_started_sessions.clear()
     telemetry_mod._sink = None
     telemetry_mod._disabled = False
+
+
+@pytest.mark.asyncio
+async def test_replay_event_preserves_wire_record_timestamp(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    soul = _make_soul(runtime, tmp_path)
+    server = WireServer(soul)
+    persisted_timestamp = 1_721_234_567.25
+    await soul.wire_file.append_message(
+        StepBegin(n=1),
+        timestamp=persisted_timestamp,
+    )
+    sent: list[JSONRPCEventMessage] = []
+
+    async def capture(message) -> None:
+        assert isinstance(message, JSONRPCEventMessage)
+        sent.append(message)
+
+    monkeypatch.setattr(server, "_send_msg", capture)
+
+    response = await server._handle_replay(JSONRPCReplayMessage(id="replay-1"))
+
+    assert isinstance(response, JSONRPCSuccessResponse)
+    assert response.result["events"] == 1
+    assert len(sent) == 1
+    assert sent[0].timestamp == persisted_timestamp
 
 
 @pytest.mark.asyncio
