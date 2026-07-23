@@ -8,6 +8,12 @@ stream watchdog repeatedly reconnects. The existing reconnect path re-emits pend
 approvals as out-of-band JSON-RPC requests, but it does not give the client an
 authoritative snapshot to reconcile against.
 
+More specifically, reconnect happens while the agent turn is still streaming, and
+`WireServer._handle_initialize()` currently rejects initialization in that state with
+`INVALID_STATE`. The pending-approval reissue code is below that guard and therefore
+never runs. The web client retries initialization a limited number of times while the
+backend continues waiting for the approval, producing the observed reconnect loop.
+
 Separately, models sometimes encode `Memory.operation` as a JSON string, or pass only
 the operation name. Pydantic rejects these calls before the tool runs. The agent can
 then incorrectly tell the user that the mutation succeeded despite receiving a tool
@@ -29,6 +35,12 @@ The wire server will include an `approval_requests` array in the successful
 `initialize` result. Each item uses the existing `ApprovalRequest` payload shape.
 This makes initialization an authoritative pending-approval snapshot while retaining
 the existing request push for compatibility with other clients.
+
+Initialization will also be permitted while a turn is streaming. It is a connection
+handshake and pending-state read, not a new agent operation. The client used here does
+not register external tools or hooks during reconnect; if a future client attempts
+runtime-mutating initialization fields while streaming, the server will reject those
+fields rather than reject the read-only handshake.
 
 The web client will process that snapshot before considering initialization complete:
 
