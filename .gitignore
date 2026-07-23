@@ -49,3 +49,4 @@ static/
 .memo/
 .entire
 .claude
+.worktrees/
