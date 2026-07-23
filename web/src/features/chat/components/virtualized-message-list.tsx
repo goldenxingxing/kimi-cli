@@ -25,6 +25,10 @@ import {
 } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { cn } from "@/lib/utils";
+import {
+  MessageOutputTime,
+  shouldShowMessageOutputTime,
+} from "../message-output-time";
 
 export type VirtualizedMessageListProps = {
   messages: LiveMessage[];
@@ -341,6 +345,9 @@ function VirtualizedMessageListComponent(
                     {message.content && <MessageCopyButton content={message.content} />}
                     {onForkSession && message.turnIndex !== undefined && (
                       <MessageForkButton onFork={() => onForkSession(message.turnIndex!)} />
+                    )}
+                    {shouldShowMessageOutputTime(message) && (
+                      <MessageOutputTime completedAt={message.completedAt!} />
                     )}
                   </MessageActions>
                 )}

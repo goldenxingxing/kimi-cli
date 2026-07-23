@@ -5,7 +5,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   formatMessageOutputTime,
   MessageOutputTime,
+  shouldShowMessageOutputTime,
 } from "./message-output-time.ts";
+import type { LiveMessage } from "../../hooks/types.ts";
 
 const minute = 60_000;
 const hour = 60 * minute;
@@ -35,4 +37,40 @@ test("renders semantic time markup", () => {
   assert.match(markup, TIME_ELEMENT_PATTERN);
   assert.match(markup, DATE_TIME_ATTRIBUTE_PATTERN);
   assert.match(markup, FIVE_MINUTES_AGO_PATTERN);
+});
+
+test("shows output time only for completed assistant text", () => {
+  const message = (
+    overrides: Partial<LiveMessage> = {},
+  ): LiveMessage => ({
+    id: "message",
+    role: "assistant",
+    variant: "text",
+    content: "Done",
+    completedAt: now,
+    isStreaming: false,
+    ...overrides,
+  });
+
+  assert.equal(shouldShowMessageOutputTime(message()), true);
+  assert.equal(
+    shouldShowMessageOutputTime(message({ isStreaming: true })),
+    false,
+  );
+  assert.equal(
+    shouldShowMessageOutputTime(message({ role: "user" })),
+    false,
+  );
+  assert.equal(
+    shouldShowMessageOutputTime(message({ variant: "tool" })),
+    false,
+  );
+  assert.equal(
+    shouldShowMessageOutputTime(message({ variant: "thinking" })),
+    false,
+  );
+  assert.equal(
+    shouldShowMessageOutputTime(message({ completedAt: undefined })),
+    false,
+  );
 });
