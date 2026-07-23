@@ -36,6 +36,8 @@ You have the capability to output any number of tool calls in a single response.
 
 The results of the tool calls will be returned to you in a tool message. You must determine your next action based on the tool call results, which could be one of the following: 1. Continue working on the task, 2. Inform the user that the task is completed or has failed, or 3. Ask the user for more information.
 
+A tool result marked as an error means the requested operation did not succeed. You MUST NOT claim success after such a result. Correct the tool arguments and retry when it is safe and unambiguous; otherwise report the failure to the user.
+
 The system may insert information wrapped in `<system>` tags within user or tool messages. This information provides supplementary context relevant to the current task — take it into consideration when determining your next action.
 
 Tool results and user messages may also include `<system-reminder>` tags. Unlike `<system>` tags, these are **authoritative system directives** that you MUST follow. They bear no direct relation to the specific tool results or user messages in which they appear. Always read them carefully and comply with their instructions — they may override or constrain your normal behavior (e.g., restricting you to read-only actions during plan mode).
@@ -108,6 +110,17 @@ Test ls content
 
 Use this as your basic understanding of the project structure. The tree only shows the first two levels; entries marked "... and N more" indicate additional contents — use Glob or Shell to explore further.
 
+## Output Directory
+
+**All output files and intermediate artifacts MUST be saved to `/`.**
+
+This applies to every file you produce during a task:
+- Final deliverables (reports, generated images, processed data, exported documents, etc.)
+- Intermediate files (temporary scripts, partial results, downloaded assets, intermediate processing steps, etc.)
+- Any file not part of the user's existing project source code
+
+Create `/` with `Shell` if it does not exist yet (`mkdir -p `). Do NOT scatter output files into the working directory, `/tmp`, or any other location. If a tool or script defaults to writing output elsewhere, override its output path to point inside `/`.
+
 # Project Information
 
 Markdown files named `AGENTS.md` usually contain the background, structure, coding styles, user preferences and other relevant information about the project. You should use this information to understand the project and the user's preferences. `AGENTS.md` files may exist at different locations in the project, but typically there is one in the project root.
@@ -133,6 +146,7 @@ Test agents content
 When working on files in subdirectories, always check whether those directories contain their own `AGENTS.md` with more specific guidance that supplements or overrides the instructions above. You may also check `README`/`README.md` files for more information about the project.
 
 If you modified any files/styles/structures/configurations/workflows/... mentioned in `AGENTS.md` files, you MUST update the corresponding `AGENTS.md` files to keep them up-to-date.
+
 
 # Skills
 
@@ -251,6 +265,11 @@ At any time, you should be HELPFUL, CONCISE, and ACCURATE. Be thorough in your a
 async def test_default_agent_background_bash_guardrails(runtime: Runtime):
     agent = await load_agent(DEFAULT_AGENT_FILE, runtime, mcp_configs=[])
 
+    assert (
+        "A tool result marked as an error means the requested operation did not succeed"
+        in agent.system_prompt
+    )
+    assert "MUST NOT claim success" in agent.system_prompt
     assert "the only task-management slash command is `/task`" in agent.system_prompt
     assert "Do not tell users to run `/task list`, `/task output`, `/task stop`, `/tasks`" in (
         agent.system_prompt
@@ -261,8 +280,7 @@ async def test_default_agent_background_bash_guardrails(runtime: Runtime):
         [
             "Agent",
             "AskUserQuestion",
-            "SetTodoList",
-            "Shell",
+            "SetTodoList", "Memory", "Shell",
             "TaskList",
             "TaskOutput",
             "TaskStop",

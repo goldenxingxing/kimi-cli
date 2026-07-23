@@ -28,8 +28,7 @@ def test_load_default_agent_spec():
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.shell:Shell",
             "kimi_cli.tools.background:TaskList",
             "kimi_cli.tools.background:TaskOutput",
             "kimi_cli.tools.background:TaskStop",
@@ -90,8 +89,7 @@ def test_load_default_agent_spec():
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.plan:ExitPlanMode",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.plan:ExitPlanMode",
             "kimi_cli.tools.plan.enter:EnterPlanMode",
         ]
     )
@@ -99,8 +97,7 @@ def test_load_default_agent_spec():
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.shell:Shell",
             "kimi_cli.tools.background:TaskList",
             "kimi_cli.tools.background:TaskOutput",
             "kimi_cli.tools.background:TaskStop",
@@ -171,8 +168,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.plan:ExitPlanMode",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.plan:ExitPlanMode",
             "kimi_cli.tools.plan.enter:EnterPlanMode",
             "kimi_cli.tools.file:WriteFile",
             "kimi_cli.tools.file:StrReplaceFile",
@@ -182,8 +178,7 @@ You are meant to be a fast agent. Complete the search request efficiently and re
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.shell:Shell",
             "kimi_cli.tools.background:TaskList",
             "kimi_cli.tools.background:TaskOutput",
             "kimi_cli.tools.background:TaskStop",
@@ -237,8 +232,7 @@ Before designing your implementation plan, consider whether you fully understand
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.plan:ExitPlanMode",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.plan:ExitPlanMode",
             "kimi_cli.tools.plan.enter:EnterPlanMode",
             "kimi_cli.tools.shell:Shell",
             "kimi_cli.tools.file:WriteFile",
@@ -249,8 +243,7 @@ Before designing your implementation plan, consider whether you fully understand
         [
             "kimi_cli.tools.agent:Agent",
             "kimi_cli.tools.ask_user:AskUserQuestion",
-            "kimi_cli.tools.todo:SetTodoList",
-            "kimi_cli.tools.shell:Shell",
+            "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.shell:Shell",
             "kimi_cli.tools.background:TaskList",
             "kimi_cli.tools.background:TaskOutput",
             "kimi_cli.tools.background:TaskStop",
@@ -345,8 +338,7 @@ agent:
             [
                 "kimi_cli.tools.agent:Agent",
                 "kimi_cli.tools.ask_user:AskUserQuestion",
-                "kimi_cli.tools.todo:SetTodoList",
-                "kimi_cli.tools.shell:Shell",
+                "kimi_cli.tools.todo:SetTodoList", "kimi_cli.tools.memory:Memory", "kimi_cli.tools.shell:Shell",
                 "kimi_cli.tools.background:TaskList",
                 "kimi_cli.tools.background:TaskOutput",
                 "kimi_cli.tools.background:TaskStop",

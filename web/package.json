@@ -12,6 +12,7 @@
     "format": "biome check --write .",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
+    "test:unit": "node --experimental-strip-types --test src/**/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

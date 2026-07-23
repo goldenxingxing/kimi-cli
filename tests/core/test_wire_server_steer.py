@@ -19,7 +19,9 @@ from kimi_cli.wire.jsonrpc import (
     ErrorCodes,
     JSONRPCErrorResponse,
     JSONRPCEventMessage,
+    JSONRPCInitializeMessage,
     JSONRPCPromptMessage,
+    JSONRPCRequestMessage,
     JSONRPCSteerMessage,
     JSONRPCSuccessResponse,
     Statuses,
@@ -46,6 +48,99 @@ def _reset_telemetry() -> None:
     telemetry_mod._session_started_sessions.clear()
     telemetry_mod._sink = None
     telemetry_mod._disabled = False
+
+
+@pytest.mark.asyncio
+async def test_initialize_while_streaming_returns_pending_approval_snapshot(
+    runtime: Runtime,
+    tmp_path: Path,
+) -> None:
+    soul = _make_soul(runtime, tmp_path)
+    server = WireServer(soul)
+    server._cancel_event = asyncio.Event()
+    assert runtime.approval_runtime is not None
+    runtime.approval_runtime.create_request(
+        request_id="req-init-1",
+        tool_call_id="call-init-1",
+        sender="Memory",
+        action="memory.add",
+        description="remember preference",
+        display=[],
+        source=ApprovalSource(kind="foreground_turn", id="turn-init-1"),
+    )
+
+    response = await server._handle_initialize(
+        JSONRPCInitializeMessage(
+            id="initialize-1",
+            params=JSONRPCInitializeMessage.Params(
+                protocol_version="1.0",
+                client=ClientInfo(name="kiwi", version="test"),
+            ),
+        )
+    )
+
+    assert isinstance(response, JSONRPCSuccessResponse)
+    assert response.result["approval_requests"] == [
+        {
+            "type": "ApprovalRequest",
+            "payload": {
+                "id": "req-init-1",
+                "tool_call_id": "call-init-1",
+                "sender": "Memory",
+                "action": "memory.add",
+                "description": "remember preference",
+                "source_kind": "foreground_turn",
+                "source_id": "turn-init-1",
+                "agent_id": None,
+                "subagent_type": None,
+                "source_description": None,
+                "display": [],
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_initialize_response_is_sent_before_approval_reissue(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    soul = _make_soul(runtime, tmp_path)
+    server = WireServer(soul)
+    server._cancel_event = asyncio.Event()
+    assert runtime.approval_runtime is not None
+    runtime.approval_runtime.create_request(
+        request_id="req-order-1",
+        tool_call_id="call-order-1",
+        sender="Memory",
+        action="memory.add",
+        description="remember preference",
+        display=[],
+        source=ApprovalSource(kind="foreground_turn", id="turn-order-1"),
+    )
+    sent: list[JSONRPCSuccessResponse | JSONRPCRequestMessage] = []
+
+    async def capture_message(
+        message: JSONRPCSuccessResponse | JSONRPCRequestMessage,
+    ) -> None:
+        sent.append(message)
+
+    monkeypatch.setattr(server, "_send_msg", capture_message)
+
+    await server._dispatch_msg(
+        JSONRPCInitializeMessage(
+            id="initialize-order-1",
+            params=JSONRPCInitializeMessage.Params(
+                protocol_version="1.0",
+                client=ClientInfo(name="kiwi", version="test"),
+            ),
+        )
+    )
+
+    assert isinstance(sent[0], JSONRPCSuccessResponse)
+    assert isinstance(sent[1], JSONRPCRequestMessage)
+    assert sent[1].id == "req-order-1"
 
 
 def test_wire_client_info_emits_session_started(

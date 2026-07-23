@@ -138,6 +138,7 @@ import {
 import { createMessageId, getApiBaseUrl } from "./utils";
 import { kimiCliVersion } from "@/lib/version";
 import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/tool/store";
+import { reconcileApprovalRequestIds } from "@/lib/approval-snapshot";
 import { v4 as uuidV4 } from "uuid";
 
 // Regex patterns moved to top level for performance
@@ -1660,6 +1661,20 @@ export function useSessionStream(
           }
           const payload = (event as ApprovalRequestEvent).payload;
           const tc = currentToolCallsRef.current.get(payload.tool_call_id);
+          const existingPending = pendingApprovalRequestsRef.current.get(
+            payload.id,
+          );
+
+          // Reconnect snapshots and compatibility pushes can duplicate a request
+          // that the user already answered, or arrive after its resolution event.
+          // Never make either state actionable again.
+          if (tc?.approval?.resolved || tc?.result !== undefined) {
+            pendingApprovalRequestsRef.current.delete(payload.id);
+            break;
+          }
+          if (existingPending?.submitted && tc?.messageId) {
+            break;
+          }
 
           const approvalState = {
             id: payload.id,
@@ -2383,6 +2398,54 @@ export function useSessionStream(
           initializeRetryCountRef.current = 0;
 
           const { slash_commands } = message.result;
+          const approvalRequests = Array.isArray(
+            message.result.approval_requests,
+          )
+            ? (message.result.approval_requests as ApprovalRequestEvent[])
+            : [];
+          const localUnsubmittedIds = new Set(
+            Array.from(pendingApprovalRequestsRef.current.entries())
+              .filter(([, pending]) => !pending.submitted)
+              .map(([requestId]) => requestId),
+          );
+          const serverIds = new Set(
+            approvalRequests.map((event) => event.payload.id),
+          );
+
+          for (const approvalEvent of approvalRequests) {
+            processEvent(approvalEvent, false, approvalEvent.payload.id);
+          }
+
+          const { stale } = reconcileApprovalRequestIds(
+            localUnsubmittedIds,
+            serverIds,
+          );
+          if (stale.size > 0) {
+            for (const requestId of stale) {
+              pendingApprovalRequestsRef.current.delete(requestId);
+            }
+            setMessages((prev) =>
+              prev.map((message) => {
+                const toolCall = message.toolCall;
+                const approval = toolCall?.approval;
+                if (!(approval && stale.has(approval.id))) {
+                  return message;
+                }
+                return {
+                  ...message,
+                  isStreaming: false,
+                  toolCall: {
+                    ...toolCall,
+                    state: "input-available",
+                    approval: {
+                      ...approval,
+                      resolved: true,
+                    },
+                  },
+                };
+              }),
+            );
+          }
 
           if (slash_commands && slash_commands.length > 0) {
             setSlashCommands(slash_commands);
@@ -2448,6 +2511,7 @@ export function useSessionStream(
       resolveStaleCompaction,
       sendInitialize,
       clearStepRetryStatus,
+      setMessages,
     ],
   );
 
@@ -2660,7 +2724,7 @@ export function useSessionStream(
   );
 
   // Connect to WebSocket
-  const connect = useCallback(() => {
+  const connect = useCallback((preserveSessionState = false) => {
     if (!sessionId) return;
 
     initializeRetryCountRef.current = 0; // Reset retry count for new connection
@@ -2676,8 +2740,21 @@ export function useSessionStream(
       watchdogIntervalRef.current = null;
     }
 
+    const retainedApprovals = preserveSessionState
+      ? new Map(pendingApprovalRequestsRef.current)
+      : null;
+    const retainedQuestions = preserveSessionState
+      ? new Map(pendingQuestionRequestsRef.current)
+      : null;
+
     awaitingIdleRef.current = false;
-    resetState(true);  // preserve slashCommands on reconnect
+    resetState(true);
+    if (retainedApprovals) {
+      pendingApprovalRequestsRef.current = retainedApprovals;
+    }
+    if (retainedQuestions) {
+      pendingQuestionRequestsRef.current = retainedQuestions;
+    }
     setMessages([]);
     setStatus("submitted");
     setAwaitingFirstResponse(Boolean(pendingMessageRef.current));
@@ -2781,7 +2858,6 @@ export function useSessionStream(
         setIsConnected(false);
         wsRef.current = null;
         pendingMessageRef.current = null; // Clear pending message on close
-        pendingApprovalRequestsRef.current.clear();
         awaitingIdleRef.current = false;
         setAwaitingFirstResponse(false);
         setSessionStatus(null);
@@ -3046,12 +3122,25 @@ export function useSessionStream(
 
   // Reconnect
   const reconnect = useCallback(() => {
-    disconnect();
+    if (reconnectTimeoutRef.current !== null) {
+      window.clearTimeout(reconnectTimeoutRef.current);
+    }
+    if (watchdogIntervalRef.current !== null) {
+      window.clearInterval(watchdogIntervalRef.current);
+      watchdogIntervalRef.current = null;
+    }
+    if (wsRef.current) {
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws.close();
+    }
+    setIsConnected(false);
     // Small delay before reconnecting
     reconnectTimeoutRef.current = window.setTimeout(() => {
-      connect();
+      reconnectTimeoutRef.current = null;
+      connect(true);
     }, 100);
-  }, [disconnect, connect]);
+  }, [connect]);
 
   // Keep refs in sync so useLayoutEffect can use stable references
   connectRef.current = connect;
