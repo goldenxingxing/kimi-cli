@@ -5,9 +5,14 @@ import type {
   UploadSessionFileResponse,
   SessionStatus,
 } from "../lib/api/models";
+import i18n from "../i18n";
 import { SessionFromJSON } from "../lib/api/models/Session";
 import { apiClient } from "../lib/apiClient";
 import { getAuthHeader, getAuthToken } from "../lib/auth";
+import {
+  isFetchError,
+  retrySessionListRequest,
+} from "../lib/session-list-request";
 import { formatRelativeTime, getApiBaseUrl } from "./utils";
 
 // Regex patterns for path normalization
@@ -169,12 +174,13 @@ export function useSessions(): UseSessionsReturn {
     setError(null);
 
     try {
-      const sessionsList =
-        await apiClient.sessions.listSessionsApiSessionsGet({
+      const sessionsList = await retrySessionListRequest(() =>
+        apiClient.sessions.listSessionsApiSessionsGet({
           limit: PAGE_SIZE,
           offset: 0,
           q: searchQuery.trim() || undefined,
-        });
+        }),
+      );
 
       // Update sessions list
       setSessions(sessionsList);
@@ -183,8 +189,11 @@ export function useSessions(): UseSessionsReturn {
 
       // Don't auto-select first session - user can click on one or create a new one
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to load sessions";
+      const message = isFetchError(err)
+        ? i18n.t("toasts:session.networkError")
+        : err instanceof Error
+          ? err.message
+          : "Failed to load sessions";
       setError(message);
       console.error("Failed to refresh sessions:", err);
     } finally {
