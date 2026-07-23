@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
-from typing import Literal, override
+from typing import Literal, cast, override
 
 from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolReturnValue
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from kimi_cli.memory import (
     MemoryEntry,
@@ -58,6 +58,17 @@ class Params(BaseModel):
         description="The memory operation to perform.",
     )
 
+    @field_validator("operation", mode="before")
+    @classmethod
+    def parse_json_operation(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return cast(dict[str, object], decoded) if isinstance(decoded, dict) else value
+
 
 def _ok(output: str, brief: str) -> ToolReturnValue:
     return ToolReturnValue(
@@ -99,9 +110,7 @@ class Memory(CallableTool2[Params]):
             return self._list(op)
         if isinstance(op, UpdateOp):
             return await self._update(op)
-        if isinstance(op, DeleteOp):
-            return await self._delete(op)
-        return ToolError(message=f"Unknown operation: {op!r}", brief="Bad operation")
+        return await self._delete(op)
 
     async def _request_persistent_approval(
         self, action: str, description: str

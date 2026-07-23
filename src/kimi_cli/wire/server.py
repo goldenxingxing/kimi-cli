@@ -372,6 +372,11 @@ class WireServer:
 
             if resp is not None:
                 await self._send_msg(resp)
+                if isinstance(msg, JSONRPCInitializeMessage) and isinstance(
+                    resp, JSONRPCSuccessResponse
+                ):
+                    for request in self._pending_approval_requests():
+                        await self._request_approval(request)
         except Exception:
             logger.exception("Unexpected error dispatching JSONRPC message:")
             raise
@@ -389,12 +394,15 @@ class WireServer:
     async def _handle_initialize(
         self, msg: JSONRPCInitializeMessage
     ) -> JSONRPCSuccessResponse | JSONRPCErrorResponse:
-        if self._is_streaming:
+        if self._is_streaming and (msg.params.external_tools or msg.params.hooks):
             return JSONRPCErrorResponse(
                 id=msg.id,
                 error=JSONRPCErrorObject(
                     code=ErrorCodes.INVALID_STATE,
-                    message="An agent turn is already in progress",
+                    message=(
+                        "Cannot register external tools or hooks while an agent turn "
+                        "is already in progress"
+                    ),
                 ),
             )
 
@@ -512,6 +520,17 @@ class WireServer:
             "server": cast(JsonType, {"name": NAME, "version": VERSION}),
             "slash_commands": cast(JsonType, slash_commands),
         }
+        pending_approvals = self._pending_approval_requests()
+        result["approval_requests"] = cast(
+            JsonType,
+            [
+                {
+                    "type": "ApprovalRequest",
+                    "payload": request.model_dump(mode="json"),
+                }
+                for request in pending_approvals
+            ],
+        )
         if accepted or rejected:
             result["external_tools"] = cast(
                 JsonType,
@@ -536,22 +555,6 @@ class WireServer:
             self._sync_plan_mode_tool_visibility(toolset)
 
         self._initialized = True
-        if self._approval_runtime is not None:
-            for request in self._approval_runtime.list_pending():
-                await self._request_approval(
-                    ApprovalRequest(
-                        id=request.id,
-                        tool_call_id=request.tool_call_id,
-                        sender=request.sender,
-                        action=request.action,
-                        description=request.description,
-                        display=request.display,
-                        source_kind=request.source.kind,
-                        source_id=request.source.id,
-                        agent_id=request.source.agent_id,
-                        subagent_type=request.source.subagent_type,
-                    )
-                )
 
         result["capabilities"] = cast(
             JsonType,
@@ -562,6 +565,25 @@ class WireServer:
             id=msg.id,
             result=result,
         )
+
+    def _pending_approval_requests(self) -> list[ApprovalRequest]:
+        if self._approval_runtime is None:
+            return []
+        return [
+            ApprovalRequest(
+                id=request.id,
+                tool_call_id=request.tool_call_id,
+                sender=request.sender,
+                action=request.action,
+                description=request.description,
+                display=request.display,
+                source_kind=request.source.kind,
+                source_id=request.source.id,
+                agent_id=request.source.agent_id,
+                subagent_type=request.source.subagent_type,
+            )
+            for request in self._approval_runtime.list_pending()
+        ]
 
     def _sync_ask_user_tool_visibility(self, toolset: KimiToolset) -> None:
         """Hide or unhide the AskUserQuestion tool based on client capabilities."""
