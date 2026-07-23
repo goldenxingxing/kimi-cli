@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Literal
 
 from kosong.utils.typing import JsonType
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     TypeAdapter,
     field_serializer,
     field_validator,
@@ -174,6 +176,7 @@ class JSONRPCCancelMessage(_MessageBase):
 class JSONRPCEventMessage(_MessageBase):
     method: Literal["event"] = "event"
     params: Event
+    timestamp: float = Field(default_factory=time.time)
 
     @field_serializer("params")
     def _serialize_params(self, params: Event) -> dict[str, JsonType]:
