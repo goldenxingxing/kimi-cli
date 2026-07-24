@@ -10,7 +10,11 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.display import DisplayBlock
 from kimi_cli.tools.file import FileActions
-from kimi_cli.tools.file.managed_wiki import reject_managed_wiki_target
+from kimi_cli.tools.file.managed_wiki import (
+    ManagedWikiMutationBlocked,
+    reject_managed_wiki_target,
+    write_verified_text,
+)
 from kimi_cli.tools.file.plan_mode import inspect_plan_edit_target
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.diff import build_diff_blocks
@@ -157,12 +161,14 @@ class WriteFile(CallableTool2[Params]):
                 if not result:
                     return result.rejection_error()
 
-            # Write content to file
-            match params.mode:
-                case "overwrite":
-                    await p.write_text(params.content)
-                case "append":
-                    await p.append_text(params.content)
+            # Final mutation revalidates the post-approval target through a
+            # no-follow file descriptor; the earlier path check is not enough.
+            await write_verified_text(
+                p,
+                self._runtime,
+                params.content,
+                append=params.mode == "append",
+            )
 
             # Get file info for success message
             file_size = (await p.stat()).st_size
@@ -174,6 +180,11 @@ class WriteFile(CallableTool2[Params]):
                 display=diff_blocks,
             )
 
+        except ManagedWikiMutationBlocked:
+            return ToolError(
+                message="Managed Wiki files can only be changed through the Wiki tool.",
+                brief="Use Wiki tool",
+            )
         except Exception as e:
             logger.warning("WriteFile failed: {path}: {error}", path=params.path, error=e)
             return ToolError(

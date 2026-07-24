@@ -12,7 +12,7 @@ from uuid import UUID
 import pytest
 
 from kimi_cli.soul.agent import Runtime
-from kimi_cli.tools.wiki import Params, Wiki
+from kimi_cli.tools.wiki import Params, Wiki, WikiToolContext
 from kimi_cli.wiki.models import CurrentSource, PageChange, SourceRef, WikiCandidate, WikiPage
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.value_gate import WikiContext
@@ -58,11 +58,31 @@ def _candidate(source: SourceRef | None = None) -> WikiCandidate:
     )
 
 
+def _tool_context(
+    *,
+    conversation_hashes: frozenset[str] | None = None,
+    allowed_workspace_ids: frozenset[UUID] = frozenset(),
+    candidate_high_value: bool = True,
+    stable: bool = True,
+    user_confirmed: bool = True,
+) -> WikiToolContext:
+    return WikiToolContext(
+        provenance_session_id=_SESSION_ID,
+        conversation_hashes=conversation_hashes or frozenset({_source().content_hash}),
+        allowed_workspace_ids=allowed_workspace_ids,
+        candidate_high_value=candidate_high_value,
+        stable=stable,
+        user_confirmed=user_confirmed,
+        reliable_source=False,
+    )
+
+
 @pytest.fixture
 def wiki_tool(manager):
     runtime = SimpleNamespace(
         wiki=manager,
-        session=SimpleNamespace(id=str(_SESSION_ID)),
+        session=SimpleNamespace(id="named-shell-session"),
+        wiki_tool_context=_tool_context(),
     )
     return Wiki(cast("Runtime", runtime))
 
@@ -115,6 +135,9 @@ async def test_ingest_accepts_only_current_inline_content_and_prepares_change(
         content_hash=content_hash(raw.encode("utf-8")),
     )
 
+    wiki_tool._runtime.wiki_tool_context = _tool_context(
+        conversation_hashes=frozenset({provenance.content_hash})
+    )
     result = await wiki_tool(
         Params(operation="ingest", source=source, candidate=_candidate(provenance))
     )
@@ -163,12 +186,60 @@ async def test_ingest_rejects_registered_workspace_archive(
         content_hash=content_hash(archive.read_bytes()),
     )
 
+    wiki_tool._runtime.wiki_tool_context = _tool_context(
+        allowed_workspace_ids=frozenset({workspace_id})
+    )
     result = await wiki_tool(
         Params(operation="ingest", source=source, candidate=_candidate(provenance))
     )
 
     assert result.is_error
     assert "archive" in result.message.lower()
+
+
+async def test_workspace_ingest_requires_trusted_allowed_workspace(
+    wiki_tool, manager, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_file = workspace / "evidence.md"
+    source_file.write_text("trusted workspace evidence", encoding="utf-8")
+    workspace_id = manager.registry.register(workspace)
+    source = CurrentSource(
+        kind="workspace-file",
+        workspace_id=workspace_id,
+        relative_path="evidence.md",
+    )
+    provenance = SourceRef(
+        kind="workspace-file",
+        workspace_id=workspace_id,
+        path="evidence.md",
+        content_hash=content_hash(source_file.read_bytes()),
+    )
+
+    result = await wiki_tool(
+        Params(operation="ingest", source=source, candidate=_candidate(provenance))
+    )
+
+    assert result.is_error
+    assert "allowed workspace" in result.message.lower()
+
+
+async def test_candidate_cannot_self_certify_high_value_or_user_confirmation(wiki_tool) -> None:
+    wiki_tool._runtime.wiki_tool_context = _tool_context(candidate_high_value=False)
+
+    result = await wiki_tool(Params(operation="remember", candidate=_candidate()))
+
+    assert result.is_error
+    assert "trusted" in result.message.lower()
+
+
+async def test_named_session_uses_trusted_provenance_uuid(wiki_tool) -> None:
+    assert wiki_tool._runtime.session.id == "named-shell-session"
+
+    result = await wiki_tool(Params(operation="remember", candidate=_candidate()))
+
+    assert not result.is_error
 
 
 async def test_tool_fails_closed_when_global_wiki_is_unavailable() -> None:
@@ -197,4 +268,25 @@ async def test_operation_error_never_echoes_machine_path() -> None:
     result = await tool(Params(operation="search", query="anything"))
 
     assert result.is_error
+    assert "/Users/private/wiki" not in result.message
+
+
+async def test_wiki_domain_conflict_is_a_safe_retryable_tool_error() -> None:
+    from kimi_cli.wiki.transaction import WikiConflictError
+
+    class FailingManager:
+        def search(self, _query: str, _limit: int):
+            raise WikiConflictError("conflict at /Users/private/wiki")
+
+    tool = Wiki(
+        cast(
+            "Runtime",
+            SimpleNamespace(wiki=FailingManager(), session=SimpleNamespace(id="named-session")),
+        )
+    )
+
+    result = await tool(Params(operation="search", query="anything"))
+
+    assert result.is_error
+    assert "retry" in result.message.lower()
     assert "/Users/private/wiki" not in result.message

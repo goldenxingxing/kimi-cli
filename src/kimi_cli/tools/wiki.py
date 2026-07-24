@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast, override
 from uuid import UUID
 
@@ -11,7 +12,9 @@ from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolRetu
 from pydantic import BaseModel, Field
 
 from kimi_cli.utils.logging import logger
+from kimi_cli.wiki.locking import WikiBusyError
 from kimi_cli.wiki.models import CurrentSource, WikiCandidate
+from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
 from kimi_cli.wiki.value_gate import DiscardedCandidate, WikiContext
 
 if TYPE_CHECKING:
@@ -43,11 +46,24 @@ class Params(BaseModel):
         default=None,
         description="Current-turn inline content or a registered workspace-relative file only.",
     )
-    instructions: str | None = Field(
-        default=None,
-        description="Optional concise guidance accompanying the structured candidate.",
-    )
     limit: int = Field(default=5, ge=1, le=20, description="Maximum number of search results.")
+
+
+@dataclass(frozen=True, slots=True)
+class WikiToolContext:
+    """Trusted per-turn admission facts supplied by runtime wiring in Task 9.
+
+    The model never provides this object.  It separates stable provenance and
+    source permissions from the untrusted structured candidate payload.
+    """
+
+    provenance_session_id: UUID
+    conversation_hashes: frozenset[str]
+    allowed_workspace_ids: frozenset[UUID]
+    candidate_high_value: bool
+    stable: bool
+    user_confirmed: bool
+    reliable_source: bool
 
 
 class Wiki(CallableTool2[Params]):
@@ -87,6 +103,20 @@ class Wiki(CallableTool2[Params]):
             return await self._prepare(manager, params)
         except (OSError, ValueError, UnicodeError) as exc:
             logger.warning("Wiki operation failed: {error}", error=exc)
+            return ToolError(
+                message="Wiki operation failed. Check the request and try again.",
+                brief="Wiki operation failed",
+            )
+        except (WikiBusyError, WikiConflictError, WikiRecoveryRequired) as exc:
+            logger.warning("Wiki operation requires retry: {error}", error=exc)
+            return ToolError(
+                message="Wiki changed or is busy. Refresh the Wiki state and retry.",
+                brief="Wiki retry required",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unexpected Wiki operation failure")
             return ToolError(
                 message="Wiki operation failed. Check the request and try again.",
                 brief="Wiki operation failed",
@@ -158,7 +188,7 @@ class Wiki(CallableTool2[Params]):
                 brief="Missing Wiki candidate",
             )
         operation = cast(Literal["remember", "ingest"], params.operation)
-        context = self._context(operation, params.candidate)
+        context = self._context(operation, params.candidate, params.source)
         if isinstance(context, ToolError):
             return context
         prepared: PreparedWikiChange | DiscardedCandidate
@@ -199,24 +229,41 @@ class Wiki(CallableTool2[Params]):
         self,
         operation: Literal["remember", "ingest"],
         candidate: WikiCandidate,
+        source: CurrentSource | None,
     ) -> WikiContext | ToolError:
-        try:
-            session_id = UUID(str(self._runtime.session.id))
-        except (AttributeError, ValueError):
+        trusted = getattr(self._runtime, "wiki_tool_context", None)
+        if not isinstance(trusted, WikiToolContext):
             return ToolError(
-                message="Wiki requires a valid current session identity.",
-                brief="Invalid Wiki session",
+                message=(
+                    "Wiki write proposal is unavailable until trusted session context is ready."
+                ),
+                brief="Wiki context unavailable",
             )
-        # A dedicated remember/ingest invocation is an explicit proposal.  The
-        # manager still validates the candidate's high-value declaration,
-        # provenance, stability, novelty, and safety before returning a prepared
-        # change. Web provenance is deliberately not marked reliable here.
+        if not trusted.candidate_high_value or not trusted.stable:
+            return ToolError(
+                message="Wiki candidate lacks trusted high-value or stability evidence.",
+                brief="Wiki candidate discarded",
+            )
+        if (
+            source is not None
+            and source.kind == "workspace-file"
+            and source.workspace_id not in trusted.allowed_workspace_ids
+        ):
+            return ToolError(
+                message="Wiki ingest source is outside the trusted allowed workspace.",
+                brief="Wiki candidate discarded",
+            )
+        if not _sources_are_trusted(candidate, source, trusted):
+            return ToolError(
+                message="Wiki candidate is not grounded in this session's trusted sources.",
+                brief="Wiki candidate discarded",
+            )
         return WikiContext(
-            session_id=session_id,
-            cross_turn_utility=candidate.value == "high",
-            stable=candidate.value == "high",
-            user_confirmed=True,
-            reliable_source=False,
+            session_id=trusted.provenance_session_id,
+            cross_turn_utility=trusted.candidate_high_value,
+            stable=trusted.stable,
+            user_confirmed=trusted.user_confirmed,
+            reliable_source=trusted.reliable_source,
             operation=operation,
         )
 
@@ -234,3 +281,34 @@ def _is_archive_source(source: CurrentSource) -> bool:
     if source.kind != "workspace-file" or source.relative_path is None:
         return False
     return any(source.relative_path.casefold().endswith(suffix) for suffix in _ARCHIVE_SUFFIXES)
+
+
+def _sources_are_trusted(
+    candidate: WikiCandidate,
+    current_source: CurrentSource | None,
+    context: WikiToolContext,
+) -> bool:
+    """Verify all supplied provenance against the trusted current-turn context."""
+    if (
+        current_source is not None
+        and current_source.kind == "workspace-file"
+        and current_source.workspace_id not in context.allowed_workspace_ids
+    ):
+        return False
+    sources = (
+        *candidate.sources,
+        *(source for page in candidate.pages for source in page.page.sources),
+    )
+    for source in sources:
+        if source.kind == "conversation":
+            if (
+                source.session_id != context.provenance_session_id
+                or source.content_hash not in context.conversation_hashes
+            ):
+                return False
+        elif source.kind == "workspace-file":
+            if source.workspace_id not in context.allowed_workspace_ids:
+                return False
+        elif not context.reliable_source:
+            return False
+    return True

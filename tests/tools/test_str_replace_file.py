@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -9,7 +10,7 @@ from typing import cast
 from kaos.path import KaosPath
 
 from kimi_cli.soul.agent import Runtime
-from kimi_cli.soul.approval import Approval
+from kimi_cli.soul.approval import Approval, ApprovalResult
 from kimi_cli.tools.file.replace import Edit, Params, StrReplaceFile
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.types import DiffDisplayBlock
@@ -271,5 +272,61 @@ async def test_replace_file_cannot_mutate_managed_wiki(builtin_args, tmp_path: P
         assert result.is_error
         assert "Wiki tool" in result.message
         assert "Mutated" not in manager.layout.index.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+async def test_replace_file_rechecks_target_after_approval_symlink_swap(
+    builtin_args, tmp_path: Path
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    manager.layout.index.write_text("old index", encoding="utf-8")
+    target = Path(str(builtin_args.KIMI_WORK_DIR)) / "target.txt"
+    target.write_text("old target", encoding="utf-8")
+
+    class SwapApproval:
+        async def request(self, *_args, **_kwargs):
+            replacement = target.with_name("replacement-link.txt")
+            replacement.symlink_to(manager.layout.index)
+            os.replace(replacement, target)
+            return ApprovalResult(approved=True)
+
+    try:
+        runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+        tool = StrReplaceFile(cast("Runtime", runtime), cast("Approval", SwapApproval()))
+
+        result = await tool(Params(path=str(target), edit=Edit(old="old", new="mutated")))
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+        assert manager.layout.index.read_text(encoding="utf-8") == "old index"
+    finally:
+        manager.close()
+
+
+async def test_replace_file_rechecks_target_after_approval_hardlink_swap(
+    builtin_args, tmp_path: Path
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    manager.layout.index.write_text("old index", encoding="utf-8")
+    target = Path(str(builtin_args.KIMI_WORK_DIR)) / "target.txt"
+    target.write_text("old target", encoding="utf-8")
+
+    class SwapApproval:
+        async def request(self, *_args, **_kwargs):
+            replacement = target.with_name("replacement-hardlink.txt")
+            os.link(manager.layout.index, replacement)
+            os.replace(replacement, target)
+            return ApprovalResult(approved=True)
+
+    try:
+        runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+        tool = StrReplaceFile(cast("Runtime", runtime), cast("Approval", SwapApproval()))
+
+        result = await tool(Params(path=str(target), edit=Edit(old="old", new="mutated")))
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+        assert manager.layout.index.read_text(encoding="utf-8") == "old index"
     finally:
         manager.close()
