@@ -388,42 +388,43 @@ def load_session_by_id(id: UUID) -> JointSession | None:
     session_id_str = str(id)
 
     for wd in global_metadata.work_dirs:
-        session_dir = wd.sessions_dir / session_id_str
-        context_file = session_dir / "context.jsonl"
+        for sessions_root in wd.readable_sessions_dirs:
+            session_dir = sessions_root / session_id_str
+            context_file = session_dir / "context.jsonl"
 
-        if context_file.exists():
-            last_updated = datetime.fromtimestamp(context_file.stat().st_mtime, tz=UTC)
-            state = load_session_state(session_dir)
-            entry = SessionIndexEntry(
-                session_id=id,
-                session_dir=session_dir,
-                context_file=context_file,
-                work_dir=wd.path,
-                work_dir_meta=wd,
-                last_updated=last_updated,
-                title="Untitled",
-                state=state,
-            )
-            _ensure_title(entry, refresh=True)
-            return _build_joint_session(entry)
+            if context_file.exists():
+                last_updated = datetime.fromtimestamp(context_file.stat().st_mtime, tz=UTC)
+                state = load_session_state(session_dir)
+                entry = SessionIndexEntry(
+                    session_id=id,
+                    session_dir=session_dir,
+                    context_file=context_file,
+                    work_dir=wd.path,
+                    work_dir_meta=wd,
+                    last_updated=last_updated,
+                    title="Untitled",
+                    state=state,
+                )
+                _ensure_title(entry, refresh=True)
+                return _build_joint_session(entry)
 
-        # Legacy sessions: context.jsonl stored directly in sessions_dir
-        legacy_context = wd.sessions_dir / f"{session_id_str}.jsonl"
-        if legacy_context.exists():
-            last_updated = datetime.fromtimestamp(legacy_context.stat().st_mtime, tz=UTC)
-            state = load_session_state(session_dir)
-            entry = SessionIndexEntry(
-                session_id=id,
-                session_dir=session_dir,
-                context_file=legacy_context,
-                work_dir=wd.path,
-                work_dir_meta=wd,
-                last_updated=last_updated,
-                title="Untitled",
-                state=state,
-            )
-            _ensure_title(entry, refresh=True)
-            return _build_joint_session(entry)
+            # Oldest sessions stored context directly below the sessions root.
+            legacy_context = sessions_root / f"{session_id_str}.jsonl"
+            if legacy_context.exists():
+                last_updated = datetime.fromtimestamp(legacy_context.stat().st_mtime, tz=UTC)
+                state = load_session_state(session_dir)
+                entry = SessionIndexEntry(
+                    session_id=id,
+                    session_dir=session_dir,
+                    context_file=legacy_context,
+                    work_dir=wd.path,
+                    work_dir_meta=wd,
+                    last_updated=last_updated,
+                    title="Untitled",
+                    state=state,
+                )
+                _ensure_title(entry, refresh=True)
+                return _build_joint_session(entry)
 
     return None
 

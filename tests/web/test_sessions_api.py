@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
+from uuid import uuid4
 
 import pytest
 from kaos.path import KaosPath
@@ -81,6 +82,28 @@ async def test_startup_dir_prefers_last_selected_work_directory(
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(startup_dir="/fallback")))
 
     assert await sessions_api.get_startup_dir(request) == str(work_dir)
+
+
+def test_web_store_loads_session_from_legacy_root(
+    isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    from kimi_cli.metadata import Metadata, WorkDirMeta, save_metadata
+    from kimi_cli.web.store.sessions import invalidate_sessions_cache, load_session_by_id
+
+    session_id = uuid4()
+    work_meta = WorkDirMeta(path=str(work_dir))
+    session_dir = work_meta.legacy_sessions_dir / str(session_id)
+    session_dir.mkdir(parents=True)
+    (session_dir / "context.jsonl").write_text(
+        '{"role":"user","content":"legacy"}\n', encoding="utf-8"
+    )
+    save_metadata(Metadata(work_dirs=[work_meta]))
+    invalidate_sessions_cache()
+
+    loaded = load_session_by_id(session_id)
+
+    assert loaded is not None
+    assert loaded.kimi_cli_session.dir == session_dir
 
 
 @pytest.mark.anyio
