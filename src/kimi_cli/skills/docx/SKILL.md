@@ -1,6 +1,8 @@
 ---
 name: docx
 description: "Create and edit Word documents (.docx) — C# + OpenXML SDK for creation, WIR engine for editing/comments/tracked changes. Use for any .docx task including document creation, editing, comments, revisions, footnotes, TOC, and Markdown-to-Word conversion."
+runtime-platforms:
+  - linux-x86_64-cpython-3.12
 ---
 
 # Part 1: Routing

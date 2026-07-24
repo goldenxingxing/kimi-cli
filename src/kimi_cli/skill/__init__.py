@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -52,6 +53,39 @@ def get_builtin_skills_dir() -> Path:
         meipass = cast(str, sys._MEIPASS)  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
         return Path(meipass) / "kimi_cli" / "skills"
     return Path(__file__).parent.parent / "skills"
+
+
+def _runtime_platform_tag() -> str:
+    system = (
+        "windows"
+        if sys.platform == "win32"
+        else "darwin"
+        if sys.platform == "darwin"
+        else "linux"
+        if sys.platform.startswith("linux")
+        else sys.platform
+    )
+    machine = platform.machine().casefold()
+    if machine == "amd64":
+        machine = "x86_64"
+    elif machine in {"aarch64", "arm64"}:
+        machine = "arm64"
+    return (
+        f"{system}-{machine}-{sys.implementation.name}-"
+        f"{sys.version_info.major}.{sys.version_info.minor}"
+    )
+
+
+def _skill_supports_current_runtime(content: str) -> bool:
+    frontmatter = parse_frontmatter(content) or {}
+    declared = frontmatter.get("runtime-platforms")
+    if declared is None:
+        return True
+    if not isinstance(declared, list):
+        raise ValueError("runtime-platforms must be a list")
+    return _runtime_platform_tag() in {
+        item for item in cast(list[object], declared) if isinstance(item, str)
+    }
 
 
 def _get_user_generic_skills_dir_candidates() -> tuple[KaosPath, ...]:
@@ -545,6 +579,12 @@ async def discover_skills(
                 )
                 continue
             try:
+                if not _skill_supports_current_runtime(content):
+                    logger.info(
+                        "Skipping skill unsupported by this runtime at {}.",
+                        skill_md,
+                    )
+                    continue
                 skill = parse_skill_text(
                     content, dir_path=entry, skill_md_file=skill_md, scope=scope
                 )
@@ -582,6 +622,12 @@ async def discover_skills(
 
             try:
                 content = await entry.read_text(encoding="utf-8")
+                if not _skill_supports_current_runtime(content):
+                    logger.info(
+                        "Skipping flat skill unsupported by this runtime at {}.",
+                        entry,
+                    )
+                    continue
                 skill = parse_skill_text(
                     content,
                     dir_path=skills_dir,
