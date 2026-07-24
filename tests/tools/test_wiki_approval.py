@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from kimi_cli.tools.wiki import (
     reset_wiki_turn_context,
     set_wiki_turn_context,
 )
-from kimi_cli.wiki.manager import WikiManager
+from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
 from kimi_cli.wiki.models import PageChange, SourceRef, WikiCandidate, WikiPage
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.value_gate import WikiContext
@@ -171,7 +172,32 @@ async def _start_write(tool: Wiki, candidate: WikiCandidate):
         )
 
 
-async def test_trusted_user_turn_supplies_ephemeral_write_evidence(
+@pytest.mark.parametrize("user_text", ["hi", "Do not remember this.", "不要记住这个。"])
+def test_trusted_user_turn_supplies_hashes_without_certifying_value_or_stability(
+    manager, user_text: str
+) -> None:
+    runtime, _approval_runtime = _runtime(manager, trusted_turn=False)
+    token = set_wiki_turn_context(
+        runtime,
+        user_text,
+        trusted_user_input=True,
+    )
+    try:
+        active = Wiki.current_context(runtime)
+        assert active is not None
+        assert not active.candidate_high_value
+        assert not active.stable
+        assert not active.user_confirmed
+        assert active.conversation_hashes == {
+            content_hash(user_text.encode("utf-8")),
+        }
+    finally:
+        reset_wiki_turn_context(token)
+
+    assert Wiki.current_context(runtime) is runtime.wiki_tool_context
+
+
+async def test_explicit_remember_intent_is_separate_from_model_value_claim(
     manager,
 ) -> None:
     runtime, approval_runtime = _runtime(manager, trusted_turn=False)
@@ -184,10 +210,10 @@ async def test_trusted_user_turn_supplies_ephemeral_write_evidence(
     try:
         active = Wiki.current_context(runtime)
         assert active is not None
-        assert active.candidate_high_value
-        assert active.stable
+        assert not active.candidate_high_value
+        assert not active.stable
         assert active.user_confirmed
-        assert active.conversation_hashes
+        assert active.explicit_remember_intent
 
         pending = await _start_write(
             Wiki(runtime),
@@ -205,8 +231,6 @@ async def test_trusted_user_turn_supplies_ephemeral_write_evidence(
         assert not (await pending).is_error
     finally:
         reset_wiki_turn_context(token)
-
-    assert Wiki.current_context(runtime) is runtime.wiki_tool_context
 
 
 def test_synthetic_turn_cannot_enable_wiki_write_evidence(manager) -> None:
@@ -251,18 +275,24 @@ async def test_normal_write_asks_before_lock_and_approve_once_commits(
     assert request.action == "wiki.write"
     assert request.description == "Record: Atomic Wiki recovery\nChanges: 2 pages"
     assert request.sender == "Wiki"
-    assert request.display == [
-        WikiApprovalBlock(
-            summary="Atomic Wiki recovery",
-            pages=["concepts/atomic-wiki-recovery.md", "entities/sqlite.md"],
-            workspace_id=None,
-            session_id=str(_SESSION_ID),
-            details=[
-                f"Sources: conversation:{_SESSION_ID}@sha256:{'a' * 64}",
-                "Paths are normalized relative to the managed Wiki.",
-            ],
-        )
+    block = cast(WikiApprovalBlock, request.display[0])
+    assert block.summary == "Atomic Wiki recovery"
+    assert block.pages == [
+        "concepts/atomic-wiki-recovery.md",
+        "entities/sqlite.md",
     ]
+    assert block.sources == [
+        f"conversation:{_SESSION_ID}@sha256:{'a' * 64}",
+    ]
+    assert block.workspace_id is None
+    assert block.session_id == str(_SESSION_ID)
+    assert block.details == ["Paths are normalized relative to the managed Wiki."]
+    assert block.omitted.model_dump() == {
+        "pages": 0,
+        "sources": 0,
+        "duplicates": 0,
+        "conflicts": 0,
+    }
     # Preparing and waiting for the user must not retain the cross-process writer lock.
     with manager.lock.exclusive(timeout=0.1):
         assert manager.layout.revision.read_text(encoding="ascii") == "0\n"
@@ -295,8 +325,8 @@ async def test_model_initiated_normal_proposal_with_workspace_evidence_still_ask
         provenance_session_id=_SESSION_ID,
         conversation_hashes=frozenset(),
         allowed_workspace_ids=frozenset({workspace_id}),
-        candidate_high_value=True,
-        stable=True,
+        candidate_high_value=False,
+        stable=False,
         user_confirmed=False,
         reliable_source=False,
     )
@@ -324,10 +354,52 @@ async def test_collapsed_approval_metadata_bounds_large_page_sets(manager) -> No
     request = await _next_pending(approval_runtime)
     block = cast(WikiApprovalBlock, request.display[0])
     assert len(block.pages) == 20
-    assert block.details[-1] == "Additional pages omitted: 5."
+    assert block.omitted.pages == 5
 
     approval_runtime.resolve(request.id, "reject")
     assert (await pending).is_error
+
+
+def test_approval_metadata_is_unique_and_bounded_for_every_category() -> None:
+    source_ids = tuple(f"workspace:{number:04d}:" + ("来源" * 300) for number in range(5000))
+    pages = tuple(f"concepts/page-{number:04d}-" + ("路径" * 300) + ".md" for number in range(120))
+    duplicates = (*pages[:80], *pages[:20])
+    conflicts = (*pages[40:120], *pages[40:60])
+    prepared = cast(
+        "PreparedWikiChange",
+        SimpleNamespace(
+            summary="摘要" * 5000,
+            pages=pages,
+            source_ids=source_ids,
+            duplicate_pages=duplicates,
+            conflict_pages=conflicts,
+        ),
+    )
+
+    block = WikiApprovalBlock.from_prepared(
+        prepared,
+        workspace_id=str(_SESSION_ID),
+        session_id=str(_SESSION_ID),
+    )
+
+    assert len(block.model_dump_json().encode("utf-8")) <= 8192
+    for values in (
+        block.pages,
+        block.sources,
+        block.duplicate_pages,
+        block.conflict_pages,
+    ):
+        assert len(values) <= 20
+        assert len(values) == len(set(values))
+        assert all(len(value) <= 160 for value in values)
+        assert all(len(value.encode("utf-8")) <= 256 for value in values)
+    assert len(block.summary) <= 240
+    assert len(block.summary.encode("utf-8")) <= 512
+    assert len(block.pages) + block.omitted.pages == len(pages)
+    assert len(block.sources) + block.omitted.sources == len(source_ids)
+    assert len(block.duplicate_pages) + block.omitted.duplicates == len(duplicates)
+    assert len(block.conflict_pages) + block.omitted.conflicts == len(conflicts)
+    assert json.loads(block.model_dump_json())["omitted"]["sources"] > 0
 
 
 async def test_approve_for_session_is_scoped_to_wiki_write_and_skips_next_popup(
@@ -442,28 +514,51 @@ async def test_independent_change_rebases_only_after_approval(
     assert (manager.layout.root / "concepts" / "concurrent-independent.md").is_file()
 
 
-async def test_afk_uses_approval_path_instead_of_yolo_shortcut(manager, monkeypatch) -> None:
-    runtime, _approval_runtime = _runtime(manager, afk=True)
-    original_request = runtime.approval.request
-    calls = 0
+async def test_afk_creates_real_pending_request_and_waits_before_commit(manager) -> None:
+    runtime, approval_runtime = _runtime(manager, afk=True)
+    pending = await _start_write(
+        Wiki(runtime),
+        _candidate(paths=("concepts/afk-approved.md",)),
+    )
 
-    async def counted_request(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return await original_request(*args, **kwargs)
+    request = await _next_pending(approval_runtime)
+    assert request.action == "wiki.write"
+    assert manager.layout.revision.read_text(encoding="ascii") == "0\n"
+    assert not pending.done()
 
-    monkeypatch.setattr(runtime.approval, "request", counted_request)
-    with _tool_call_context():
-        result = await Wiki(runtime)(
-            Params(
-                operation="remember",
-                candidate=_candidate(paths=("concepts/afk-approved.md",)),
-            )
-        )
+    approval_runtime.resolve(request.id, "approve")
+    result = await pending
 
     assert not result.is_error
-    assert calls == 1
     assert manager.layout.revision.read_text(encoding="ascii") == "1\n"
+
+
+@pytest.mark.parametrize("yolo", [False, True])
+async def test_plain_turn_cannot_self_certify_high_value(manager, yolo: bool) -> None:
+    runtime, approval_runtime = _runtime(manager, yolo=yolo, trusted_turn=False)
+    user_text = "hi"
+    token = set_wiki_turn_context(runtime, user_text, trusted_user_input=True)
+    try:
+        with _tool_call_context():
+            result = await Wiki(runtime)(
+                Params(
+                    operation="remember",
+                    candidate=_candidate(
+                        source=SourceRef(
+                            kind="conversation",
+                            session_id=_SESSION_ID,
+                            content_hash=content_hash(user_text.encode("utf-8")),
+                        ),
+                        paths=("concepts/model-self-certified.md",),
+                    ),
+                )
+            )
+    finally:
+        reset_wiki_turn_context(token)
+
+    assert result.is_error
+    assert approval_runtime.list_pending() == []
+    assert manager.layout.revision.read_text(encoding="ascii") == "0\n"
 
 
 async def test_yolo_high_value_commits_without_popup(manager) -> None:

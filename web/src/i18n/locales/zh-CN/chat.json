@@ -33,6 +33,10 @@
     "title": "写入全局 Wiki",
     "details": "详情",
     "paths": "页面",
+    "sources": "来源",
+    "duplicates": "已忽略的重复页面",
+    "conflicts": "已保留的冲突页面",
+    "omitted": "另有 {{count}} 项已省略",
     "approveOnce": "仅允许一次",
     "approveForSession": "本会话始终允许",
     "decline": "拒绝"

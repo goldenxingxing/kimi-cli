@@ -17,6 +17,7 @@ from kimi_cli.utils.logging import logger
 from kimi_cli.wire.types import DisplayBlock
 
 type Response = Literal["approve", "approve_for_session", "reject"]
+type ApprovalRequestPolicy = Literal["default", "session_only"]
 
 # Maps DisplayBlock.type to the TS approval_surface vocabulary.
 _SURFACE_BY_BLOCK_TYPE = {
@@ -203,6 +204,8 @@ class Approval:
         action: str,
         description: str,
         display: list[DisplayBlock] | None = None,
+        *,
+        request_policy: ApprovalRequestPolicy = "default",
     ) -> ApprovalResult:
         """
         Request approval for the given action. Intended to be called by tools.
@@ -212,6 +215,8 @@ class Approval:
             action (str): The action to request approval for.
                 This is used to identify the action for auto-approval.
             description (str): The description of the action. This is used to display to the user.
+            request_policy: ``session_only`` disables mode-wide AFK/YOLO
+                auto-approval while preserving action-scoped session approval.
 
         Returns:
             ApprovalResult: Result with ``approved`` flag and optional ``feedback``.
@@ -239,7 +244,7 @@ class Approval:
             action=action,
             description=description,
         )
-        if self.is_auto_approve():
+        if request_policy == "default" and self.is_auto_approve():
             from kimi_cli.telemetry import track
 
             track(
