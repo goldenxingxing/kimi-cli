@@ -1,5 +1,6 @@
 """Tests for skill discovery and formatting behavior."""
 
+import platform
 import sys
 from pathlib import Path
 
@@ -181,6 +182,35 @@ type: capability
 
 
 @pytest.mark.asyncio
+async def test_discover_skills_skips_unsupported_runtime(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "skills"
+    root.mkdir()
+    _write_skill(
+        root / "native-only",
+        """---
+name: native-only
+description: Native-only skill
+runtime-platforms:
+  - linux-x86_64-cpython-3.12
+---
+""",
+    )
+    monkeypatch.setattr(
+        "kimi_cli.skill._runtime_platform_tag",
+        lambda: "darwin-arm64-cpython-3.14",
+    )
+
+    skills = await discover_skills(
+        KaosPath.unsafe_from_local_path(root),
+        scope="builtin",
+    )
+
+    assert skills == []
+
+
+@pytest.mark.asyncio
 async def test_all_bundled_skills_are_discoverable():
     from kimi_cli.skill import get_builtin_skills_dir
 
@@ -190,8 +220,12 @@ async def test_all_bundled_skills_are_discoverable():
         scope="builtin",
     )
 
-    assert len(skills) == 300
-    assert len({skill.name.casefold() for skill in skills}) == 300
+    expected = 300 if sys.platform.startswith("linux") and (
+        platform.machine().casefold() in {"x86_64", "amd64"}
+        and sys.version_info[:2] == (3, 12)
+    ) else 299
+    assert len(skills) == expected
+    assert len({skill.name.casefold() for skill in skills}) == expected
 
 
 @pytest.mark.asyncio
