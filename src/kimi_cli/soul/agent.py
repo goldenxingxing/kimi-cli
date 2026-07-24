@@ -206,6 +206,9 @@ class Runtime:
     resumed: bool = False
     hook_engine: Any = None
     """HookEngine instance, set by KimiCLI after soul creation."""
+    managed_skill_revision: int = 0
+    skills_prompt: str = ""
+    requested_skills_dirs: list[KaosPath] | None = None
 
     def __post_init__(self) -> None:
         if self.subagent_store is None:
@@ -256,6 +259,9 @@ class Runtime:
         skills_by_name = index_skills(skills)
         logger.info("Discovered {count} skill(s)", count=len(skills))
         skills_formatted = format_skills_for_prompt(skills)
+        from kimi_cli.skill.manager import SkillManager
+
+        managed_skill_revision = SkillManager().revision
 
         # Restore additional directories from session state, pruning stale entries
         additional_dirs: list[KaosPath] = []
@@ -355,6 +361,9 @@ class Runtime:
             approval_runtime=ApprovalRuntime(),
             root_wire_hub=RootWireHub(),
             role="root",
+            managed_skill_revision=managed_skill_revision,
+            skills_prompt=skills_formatted or "No skills found.",
+            requested_skills_dirs=skills_dirs,
         )
 
     def copy_for_subagent(
@@ -388,6 +397,9 @@ class Runtime:
             subagent_id=agent_id,
             subagent_type=subagent_type,
             role="subagent",
+            managed_skill_revision=self.managed_skill_revision,
+            skills_prompt=self.skills_prompt,
+            requested_skills_dirs=self.requested_skills_dirs,
         )
 
 

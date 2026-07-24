@@ -288,6 +288,14 @@ async def resolve_skills_roots(
         if env_skill_dir:
             await _try_append_extra(env_skill_dir)
 
+    # OpenKimo's writable, application-level layer shadows packaged skills
+    # without being tied to any selected work directory.
+    from kimi_cli.skill.manager import get_managed_skill_dir
+
+    managed_path = get_managed_skill_dir()
+    if managed_path.is_dir():
+        _append(KaosPath.unsafe_from_local_path(managed_path), "extra")
+
     # Plugins are always discoverable; treat as "extra" origin for prompt
     # grouping but place them below config-declared extras (user intent wins).
     plugins_path = get_plugins_dir()
@@ -374,7 +382,27 @@ async def discover_skills_from_roots(
     for scoped in scoped_roots:
         for skill in await discover_skills(scoped.root, scope=scoped.scope):
             skills_by_name.setdefault(normalize_skill_name(skill.name), skill)
-    return sorted(skills_by_name.values(), key=lambda s: s.name)
+    from kimi_cli.skill.manager import SkillManager, get_managed_skill_dir
+
+    manager = SkillManager()
+    builtin_root = get_builtin_skills_dir().resolve()
+    managed_root = get_managed_skill_dir().resolve()
+
+    def _managed(skill: Skill) -> bool:
+        try:
+            local_dir = Path(str(skill.dir)).resolve()
+            return local_dir.is_relative_to(builtin_root) or local_dir.is_relative_to(managed_root)
+        except (OSError, ValueError):
+            return False
+
+    return sorted(
+        (
+            skill
+            for skill in skills_by_name.values()
+            if not _managed(skill) or manager.is_enabled(skill.name)
+        ),
+        key=lambda s: s.name,
+    )
 
 
 _SCOPE_HEADINGS: tuple[tuple[SkillScope, str], ...] = (
