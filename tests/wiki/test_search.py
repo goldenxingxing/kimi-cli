@@ -111,6 +111,27 @@ def test_sync_replaces_changed_hash_and_removes_deleted_rows(index, pages: list[
     assert result.content_hash == content_hash(render_page(changed).encode("utf-8"))
 
 
+def test_revision_cas_never_allows_older_snapshot_to_replace_newer_cache(
+    tmp_path: Path, pages: list[WikiPage]
+) -> None:
+    from kimi_cli.wiki.search import WikiSearchIndex
+
+    database = tmp_path / "search.sqlite3"
+    older = WikiSearchIndex.open(database, wal=False)
+    newer = WikiSearchIndex.open(database, wal=False)
+    revised = pages[0].model_copy(
+        update={"revision": 2, "body": "Newest authoritative cache content.\n"}
+    )
+    try:
+        assert newer.sync([revised], revision=2) is True
+        assert older.sync(pages, revision=1) is False
+        result = older.search("Newest authoritative", 5)
+        assert result[0].revision == 2
+    finally:
+        older.close()
+        newer.close()
+
+
 def test_non_trigram_build_uses_title_tag_then_escaped_like(
     tmp_path: Path, pages: list[WikiPage], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -106,6 +106,27 @@ def test_gate_discards_machine_specific_summary_before_audit(manager) -> None:
     assert manager.prepare(candidate, _context()).reason == "sensitive"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("title", "API key: sk-abcdefghijklmnopqrstuvwxyz"),
+        ("title", "Private notes at /Users/example/wiki.md"),
+        ("tags", ["safe", "refresh_token=do-not-store"]),
+        ("tags", ["safe", r"C:\Users\example\wiki.md"]),
+    ],
+)
+def test_gate_scans_all_string_frontmatter_for_secrets_and_machine_paths(
+    manager, field: str, value: object
+) -> None:
+    candidate = _candidate()
+    page = candidate.pages[0].page.model_copy(update={field: value})
+    candidate = candidate.model_copy(
+        update={"pages": [PageChange(page=page, expected_revision=None)]}
+    )
+
+    assert manager.prepare(candidate, _context()).reason == "sensitive"
+
+
 def test_gate_discards_duplicate_without_creating_review_state(manager) -> None:
     from kimi_cli.wiki.value_gate import DiscardedCandidate
 
@@ -164,3 +185,33 @@ def test_gate_rejects_unresolvable_workspace_provenance(manager) -> None:
     )
 
     assert manager.prepare(candidate, _context()).reason == "ungrounded"
+
+
+def test_gate_revalidates_source_frontmatter_before_workspace_resolution(manager) -> None:
+    workspace_source = SourceRef(
+        kind="workspace-file",
+        workspace_id=UUID("423e4567-e89b-12d3-a456-426614174000"),
+        path="docs/source.md",
+        content_hash=_SOURCE_HASH,
+    ).model_copy(update={"path": "/Users/example/private.md"})
+    candidate = _candidate()
+    page = candidate.pages[0].page.model_copy(update={"sources": [workspace_source]})
+    candidate = candidate.model_copy(
+        update={
+            "pages": [PageChange(page=page, expected_revision=None)],
+            "sources": [workspace_source],
+        }
+    )
+
+    assert manager.prepare(candidate, _context()).reason == "sensitive"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        _candidate().model_copy(update={"summary": "x" * 501}),
+        _candidate().model_copy(update={"pages": []}),
+    ],
+)
+def test_gate_revalidates_complete_candidate_shape(manager, candidate: WikiCandidate) -> None:
+    assert manager.prepare(candidate, _context()).reason == "sensitive"

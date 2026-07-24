@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -163,6 +164,14 @@ def test_conflict_preserves_both_sourced_positions(manager) -> None:
     assert "## Conflict" in page.body
     assert "Source-a" in page.body
     assert "Source-b" in page.body
+    existing_source_id = f"conversation:{_SESSION_ID}@sha256:{'a' * 64}"
+    proposed_source_id = f"conversation:{_SESSION_ID}@sha256:{'b' * 64}"
+    assert (
+        f"### Existing sourced position\n\nSources: {existing_source_id}\n\nSource-a" in page.body
+    )
+    assert (
+        f"### Additional sourced position\n\nSources: {proposed_source_id}\n\nSource-b" in page.body
+    )
     assert {source.content_hash for source in page.sources} == {
         "sha256:" + "a" * 64,
         "sha256:" + "b" * 64,
@@ -272,6 +281,17 @@ def test_ingest_discards_raw_source_with_credential_alias(manager) -> None:
     assert not (manager.layout.metadata / "pending").exists()
 
 
+def test_ingest_reuses_encoded_url_credential_scanner(manager) -> None:
+    current = CurrentSource(
+        kind="inline",
+        content="See https://example.test/article?refresh%5Ftoken=do-not-store",
+    )
+
+    result = manager.ingest(current, _candidate(), _context())
+
+    assert result.reason == "sensitive"
+
+
 def test_cache_sync_receives_a_full_snapshot_and_runs_outside_read_lock(
     manager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -288,12 +308,12 @@ def test_cache_sync_receives_a_full_snapshot_and_runs_outside_read_lock(
     original_sync = manager.search_index.sync
     snapshots: list[set[str]] = []
 
-    def observing_sync(pages):
+    def observing_sync(pages, **kwargs):
         materialized = tuple(pages)
         snapshots.append({page.logical_path for page in materialized})
         # This would deadlock or time out if the callback ran inside a shared read lock.
         assert manager.read("concepts/cache-mode.md").page.title == "Cache mode"
-        original_sync(materialized)
+        return original_sync(materialized, **kwargs)
 
     monkeypatch.setattr(manager.search_index, "sync", observing_sync)
 
@@ -309,7 +329,7 @@ def test_search_cache_failure_does_not_fail_authoritative_commit_and_retries(
 ) -> None:
     original_sync = manager.search_index.sync
 
-    def fail_sync(_pages):
+    def fail_sync(_pages, **_kwargs):
         raise sqlite3.OperationalError("injected cache failure")
 
     monkeypatch.setattr(manager.search_index, "sync", fail_sync)
@@ -323,6 +343,66 @@ def test_search_cache_failure_does_not_fail_authoritative_commit_and_retries(
     monkeypatch.setattr(manager.search_index, "sync", original_sync)
     assert manager.search("WAL", 5)[0].logical_path == "concepts/cache-mode.md"
     assert not (manager.layout.metadata / "search.invalid").exists()
+
+
+def test_search_uses_authoritative_markdown_while_cache_refresh_keeps_failing(
+    manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_sync(_pages, **_kwargs):
+        raise sqlite3.OperationalError("persistent cache failure")
+
+    monkeypatch.setattr(manager.search_index, "sync", fail_sync)
+    result = manager.commit(manager.prepare(_candidate(), _context()))
+
+    assert result.global_revision == 1
+    assert result.search_index_current is False
+    assert manager.search("WAL", 5)[0].logical_path == "concepts/cache-mode.md"
+
+
+@pytest.mark.parametrize("failure", [OSError("disk error"), RuntimeError("callback error")])
+def test_post_commit_cache_or_ack_error_never_reports_authority_failure(
+    manager, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    import kimi_cli.wiki.manager as manager_module
+
+    if isinstance(failure, OSError):
+        monkeypatch.setattr(
+            manager_module,
+            "acknowledge_reindex",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+    else:
+        monkeypatch.setattr(
+            manager.search_index,
+            "sync",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+
+    result = manager.commit(manager.prepare(_candidate(), _context()))
+
+    assert result.global_revision == 1
+    assert result.search_index_current is False
+    assert manager.read("concepts/cache-mode.md").page.revision == 1
+
+
+def test_cache_cas_rejection_does_not_acknowledge_stale_snapshot(
+    manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kimi_cli.wiki.manager as manager_module
+
+    monkeypatch.setattr(manager.search_index, "sync", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        manager_module,
+        "acknowledge_reindex",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale cache snapshots must not be acknowledged")
+        ),
+    )
+
+    result = manager.commit(manager.prepare(_candidate(), _context()))
+
+    assert result.global_revision == 1
+    assert result.search_index_current is False
 
 
 def test_initial_cache_failure_is_retried_even_without_commit_marker(
@@ -339,12 +419,12 @@ def test_initial_cache_failure_is_retried_even_without_commit_marker(
     original_sync = WikiSearchIndex.sync
     calls = 0
 
-    def fail_first_sync(index, pages):
+    def fail_first_sync(index, pages, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise sqlite3.OperationalError("injected startup cache failure")
-        original_sync(index, pages)
+        return original_sync(index, pages, **kwargs)
 
     monkeypatch.setattr(WikiSearchIndex, "sync", fail_first_sync)
     manager = WikiManager(layout.root, wal=False)
@@ -375,3 +455,89 @@ def test_stale_cache_acknowledgement_never_reports_current(
 
     assert result.global_revision == 1
     assert result.search_index_current is False
+
+
+def test_unrelated_concurrent_commit_is_safely_rebased(manager) -> None:
+    first = manager.prepare(_candidate(), _context())
+    second = manager.prepare(
+        _candidate(
+            path="entities/sqlite.md",
+            title="SQLite",
+            body="SQLite is an embedded database.\n",
+            marker="b",
+        ),
+        _context(),
+    )
+
+    assert manager.commit(first).global_revision == 1
+    assert manager.commit(second).global_revision == 2
+
+    assert manager.read("concepts/cache-mode.md").page.revision == 1
+    assert manager.read("entities/sqlite.md").page.revision == 1
+    index = manager.layout.index.read_text(encoding="utf-8")
+    log = manager.layout.log.read_text(encoding="utf-8")
+    assert "[[concepts/cache-mode]]" in index
+    assert "[[entities/sqlite]]" in index
+    assert "revision=2" in log
+
+
+def test_rebase_uses_immutable_approved_candidate_snapshot(manager) -> None:
+    candidate = _candidate(
+        path="entities/sqlite.md",
+        title="SQLite",
+        body="Approved SQLite knowledge.\n",
+        marker="b",
+    )
+    prepared = manager.prepare(candidate, _context())
+    candidate.pages[0].page.body = "Unapproved mutation after preparation.\n"
+    manager.commit(manager.prepare(_candidate(), _context()))
+
+    manager.commit(prepared)
+
+    body = manager.read("entities/sqlite.md").page.body
+    assert body == "Approved SQLite knowledge.\n"
+
+
+def test_malformed_logical_filename_is_skipped_by_search_and_reported_by_lint(manager) -> None:
+    malformed = manager.layout.root / "concepts" / "bad name.md"
+    malformed.write_text("not a valid logical Wiki page\n", encoding="utf-8")
+
+    assert manager.search("logical Wiki", 5) == []
+    report = manager.lint(None)
+
+    assert any(
+        issue.code == "malformed_page" and issue.logical_path == "concepts/bad name.md"
+        for issue in report.issues
+    )
+
+
+def test_nested_logical_page_is_skipped_by_search_and_reported_by_lint(manager) -> None:
+    nested = manager.layout.root / "concepts" / "nested"
+    nested.mkdir()
+    (nested / "page.md").write_text("nested invalid page\n", encoding="utf-8")
+
+    assert manager.search("nested invalid", 5) == []
+    assert any(
+        issue.code == "malformed_page" and issue.logical_path == "concepts/nested/page.md"
+        for issue in manager.lint(None).issues
+    )
+
+
+def test_manager_can_cross_threads_for_construct_use_commit_search_and_close(
+    tmp_path: Path,
+) -> None:
+    from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        manager = executor.submit(WikiManager, tmp_path / "wiki", wal=False).result()
+    try:
+        prepared = manager.prepare(_candidate(), _context())
+        assert isinstance(prepared, PreparedWikiChange)
+        result = manager.commit(prepared)
+        assert result.search_index_current is True
+        assert manager.search("WAL", 5)[0].logical_path == "concepts/cache-mode.md"
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: manager.search("WAL", 5), range(8)))
+        assert all(items[0].logical_path == "concepts/cache-mode.md" for items in results)
+    finally:
+        manager.close()

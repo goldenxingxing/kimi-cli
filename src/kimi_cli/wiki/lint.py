@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
-from kimi_cli.wiki.models import WikiPage
+from kimi_cli.wiki.models import SourceRef, WikiPage
 from kimi_cli.wiki.schema import content_hash, parse_page
 
 LintCode = Literal[
@@ -19,6 +20,7 @@ LintCode = Literal[
     "duplicate_claim",
     "conflict_marker",
     "missing_provenance",
+    "stale_provenance",
 ]
 _WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _CONFLICT = re.compile(r"(?im)^##+\s+Conflict\b|^(?:<{7}|={7}|>{7})")
@@ -41,7 +43,12 @@ class LintReport:
     issues: tuple[LintIssue, ...]
 
 
-def lint_snapshot(raw_pages: Mapping[str, str], *, scope: str | None) -> LintReport:
+def lint_snapshot(
+    raw_pages: Mapping[str, str],
+    *,
+    scope: str | None,
+    resolve_source: Callable[[SourceRef], Path | None] | None = None,
+) -> LintReport:
     """Inspect one committed raw Markdown snapshot without mutating it."""
     selected = {
         path: text
@@ -97,6 +104,13 @@ def lint_snapshot(raw_pages: Mapping[str, str], *, scope: str | None) -> LintRep
                     detail="page has no source provenance",
                 )
             )
+        elif resolve_source is not None:
+            _append_provenance_issues(
+                issues,
+                logical_path,
+                page.sources,
+                resolve_source,
+            )
         if _CONFLICT.search(page.body):
             issues.append(
                 LintIssue(
@@ -149,5 +163,48 @@ def _append_duplicates(
                     logical_path=logical_path,
                     detail=f"duplicate content also appears in {len(unique) - 1} page(s)",
                     related_paths=tuple(path for path in unique if path != logical_path),
+                )
+            )
+
+
+def _append_provenance_issues(
+    issues: list[LintIssue],
+    logical_path: str,
+    sources: list[SourceRef],
+    resolve_source: Callable[[SourceRef], Path | None],
+) -> None:
+    for source in sources:
+        if source.kind != "workspace-file":
+            continue
+        try:
+            resolved = resolve_source(source)
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is None:
+            issues.append(
+                LintIssue(
+                    code="missing_provenance",
+                    logical_path=logical_path,
+                    detail=f"workspace source is unavailable: {source.workspace_id}",
+                )
+            )
+            continue
+        try:
+            actual_hash = content_hash(resolved.read_bytes())
+        except OSError:
+            issues.append(
+                LintIssue(
+                    code="missing_provenance",
+                    logical_path=logical_path,
+                    detail=f"workspace source cannot be read: {source.workspace_id}",
+                )
+            )
+            continue
+        if actual_hash != source.content_hash:
+            issues.append(
+                LintIssue(
+                    code="stale_provenance",
+                    logical_path=logical_path,
+                    detail=f"workspace source hash changed: {source.workspace_id}",
                 )
             )

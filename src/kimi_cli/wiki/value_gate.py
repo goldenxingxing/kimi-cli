@@ -9,7 +9,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from kimi_cli.wiki.models import SourceRef, UnsafeWikiPage, WikiCandidate, WikiPage
+from kimi_cli.wiki.models import (
+    SourceRef,
+    UnsafeWikiPage,
+    WikiCandidate,
+    WikiPage,
+    has_url_credentials,
+)
 from kimi_cli.wiki.schema import render_page, validate_logical_page
 
 DiscardReason = Literal["low_value", "unstable", "ungrounded", "sensitive", "duplicate"]
@@ -24,6 +30,7 @@ _SECRET_TEXT = re.compile(
     r"user[_-]?password|user[_-]?token)\s*[:=]\s*\S+"
     r")"
 )
+_HTTP_URL = re.compile(r"https?://[^\s\])}>]+", flags=re.IGNORECASE)
 
 
 class WikiContext(BaseModel):
@@ -66,7 +73,9 @@ class GateDecision:
 
 def contains_sensitive_text(text: str) -> bool:
     """Return whether unstructured input visibly carries credential material."""
-    return bool(_SECRET_TEXT.search(text))
+    return bool(_SECRET_TEXT.search(text)) or any(
+        has_url_credentials(url) for url in _HTTP_URL.findall(text)
+    )
 
 
 def evaluate_candidate(
@@ -75,6 +84,10 @@ def evaluate_candidate(
     existing_pages: tuple[WikiPage, ...],
 ) -> GateDecision:
     """Apply the high-value, grounded, safe, and novel admission policy."""
+    try:
+        WikiCandidate.model_validate(candidate.model_dump(mode="python"))
+    except ValueError:
+        return GateDecision(False, "sensitive")
     if candidate.value != "high" or not context.cross_turn_utility:
         return GateDecision(False, "low_value")
     if not context.stable:
@@ -132,8 +145,18 @@ def _source_is_grounded(source: SourceRef, context: WikiContext) -> bool:
 
 def _pages_are_safe(candidate: WikiCandidate) -> bool:
     try:
+        sources = [*candidate.sources]
         for change in candidate.pages:
+            WikiPage.model_validate(change.page.model_dump(mode="python"))
             render_page(change.page)
+            for text in (change.page.title, *change.page.tags):
+                if not _text_is_safe_as_page_content(change.page, text):
+                    return False
+            sources.extend(change.page.sources)
+        for source in sources:
+            SourceRef.model_validate(source.model_dump(mode="python"))
+            if source.url is not None and has_url_credentials(str(source.url)):
+                return False
     except (UnsafeWikiPage, ValueError):
         return False
     return True
@@ -142,9 +165,14 @@ def _pages_are_safe(candidate: WikiCandidate) -> bool:
 def _summary_is_safe(candidate: WikiCandidate) -> bool:
     if contains_sensitive_text(candidate.summary):
         return False
-    # Reuse the canonical page validator so audit summaries cannot smuggle local
-    # paths, credential URLs, or secret headers that page bodies reject.
-    sample = candidate.pages[0].page.model_copy(update={"body": f"{candidate.summary}\n"})
+    return _text_is_safe_as_page_content(candidate.pages[0].page, candidate.summary)
+
+
+def _text_is_safe_as_page_content(page: WikiPage, text: str) -> bool:
+    """Apply canonical secret/path/URL policy to every free-text frontmatter value."""
+    if contains_sensitive_text(text):
+        return False
+    sample = page.model_copy(update={"body": f"{text}\n"})
     try:
         render_page(sample)
     except (UnsafeWikiPage, ValueError):

@@ -144,3 +144,62 @@ def test_lint_scope_is_validated_and_limits_scan(manager) -> None:
     assert all(issue.logical_path.startswith("concepts/") for issue in report.issues)
     with pytest.raises(ValueError, match="scope"):
         manager.lint("../outside")
+
+
+def test_lint_checks_missing_and_stale_workspace_provenance(manager, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_file = workspace / "source.md"
+    source_file.write_text("original source", encoding="utf-8")
+    workspace_id = manager.registry.register(workspace)
+    source = manager.registry.relative_source(workspace_id, source_file)
+    stale_page = _page("concepts/stale.md", "A sourced claim.\n").model_copy(
+        update={"sources": [source]}
+    )
+    missing_source = source.model_copy(
+        update={
+            "workspace_id": UUID("523e4567-e89b-12d3-a456-426614174000"),
+            "path": "missing.md",
+        }
+    )
+    missing_page = _page("concepts/missing.md", "Another sourced claim.\n").model_copy(
+        update={"sources": [missing_source]}
+    )
+    _write(manager, stale_page)
+    _write(manager, missing_page)
+    source_file.write_text("changed source", encoding="utf-8")
+
+    report = manager.lint(None)
+
+    assert any(
+        issue.code == "stale_provenance" and issue.logical_path == "concepts/stale.md"
+        for issue in report.issues
+    )
+    assert any(
+        issue.code == "missing_provenance" and issue.logical_path == "concepts/missing.md"
+        for issue in report.issues
+    )
+
+
+def test_lint_resolves_workspace_source_after_registered_move(manager, tmp_path: Path) -> None:
+    original = tmp_path / "original"
+    original.mkdir()
+    source_file = original / "source.md"
+    source_file.write_text("portable source", encoding="utf-8")
+    workspace_id = manager.registry.register(original)
+    source = manager.registry.relative_source(workspace_id, source_file)
+    page = _page("concepts/portable.md", "Portable claim.\n").model_copy(
+        update={"sources": [source]}
+    )
+    _write(manager, page)
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    manager.registry.register(moved, workspace_id=workspace_id)
+
+    report = manager.lint(None)
+
+    assert not any(
+        issue.code in {"missing_provenance", "stale_provenance"}
+        and issue.logical_path == "concepts/portable.md"
+        for issue in report.issues
+    )

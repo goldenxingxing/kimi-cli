@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,11 +20,13 @@ from kimi_cli.wiki.models import (
 from kimi_cli.wiki.schema import (
     content_hash,
     parse_page,
+    render_page,
     resolve_page_path,
     validate_logical_page,
 )
-from kimi_cli.wiki.search import SearchResult, WikiSearchIndex
+from kimi_cli.wiki.search import SearchResult, WikiSearchIndex, bounded_markdown_search
 from kimi_cli.wiki.transaction import (
+    WikiConflictError,
     WikiTransaction,
     acknowledge_reindex,
     wiki_read_lock,
@@ -65,6 +66,9 @@ class PreparedWikiChange:
     duplicate_pages: tuple[str, ...]
     conflict_pages: tuple[str, ...]
     transaction: WikiTransaction = field(repr=False)
+    candidate_json: str = field(repr=False)
+    context: WikiContext = field(repr=False)
+    page_bases: tuple[_PreparedPageBase, ...] = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,12 @@ class CommitResult:
     global_revision: int
     pages: tuple[str, ...]
     search_index_current: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedPageBase:
+    logical_path: str
+    content_hash: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +103,10 @@ class WikiManager:
         # Commit deliberately delegates locking to WikiTransaction.
         self.lock = WikiLock(self.layout.metadata / "locks" / "writer.lock")
         self.search_index = WikiSearchIndex.open(self.layout.database, wal=wal)
-        self._search_index_current = self._refresh_search_index(force=True)
+        try:
+            self._search_index_current = self._refresh_search_index(force=True)
+        except Exception:
+            self._search_index_current = False
 
     def close(self) -> None:
         self.search_index.close()
@@ -102,10 +115,21 @@ class WikiManager:
         return self.layout
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
-        self._search_index_current = self._refresh_search_index(
-            force=not self._search_index_current
-        )
-        return self.search_index.search(query, limit)
+        snapshot = self._snapshot()
+        try:
+            current = self._sync_search_snapshot(
+                snapshot,
+                force=not self._search_index_current,
+            )
+        except Exception:
+            current = False
+        self._search_index_current = current
+        if not current:
+            return bounded_markdown_search(snapshot.pages, query, limit)
+        try:
+            return self.search_index.search(query, limit)
+        except Exception:
+            return bounded_markdown_search(snapshot.pages, query, limit)
 
     def read(self, page: str) -> WikiReadResult:
         logical_path = validate_logical_page(page).as_posix()
@@ -126,12 +150,20 @@ class WikiManager:
     ) -> PreparedWikiChange | DiscardedCandidate:
         """Prepare a complete mutation and release all locks before permission."""
         snapshot = self._snapshot()
-        if not self._workspace_sources_resolve(candidate):
-            return DiscardedCandidate(reason="ungrounded", summary=candidate.summary)
+        return self._prepare_from_snapshot(candidate, context, snapshot)
+
+    def _prepare_from_snapshot(
+        self,
+        candidate: WikiCandidate,
+        context: WikiContext,
+        snapshot: _AuthoritySnapshot,
+    ) -> PreparedWikiChange | DiscardedCandidate:
         decision = evaluate_candidate(candidate, context, snapshot.pages)
         if not decision.accepted:
             assert decision.reason is not None
             return DiscardedCandidate(reason=decision.reason, summary=candidate.summary)
+        if not self._workspace_sources_resolve(candidate):
+            return DiscardedCandidate(reason="ungrounded", summary=candidate.summary)
 
         duplicate_pages = duplicate_candidate_paths(candidate, snapshot.pages)
         changes = _materialize_changes(
@@ -168,16 +200,53 @@ class WikiManager:
                 path for path in context.conflicting_pages if path in future_pages
             ),
             transaction=transaction,
+            candidate_json=candidate.model_dump_json(),
+            context=context,
+            page_bases=_capture_page_bases(changes, snapshot.pages),
         )
 
     def commit(self, prepared: PreparedWikiChange) -> CommitResult:
         """Commit an already-decided proposal; WikiTransaction owns the writer lock."""
-        revision = prepared.transaction.commit()
-        search_current = self._refresh_search_index(force=True)
+        current = prepared
+        last_conflict: WikiConflictError | None = None
+        for _attempt in range(4):
+            try:
+                revision = current.transaction.commit()
+                break
+            except WikiConflictError as exc:
+                last_conflict = exc
+                snapshot = self._snapshot()
+                _assert_page_bases_unchanged(prepared.page_bases, snapshot.pages)
+                try:
+                    rebased = self._prepare_from_snapshot(
+                        WikiCandidate.model_validate_json(prepared.candidate_json),
+                        prepared.context,
+                        snapshot,
+                    )
+                except WikiConflictError as rebase_conflict:
+                    last_conflict = rebase_conflict
+                    current = prepared
+                    continue
+                if isinstance(rebased, DiscardedCandidate):
+                    raise WikiConflictError(
+                        f"Wiki proposal is no longer admissible: {rebased.reason}"
+                    ) from exc
+                if rebased.pages != prepared.pages:
+                    raise WikiConflictError(
+                        "Wiki proposal changed shape during concurrent revalidation"
+                    ) from exc
+                current = rebased
+        else:
+            assert last_conflict is not None
+            raise last_conflict
+        try:
+            search_current = self._refresh_search_index(force=True)
+        except Exception:
+            search_current = False
         self._search_index_current = search_current
         return CommitResult(
             global_revision=revision,
-            pages=prepared.pages,
+            pages=current.pages,
             search_index_current=search_current,
         )
 
@@ -212,7 +281,11 @@ class WikiManager:
         if scope is not None and scope not in CATEGORY_DIRS:
             raise ValueError("Wiki lint scope must be a declared category")
         snapshot = self._snapshot()
-        return lint_snapshot(snapshot.raw_pages, scope=scope)
+        return lint_snapshot(
+            snapshot.raw_pages,
+            scope=scope,
+            resolve_source=self.registry.resolve,
+        )
 
     def _source_ref_for_ingest(
         self,
@@ -288,13 +361,23 @@ class WikiManager:
     def _refresh_search_index(self, *, force: bool) -> bool:
         """Sync one full revision snapshot, then conditionally acknowledge that revision."""
         snapshot = self._snapshot()
+        return self._sync_search_snapshot(snapshot, force=force)
+
+    def _sync_search_snapshot(
+        self,
+        snapshot: _AuthoritySnapshot,
+        *,
+        force: bool,
+    ) -> bool:
         if not force and not snapshot.needs_reindex:
             return True
-        try:
-            # Intentionally outside wiki_read_lock: SQLite callbacks and diagnostics
-            # must be able to call manager.read without re-entering a shared lock.
-            self.search_index.sync(snapshot.pages)
-        except sqlite3.Error:
+        # Intentionally outside wiki_read_lock: SQLite callbacks and diagnostics
+        # must be able to call manager.read without re-entering a shared lock.
+        applied = self.search_index.sync(
+            snapshot.pages,
+            revision=snapshot.global_revision,
+        )
+        if not applied:
             return False
         acknowledgement = acknowledge_reindex(
             self.layout,
@@ -321,16 +404,17 @@ def _read_raw_pages(layout: WikiLayout) -> dict[str, str]:
             or not directory.resolve(strict=True).is_relative_to(layout.root.resolve(strict=True))
         ):
             continue
-        for target in sorted(directory.glob("*.md"), key=lambda path: path.name):
-            logical_path = f"{category}/{target.name}"
-            validate_logical_page(logical_path)
-            if target.is_symlink() or not target.is_file():
-                continue
+        for target in sorted(directory.rglob("*.md"), key=lambda path: path.as_posix()):
+            relative_target = target.relative_to(directory).as_posix()
+            logical_path = f"{category}/{relative_target}"
             try:
-                pages[logical_path] = target.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                # Preserve only a sentinel in memory so lint deterministically
-                # reports malformed UTF-8; authoritative bytes stay untouched.
+                safe_file = (
+                    not target.is_symlink()
+                    and target.is_file()
+                    and target.resolve(strict=True).is_relative_to(layout.root.resolve(strict=True))
+                )
+                pages[logical_path] = target.read_text(encoding="utf-8") if safe_file else ""
+            except (OSError, UnicodeError, ValueError):
                 pages[logical_path] = ""
     return pages
 
@@ -343,6 +427,36 @@ def _parse_valid_pages(raw_pages: Mapping[str, str]) -> tuple[WikiPage, ...]:
         except (ValueError, UnicodeError):
             continue
     return tuple(pages)
+
+
+def _capture_page_bases(
+    changes: tuple[PageChange, ...],
+    existing_pages: tuple[WikiPage, ...],
+) -> tuple[_PreparedPageBase, ...]:
+    existing = {page.logical_path: page for page in existing_pages}
+    return tuple(
+        _PreparedPageBase(
+            logical_path=change.page.logical_path,
+            content_hash=(
+                content_hash(render_page(existing[change.page.logical_path]).encode("utf-8"))
+                if change.page.logical_path in existing
+                else None
+            ),
+        )
+        for change in changes
+    )
+
+
+def _assert_page_bases_unchanged(
+    page_bases: tuple[_PreparedPageBase, ...],
+    current_pages: tuple[WikiPage, ...],
+) -> None:
+    current = {
+        page.logical_path: content_hash(render_page(page).encode("utf-8")) for page in current_pages
+    }
+    for base in page_bases:
+        if current.get(base.logical_path) != base.content_hash:
+            raise WikiConflictError(f"page changed after approval: {base.logical_path}")
 
 
 def _materialize_changes(
@@ -369,7 +483,12 @@ def _materialize_changes(
             raise ValueError(f"page revision changed: {proposed.page.logical_path}")
         sources = _merge_sources(current.sources, proposed.page.sources)
         body = (
-            _merge_conflict(current.body, proposed.page.body)
+            _merge_conflict(
+                current.body,
+                proposed.page.body,
+                current.sources,
+                proposed.page.sources,
+            )
             if proposed.page.logical_path in conflicts
             else proposed.page.body
         )
@@ -398,11 +517,21 @@ def _merge_sources(existing: list[SourceRef], proposed: list[SourceRef]) -> list
     return result
 
 
-def _merge_conflict(existing: str, proposed: str) -> str:
+def _merge_conflict(
+    existing: str,
+    proposed: str,
+    existing_sources: list[SourceRef],
+    proposed_sources: list[SourceRef],
+) -> str:
+    existing_ids = ", ".join(sorted(_audit_source_id(source) for source in existing_sources))
+    proposed_ids = ", ".join(sorted(_audit_source_id(source) for source in proposed_sources))
     return (
-        f"{existing.rstrip()}\n\n"
         "## Conflict\n\n"
+        "### Existing sourced position\n\n"
+        f"Sources: {existing_ids}\n\n"
+        f"{existing.strip()}\n\n"
         "### Additional sourced position\n\n"
+        f"Sources: {proposed_ids}\n\n"
         f"{proposed.strip()}\n"
     )
 
@@ -450,7 +579,9 @@ def _append_log(
 
 def _audit_source_id(source: SourceRef) -> str:
     if source.kind == "conversation":
-        return f"conversation:{source.session_id}"
-    if source.kind == "workspace-file":
-        return f"workspace:{source.workspace_id}"
-    return f"web:{source.content_hash}"
+        base = f"conversation:{source.session_id}"
+    elif source.kind == "workspace-file":
+        base = f"workspace:{source.workspace_id}"
+    else:
+        base = "web"
+    return f"{base}@{source.content_hash}"
