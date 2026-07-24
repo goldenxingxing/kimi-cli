@@ -20,13 +20,16 @@ _SECRET_PATTERNS = (
     re.compile(r"(?im)^\s*(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[^\s]{12,}$"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})\b"),
 )
+_FILE_URI_RE = re.compile(r"(?i)(?<![\w:/-])file:(?://|[\\/])")
+_ROOT_RELATIVE_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*/(?!/)[^\s)]+\s*\)")
+_API_ENDPOINT_RE = re.compile(r"(?<![\w:/])/api(?:/[^\s\])}>.,;!?]+)*")
 _MACHINE_ABSOLUTE_PATH_PATTERNS = (
-    re.compile(r"(?i)(?<![\w-])file:(?://)?[^\s\])}>]*"),
-    re.compile(
-        r"(?<![\w:/])/(?:Applications|Library|System|Users|Volumes|bin|dev|etc|home|mnt|opt|private|proc|root|run|sbin|tmp|usr|var)(?:/|(?=\s|[\])}>.,;!?]|$))"
-    ),
+    # After safe Markdown links and API endpoints are removed, a leading slash is
+    # unambiguously a local POSIX path rather than a root-relative web route.
+    re.compile(r"(?<![\w:/.])/(?!/)[^\s\])}>.,;!?]+"),
     re.compile(r"(?<!\w)[A-Za-z]:[\\/]+[^\s\])}>]*"),
     re.compile(r"(?<![\\/:])\\\\+[^\s\])}>]+"),
+    re.compile(r"(?<!\\)\\(?!\\)(?=[A-Za-z0-9_.-]+(?:[\\/]|$))"),
     re.compile(r"(?<![/:])//[^\s\])}>]+"),
 )
 _FRONTMATTER_FIELDS = frozenset({"title", "created", "updated", "tags", "sources", "revision"})
@@ -99,7 +102,11 @@ def _validate_body(body: str) -> None:
             validate_logical_page(f"{link.group(1)}.md")
     if any(pattern.search(body) for pattern in _SECRET_PATTERNS):
         raise UnsafeWikiPage("Wiki pages cannot contain credentials or secrets")
-    if any(pattern.search(body) for pattern in _MACHINE_ABSOLUTE_PATH_PATTERNS):
+    if _FILE_URI_RE.search(body):
+        raise UnsafeWikiPage("Wiki pages cannot contain local file URIs")
+    path_context = _ROOT_RELATIVE_MARKDOWN_LINK_RE.sub("", body)
+    path_context = _API_ENDPOINT_RE.sub("", path_context)
+    if any(pattern.search(path_context) for pattern in _MACHINE_ABSOLUTE_PATH_PATTERNS):
         raise UnsafeWikiPage("Wiki pages cannot contain machine-specific absolute paths")
 
 
