@@ -149,9 +149,14 @@ You have **two types of tools** for Excel tasks:
 
 The Xlsx tool has **6 commands** that can be called using the shell tool:
 
-**Executable Path**: `./scripts/Xlsx`
+**Executable Path**: `python scripts/xlsx_cli.py`
 
-**Base Command**: `./scripts/Xlsx <command> [arguments]`
+**Base Command**: `python scripts/xlsx_cli.py <command> [arguments]`
+
+The bundled native CLI currently runs only on Linux x86_64. The launcher
+detects macOS, Windows, and other architectures and exits with an explicit
+compatibility message. On those systems, use Python/openpyxl for workbook
+creation and formula checks; do not attempt to execute the Linux binary.
 
 ---
 
@@ -172,7 +177,7 @@ The Xlsx tool has **6 commands** that can be called using the shell tool:
 
 - how to use:
 ```bash
-./scripts/Xlsx recheck output.xlsx
+python scripts/xlsx_cli.py recheck output.xlsx
 ```
 
 2. **reference-check** (alias: refcheck)
@@ -184,7 +189,7 @@ The Xlsx tool has **6 commands** that can be called using the shell tool:
 **Inconsistent formula patterns** - Some formulas in the same column deviate from the predominant pattern ("isolated" formulas).
 - how to use:
 ```bash
-./scripts/Xlsx reference-check output.xlsx
+python scripts/xlsx_cli.py reference-check output.xlsx
 ```
 
 3. **inspect**
@@ -193,7 +198,7 @@ The Xlsx tool has **6 commands** that can be called using the shell tool:
 - how to use:
 ```bash
 # Analyze and output JSON
-./scripts/Xlsx inspect input.xlsx --pretty
+python scripts/xlsx_cli.py inspect input.xlsx --pretty
 ```
 
 ---
@@ -218,10 +223,10 @@ The Xlsx tool has **6 commands** that can be called using the shell tool:
 - how to use:
 ```bash
 # First: inspect to get sheet names and headers
-./scripts/Xlsx inspect data.xlsx --pretty
+python scripts/xlsx_cli.py inspect data.xlsx --pretty
 
 # Then: create PivotTable with chart
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     data.xlsx output.xlsx \
     --source "Sales!A1:F100" \
     --rows "Product,Region" \
@@ -237,7 +242,7 @@ The Xlsx tool has **6 commands** that can be called using the shell tool:
 - description: **Verify that all charts have actual data content**. Use this after creating charts to ensure they are not empty.
 - how to use:
 ```bash
-./scripts/Xlsx chart-verify output.xlsx
+python scripts/xlsx_cli.py chart-verify output.xlsx
 ```
 - exit codes:
   - `0` = All charts have data, safe to deliver
@@ -261,7 +266,7 @@ The Xlsx tool has **6 commands** that can be called using the shell tool:
 
 - how to use:
 ```bash
-./scripts/Xlsx validate output.xlsx
+python scripts/xlsx_cli.py validate output.xlsx
 ```
 
 - **If validation fails**: Do NOT attempt to "fix" the file. Regenerate it from scratch with corrected code.
@@ -312,14 +317,14 @@ After ALL sheets pass:
 ### Per-Sheet Check Commands
 ```bash
 # After creating/modifying EACH sheet, save and run:
-./scripts/Xlsx recheck output.xlsx
-./scripts/Xlsx reference-check output.xlsx
+python scripts/xlsx_cli.py recheck output.xlsx
+python scripts/xlsx_cli.py reference-check output.xlsx
 # Fix ALL errors before creating the next sheet!
 ```
 
 ### Final Validation (after all sheets complete)
 ```bash
-./scripts/Xlsx validate output.xlsx
+python scripts/xlsx_cli.py validate output.xlsx
 ```
 
 **Why Per-Sheet Validation?**
@@ -442,10 +447,10 @@ When PivotTable need is detected, you MUST:
 **Quick Reference** (Details in `./reference/pivot-table.md`):
 ```bash
 # Step 1: Inspect data structure
-./scripts/Xlsx inspect data.xlsx --pretty
+python scripts/xlsx_cli.py inspect data.xlsx --pretty
 
 # Step 2: Create PivotTable with chart
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     data.xlsx output.xlsx \
     --source "Sheet!A1:F100" \
     --rows "Category" \
@@ -454,7 +459,7 @@ When PivotTable need is detected, you MUST:
     --chart "bar"
 
 # Step 3: Validate
-./scripts/Xlsx validate output.xlsx
+python scripts/xlsx_cli.py validate output.xlsx
 ```
 
 **⛔ FORBIDDEN**:
@@ -918,7 +923,7 @@ ws.add_chart(pie, "E2")
 
 **After Creating Charts - MANDATORY**:
 ```bash
-./scripts/Xlsx chart-verify output.xlsx
+python scripts/xlsx_cli.py chart-verify output.xlsx
 ```
 Exit code 1 = Charts broken → MUST FIX. No excuses - if chart-verify fails, the chart IS broken regardless of data embedding method.
 

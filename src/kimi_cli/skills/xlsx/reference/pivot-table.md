@@ -42,7 +42,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 ## Usage
 
 ```bash
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     <input.xlsx> <output.xlsx> \
     --source "Sheet!A1:Z100" \
     --location "PivotSheet!A3" \
@@ -126,7 +126,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 **CRITICAL**: You MUST run `inspect` first to get the parameters for `pivot` command.
 
 ```bash
-./scripts/Xlsx inspect data.xlsx --pretty
+python scripts/xlsx_cli.py inspect data.xlsx --pretty
 ```
 
 **Example Output**:
@@ -158,14 +158,14 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 
 ```bash
 # Step 1: Verify formulas (assumes data.xlsx already exists)
-./scripts/Xlsx recheck data.xlsx
-./scripts/Xlsx reference-check data.xlsx
+python scripts/xlsx_cli.py recheck data.xlsx
+python scripts/xlsx_cli.py reference-check data.xlsx
 
 # Step 2: Inspect structure (get sheet names, headers)
-./scripts/Xlsx inspect data.xlsx --pretty
+python scripts/xlsx_cli.py inspect data.xlsx --pretty
 
 # Step 3: Create PivotTable (use --style for theme)
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     data.xlsx output.xlsx \
     --source "SalesData!A1:F500" \
     --rows "Product,Region" \
@@ -175,7 +175,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
     --style "finance"
 
 # Step 4: Validate output (auto-ignores safe openpyxl issues, but NOT pivot errors)
-./scripts/Xlsx validate output.xlsx
+python scripts/xlsx_cli.py validate output.xlsx
 # Exit code 0 = safe to deliver
 # Exit code 1 = critical errors (pivot structure problems) - MUST FIX
 ```
@@ -186,7 +186,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 
 **Sales Summary by Product**:
 ```bash
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     sales.xlsx output.xlsx \
     --source "Sales!A1:F500" \
     --rows "Product" \
@@ -196,7 +196,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 
 **Quarterly Comparison with Filters**:
 ```bash
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     quarterly.xlsx report.xlsx \
     --source "Data!A1:H200" \
     --rows "Category" \
@@ -208,7 +208,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 
 **Multi-Dimension Analysis (with Finance style)**:
 ```bash
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     transactions.xlsx report.xlsx \
     --source "Transactions!A1:G2000" \
     --rows "Category,Subcategory" \
@@ -222,7 +222,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 
 **Trend Analysis with Line Chart**:
 ```bash
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     monthly_data.xlsx trend_report.xlsx \
     --source "Data!A1:D100" \
     --rows "Month" \
@@ -233,7 +233,7 @@ description: Create PivotTables in Excel using the pivot command (pure OpenXML S
 
 **Market Share with Pie Chart**:
 ```bash
-./scripts/Xlsx pivot \
+python scripts/xlsx_cli.py pivot \
     market_data.xlsx share_report.xlsx \
     --source "Sales!A1:C50" \
     --rows "Region" \
