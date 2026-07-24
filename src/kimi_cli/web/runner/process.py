@@ -315,7 +315,7 @@ class SessionProcess:
                         if not stderr:
                             err_msg = (
                                 "Worker process exited unexpectedly"
-                                f" (exit code {self._process.returncode}). "
+                                f" (exit code {self._process.returncode or 'unknown'}). "
                                 "Check logs for details."
                             )
                             stderr = err_msg.encode()
