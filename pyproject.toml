@@ -57,6 +57,7 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = ["kimi_cli"]
 source-exclude = ["examples/**/*", "tests/**/*", "src/kimi_cli/deps/**/*"]
+include = ["src/kimi_cli/wiki/templates/**"]
 
 [tool.uv.workspace]
 members = [
