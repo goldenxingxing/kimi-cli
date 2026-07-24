@@ -11,6 +11,7 @@ agent:
     - "kimi_cli.tools.ask_user:AskUserQuestion"
     - "kimi_cli.tools.todo:SetTodoList"
     - "kimi_cli.tools.memory:Memory"
+    - "kimi_cli.tools.wiki:Wiki"
     - "kimi_cli.tools.skill_install:InstallSkill"
     - "kimi_cli.tools.shell:Shell"
     - "kimi_cli.tools.background:TaskList"

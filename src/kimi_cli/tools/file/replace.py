@@ -10,6 +10,7 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.display import DisplayBlock
 from kimi_cli.tools.file import FileActions
+from kimi_cli.tools.file.managed_wiki import reject_managed_wiki_target
 from kimi_cli.tools.file.plan_mode import inspect_plan_edit_target
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.diff import build_diff_blocks
@@ -48,6 +49,7 @@ class StrReplaceFile(CallableTool2[Params]):
     def __init__(self, runtime: Runtime, approval: Approval):
         super().__init__()
         self._work_dir = runtime.builtin_args.KIMI_WORK_DIR
+        self._runtime = runtime
         self._additional_dirs = runtime.additional_dirs
         self._approval = approval
         self._plan_mode_checker: Callable[[], bool] | None = None
@@ -98,6 +100,9 @@ class StrReplaceFile(CallableTool2[Params]):
             if err := await self._validate_path(p):
                 return err
             p = p.canonical()
+
+            if err := reject_managed_wiki_target(p, self._runtime):
+                return err
 
             plan_target = inspect_plan_edit_target(
                 p,
