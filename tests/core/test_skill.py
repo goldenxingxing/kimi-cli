@@ -157,6 +157,44 @@ A --> B
 
 
 @pytest.mark.asyncio
+async def test_discover_skills_legacy_type_falls_back_to_standard(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    _write_skill(
+        root / "legacy",
+        """---
+name: legacy
+description: Legacy skill
+type: capability
+---
+""",
+    )
+
+    skills = await discover_skills(
+        KaosPath.unsafe_from_local_path(root),
+        scope="builtin",
+    )
+
+    assert len(skills) == 1
+    assert skills[0].type == "standard"
+    assert skills[0].flow is None
+
+
+@pytest.mark.asyncio
+async def test_all_bundled_skills_are_discoverable():
+    from kimi_cli.skill import get_builtin_skills_dir
+
+    builtin_dir = get_builtin_skills_dir()
+    skills = await discover_skills(
+        KaosPath.unsafe_from_local_path(builtin_dir),
+        scope="builtin",
+    )
+
+    assert len(skills) == 300
+    assert len({skill.name.casefold() for skill in skills}) == 300
+
+
+@pytest.mark.asyncio
 async def test_discover_skills_from_roots_prefers_earlier_dirs(tmp_path):
     root = tmp_path / "root"
     system_dir = root / "system"

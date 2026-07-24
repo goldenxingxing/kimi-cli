@@ -199,10 +199,9 @@ class SkillManager:
         return int(self._load_state()["revision"])
 
     def is_enabled(self, name: str) -> bool:
-        try:
-            return self.get(name).enabled
-        except KeyError:
-            return True
+        key = normalize_managed_skill_name(name)
+        state = self._load_state()
+        return key not in state["disabled"] and key not in state["deleted"]
 
     @staticmethod
     def _directories(root: Path) -> dict[str, Path]:
