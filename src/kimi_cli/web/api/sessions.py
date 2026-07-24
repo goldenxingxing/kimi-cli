@@ -1392,7 +1392,10 @@ async def get_work_dirs() -> list[str]:
 
 @work_dirs_router.get("/startup", summary="Get the startup directory")
 async def get_startup_dir(request: Request) -> str:
-    """Get the directory where kimi web was started."""
+    """Get the last selected directory, falling back to the app default."""
+    last_work_dir = load_metadata().last_work_dir
+    if last_work_dir and Path(last_work_dir).is_dir():
+        return last_work_dir
     return request.app.state.startup_dir
 
 

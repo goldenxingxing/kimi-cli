@@ -72,6 +72,18 @@ class _FakeResult:
 
 
 @pytest.mark.anyio
+async def test_startup_dir_prefers_last_selected_work_directory(
+    isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    from kimi_cli.metadata import Metadata, save_metadata
+
+    save_metadata(Metadata(last_work_dir=str(work_dir)))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(startup_dir="/fallback")))
+
+    assert await sessions_api.get_startup_dir(request) == str(work_dir)
+
+
+@pytest.mark.anyio
 async def test_generate_title_preserves_concurrent_manual_title(
     isolated_share_dir: Path,
     work_dir: KaosPath,
