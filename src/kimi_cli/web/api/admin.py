@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
 from kimi_cli.web.db.crud import (
@@ -17,8 +17,13 @@ from kimi_cli.web.db.crud import (
 )
 from kimi_cli.web.db.database import get_db
 from kimi_cli.web.user_auth import require_admin
+from kimi_cli.skill.manager import ManagedSkill, SkillManager
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _skill_manager() -> SkillManager:
+    return SkillManager()
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +167,116 @@ async def delete_user_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+
+
+# ---------------------------------------------------------------------------
+# Managed skills
+# ---------------------------------------------------------------------------
+
+
+class SkillContentUpdate(BaseModel):
+    content: str
+
+
+@router.get("/skills", summary="List managed skills (admin only)")
+async def list_managed_skills(
+    admin: dict[str, Any] = Depends(require_admin),
+) -> list[ManagedSkill]:
+    return _skill_manager().list_skills()
+
+
+@router.get("/skills/{name}/files/{relative_path:path}", summary="Read a skill file")
+async def read_managed_skill_file(
+    name: str,
+    relative_path: str,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> dict[str, str]:
+    try:
+        return {
+            "name": name,
+            "file": relative_path,
+            "content": _skill_manager().read_file(name, relative_path),
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Skill not found") from exc
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/skills/{name}/skill-md", summary="Edit a skill with copy-on-write")
+async def update_managed_skill(
+    name: str,
+    body: SkillContentUpdate,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> ManagedSkill:
+    try:
+        return _skill_manager().write_skill_md(name, body.content)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Skill not found") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/skills/upload", status_code=201, summary="Upload a managed skill")
+async def upload_managed_skill(
+    file: UploadFile = File(...),
+    replace: bool = False,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> ManagedSkill:
+    data = await file.read(20 * 1024 * 1024 + 1)
+    try:
+        manager = _skill_manager()
+        if (file.filename or "").lower().endswith(".md"):
+            return manager.install_skill_md(data.decode("utf-8"), replace=replace)
+        return manager.install_archive(data, replace=replace)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=f"Skill already exists: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _managed_skill_action(name: str, action: str) -> ManagedSkill:
+    manager = _skill_manager()
+    try:
+        getattr(manager, action)(name)
+        return manager.get(name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Skill not found") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/skills/{name}/enable")
+async def enable_managed_skill(
+    name: str, admin: dict[str, Any] = Depends(require_admin)
+) -> ManagedSkill:
+    return _managed_skill_action(name, "enable")
+
+
+@router.post("/skills/{name}/disable")
+async def disable_managed_skill(
+    name: str, admin: dict[str, Any] = Depends(require_admin)
+) -> ManagedSkill:
+    return _managed_skill_action(name, "disable")
+
+
+@router.post("/skills/{name}/restore")
+async def restore_managed_skill(
+    name: str, admin: dict[str, Any] = Depends(require_admin)
+) -> ManagedSkill:
+    return _managed_skill_action(name, "restore")
+
+
+@router.delete("/skills/{name}", status_code=204)
+async def delete_managed_skill(
+    name: str, admin: dict[str, Any] = Depends(require_admin)
+) -> None:
+    try:
+        _skill_manager().delete(name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Skill not found") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

@@ -702,6 +702,7 @@ class KimiSoul:
             created_approval_source = ApprovalSource(kind="foreground_turn", id=uuid.uuid4().hex)
             approval_source_token = set_current_approval_source(created_approval_source)
         try:
+            await self._refresh_managed_skills()
             # Refresh OAuth tokens on each turn to avoid idle-time expirations.
             await self._runtime.oauth.ensure_fresh(self._runtime)
 
@@ -866,6 +867,44 @@ class KimiSoul:
             if approval_source_token is not None:
                 reset_current_approval_source(approval_source_token)
             self._set_trace_id(None)
+
+    async def _refresh_managed_skills(self) -> None:
+        """Refresh the merged catalog before a turn when managed state changed."""
+        from kimi_cli.skill import (
+            discover_skills_from_roots,
+            format_skills_for_prompt,
+            index_skills,
+            resolve_skills_roots,
+        )
+        from kimi_cli.skill.manager import SkillManager
+        from kimi_cli.utils.path import is_within_directory
+
+        revision = SkillManager().revision
+        if revision == self._runtime.managed_skill_revision:
+            return
+        roots = await resolve_skills_roots(
+            self._runtime.session.work_dir,
+            skills_dirs=self._runtime.requested_skills_dirs,
+            merge_brands=self._runtime.config.merge_all_available_skills,
+            extra_skill_dirs=self._runtime.config.extra_skill_dirs or None,
+        )
+        skills = await discover_skills_from_roots(roots)
+        new_prompt = format_skills_for_prompt(skills) or "No skills found."
+        old_prompt = self._runtime.skills_prompt
+        if old_prompt in self._agent.system_prompt:
+            object.__setattr__(
+                self._agent,
+                "system_prompt",
+                self._agent.system_prompt.replace(old_prompt, new_prompt, 1),
+            )
+        self._runtime.skills = index_skills(skills)
+        self._runtime.skills_dirs[:] = [
+            root.root.canonical()
+            for root in roots
+            if not is_within_directory(root.root, self._runtime.session.work_dir)
+        ]
+        self._runtime.skills_prompt = new_prompt
+        self._runtime.managed_skill_revision = revision
 
     async def _turn(self, user_message: Message) -> TurnOutcome:
         if self._runtime.llm is None:

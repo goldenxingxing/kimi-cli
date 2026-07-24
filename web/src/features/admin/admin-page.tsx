@@ -15,6 +15,7 @@ import type { UserInfo } from "@/lib/api/apis/AuthApi";
 import { AdminPluginsPanel } from "./admin-plugins-panel";
 import { AdminBrandingPanel } from "./admin-branding-panel";
 import { AdminKnowledgePanel } from "./admin-knowledge-panel";
+import { AdminSkillsPanel } from "./admin-skills-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -44,12 +45,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, BookOpen, Cpu, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette } from "lucide-react";
+import { ArrowLeft, BookOpen, Cpu, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette, WandSparkles } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/apiClient";
 import type { ConfigModel, ConfigToml } from "@/lib/api/models";
 
-type AdminTab = "users" | "models" | "plugins" | "branding" | "knowledge";
+type AdminTab = "users" | "models" | "plugins" | "skills" | "branding" | "knowledge";
 
 type AdminPageProps = {
   currentUser: UserInfo;
@@ -445,6 +446,19 @@ export function AdminPage({ currentUser }: AdminPageProps) {
         <div className="mb-6 flex gap-1 rounded-lg border bg-muted/40 p-1 w-fit">
           <button
             type="button"
+            onClick={() => setActiveTab("skills")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "skills"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <WandSparkles className="size-3.5" />
+            Skill
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab("users")}
             className={[
               "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
@@ -512,6 +526,9 @@ export function AdminPage({ currentUser }: AdminPageProps) {
 
         {/* Plugins tab */}
         {activeTab === "plugins" && <AdminPluginsPanel />}
+
+        {/* Skills tab */}
+        {activeTab === "skills" && <AdminSkillsPanel />}
 
         {/* Branding tab */}
         {activeTab === "branding" && <AdminBrandingPanel />}
