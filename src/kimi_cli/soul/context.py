@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import aiofiles
 import aiofiles.os
@@ -118,6 +120,39 @@ class Context:
 
         await asyncio.to_thread(_write_system_prompt_sync)
 
+        self._system_prompt = prompt
+
+    async def replace_system_prompt(self, prompt: str) -> None:
+        """Atomically replace all persisted system-prompt records with one current record."""
+        prompt_line = json.dumps({"role": "_system_prompt", "content": prompt}) + "\n"
+
+        def _replace_system_prompt_sync() -> None:
+            temporary = self._file_backend.with_name(
+                f".{self._file_backend.name}.{uuid4().hex}.tmp"
+            )
+            try:
+                with temporary.open("x", encoding="utf-8") as output:
+                    output.write(prompt_line)
+                    if self._file_backend.exists():
+                        with self._file_backend.open(encoding="utf-8") as source:
+                            for line in source:
+                                try:
+                                    record = json.loads(line, strict=False)
+                                except json.JSONDecodeError:
+                                    record = None
+                                if (
+                                    isinstance(record, dict)
+                                    and cast(dict[str, Any], record).get("role") == "_system_prompt"
+                                ):
+                                    continue
+                                output.write(line)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, self._file_backend)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+        await asyncio.to_thread(_replace_system_prompt_sync)
         self._system_prompt = prompt
 
     async def checkpoint(self, add_user_message: bool):

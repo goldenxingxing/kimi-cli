@@ -105,8 +105,12 @@ async def run_worker(session_id: UUID) -> None:
             agent_file=agent_file,
         )
 
-    # Run in wire stdio mode
-    await kimi_cli.run_wire_stdio()
+    # Run in wire stdio mode. The worker owns the root runtime and must close
+    # its Wiki index even when the stdio transport fails or is cancelled.
+    try:
+        await kimi_cli.run_wire_stdio()
+    finally:
+        await kimi_cli.close()
 
 
 def main() -> None:

@@ -23,7 +23,7 @@ from kimi_cli.config import Config
 from kimi_cli.exception import MCPConfigError, SystemPromptTemplateError
 from kimi_cli.llm import LLM
 from kimi_cli.memory import get_user_memory_dir, load_knowledge_base
-from kimi_cli.notifications import NotificationManager
+from kimi_cli.notifications import NotificationEvent, NotificationManager
 from kimi_cli.session import Session
 from kimi_cli.skill import (
     ScopedSkillsRoot,
@@ -81,12 +81,6 @@ class BuiltinSystemPromptArgs:
 
 
 _AGENTS_MD_MAX_BYTES = 32 * 1024  # 32 KiB
-_WIKI_CONTEXT_MAX_BYTES = 8 * 1024
-_WIKI_GUIDANCE = (
-    "The global Wiki is shared across all workspaces.\n"
-    "Use Wiki search/read for durable knowledge.\n"
-    "Propose only durable, sourced conclusions for writing."
-)
 _WIKI_SESSION_NAMESPACE = uuid5(NAMESPACE_URL, "openkimo.global-wiki.session")
 
 
@@ -348,10 +342,35 @@ class Runtime:
             session.context_file.parent / "notifications",
             config.notifications,
         )
-        wiki, workspace_id, wiki_tool_context, wiki_context = await _initialize_global_wiki(
+        (
+            wiki,
+            workspace_id,
+            wiki_tool_context,
+            wiki_context,
+            wiki_unavailable,
+        ) = await _initialize_global_wiki(
             session,
             owner_id=owner_id,
         )
+        if wiki_unavailable:
+            try:
+                await asyncio.to_thread(
+                    notifications.publish,
+                    NotificationEvent(
+                        id=notifications.new_id(),
+                        category="system",
+                        type="wiki.unavailable",
+                        source_kind="wiki",
+                        source_id="global",
+                        title="Wiki 暂不可用",
+                        body="本地 Wiki 初始化失败；当前会话仍可继续。",
+                        severity="warning",
+                        targets=["wire", "shell"],
+                        dedupe_key="wiki:startup:unavailable",
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to publish global Wiki unavailable notification")
 
         return Runtime(
             config=config,
@@ -440,15 +459,21 @@ class Runtime:
             wiki_tool_context=self.wiki_tool_context,
         )
 
+    async def close(self) -> None:
+        """Close root-owned Wiki resources once; subagents only borrow them."""
+        if self.role != "root" or self.wiki is None:
+            return
+        await asyncio.to_thread(self.wiki.close)
+
 
 async def _initialize_global_wiki(
     session: Session,
     *,
     owner_id: str | None,
-) -> tuple[WikiManager | None, UUID | None, WikiToolContext | None, str]:
+) -> tuple[WikiManager | None, UUID | None, WikiToolContext | None, str, bool]:
     """Initialize shared Wiki state without making session creation depend on it."""
     from kimi_cli.tools.wiki import WikiToolContext
-    from kimi_cli.wiki.context import render_compact_index
+    from kimi_cli.wiki.context import build_wiki_context
     from kimi_cli.wiki.manager import WikiManager
 
     manager: WikiManager | None = None
@@ -461,15 +486,11 @@ async def _initialize_global_wiki(
             workspace_id = await asyncio.to_thread(manager.registry.register, work_dir_local)
         workspace_hint = Path(str(session.work_dir).replace("\\", "/")).name
         index_text = await asyncio.to_thread(layout.index.read_text, encoding="utf-8")
-        separator = "\n\n"
-        compact_budget = _WIKI_CONTEXT_MAX_BYTES - len((_WIKI_GUIDANCE + separator).encode("utf-8"))
-        compact = await asyncio.to_thread(
-            render_compact_index,
+        wiki_context = await asyncio.to_thread(
+            build_wiki_context,
             index_text,
-            max_bytes=compact_budget,
             hints=(workspace_hint,),
         )
-        wiki_context = _WIKI_GUIDANCE + (separator + compact if compact else "")
         provenance_session_id = uuid5(
             _WIKI_SESSION_NAMESPACE,
             "\0".join(
@@ -492,7 +513,14 @@ async def _initialize_global_wiki(
             user_confirmed=False,
             reliable_source=False,
         )
-        return manager, workspace_id, tool_context, wiki_context
+        return manager, workspace_id, tool_context, wiki_context, False
+    except asyncio.CancelledError:
+        if manager is not None:
+            try:
+                await asyncio.to_thread(manager.close)
+            except Exception:
+                logger.exception("Failed to close unavailable global Wiki")
+        raise
     except Exception:
         logger.exception("Global Wiki unavailable; continuing without Wiki")
         if manager is not None:
@@ -500,7 +528,7 @@ async def _initialize_global_wiki(
                 await asyncio.to_thread(manager.close)
             except Exception:
                 logger.exception("Failed to close unavailable global Wiki")
-        return None, None, None, ""
+        return None, None, None, "", True
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

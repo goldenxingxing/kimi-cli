@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
 import pytest
@@ -15,7 +16,7 @@ from kimi_cli.auth.oauth import OAuthManager
 from kimi_cli.metadata import WorkDirMeta
 from kimi_cli.session import Session
 from kimi_cli.session_state import SessionState
-from kimi_cli.soul.agent import Runtime, _load_system_prompt
+from kimi_cli.soul.agent import Runtime, _initialize_global_wiki, _load_system_prompt
 from kimi_cli.tools.wiki import WikiToolContext
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.file import WireFile
@@ -182,6 +183,66 @@ async def test_wiki_failure_does_not_block_runtime(
     assert runtime.workspace_id is None
     assert runtime.wiki_tool_context is None
     assert runtime.builtin_args.KIMI_WIKI_CONTEXT == ""
+    views = runtime.notifications.store.list_views()
+    assert len(views) == 1
+    event = views[0].event
+    assert event.type == "wiki.unavailable"
+    assert event.targets == ["wire", "shell"]
+    assert "Wiki" in event.title
+    assert "当前会话仍可继续" in event.body
+    assert "disk" not in event.title + event.body
+    assert "/" not in event.title + event.body
+
+    again = await Runtime.create(
+        config, OAuthManager(config), llm=None, session=session, yolo=False
+    )
+    assert again.wiki is None
+    assert len(again.notifications.store.list_views()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_wiki_initialization_closes_partial_manager(
+    session,
+    lightweight_runtime_create: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del lightweight_runtime_create
+    close = Mock()
+    monkeypatch.setattr(WikiManager, "ensure", Mock(side_effect=asyncio.CancelledError()))
+    monkeypatch.setattr(WikiManager, "close", close)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _initialize_global_wiki(session, owner_id=None)
+
+    close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_only_root_runtime_closes_shared_wiki_once(
+    config,
+    tmp_path: Path,
+    lightweight_runtime_create: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del lightweight_runtime_create
+    session = _session(
+        tmp_path / "workspace-close",
+        tmp_path / "sessions" / "close",
+        session_id="close-session",
+        kaos=local_kaos.name,
+    )
+    runtime = await Runtime.create(
+        config, OAuthManager(config), llm=None, session=session, yolo=False
+    )
+    assert runtime.wiki is not None
+    close = Mock(wraps=runtime.wiki.search_index.close)
+    monkeypatch.setattr(runtime.wiki.search_index, "close", close)
+    subagent = runtime.copy_for_subagent(agent_id="worker", subagent_type="coder")
+
+    await subagent.close()
+    await asyncio.gather(runtime.close(), runtime.close())
+
+    close.assert_called_once_with()
 
 
 def test_global_wiki_prompt_section_is_conditional(builtin_args) -> None:

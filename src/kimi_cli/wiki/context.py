@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 TRUNCATION_MARKER = "<!-- Wiki index truncated -->"
+WIKI_BLOCK_START = "<!-- OPENKIMO_GLOBAL_WIKI_START -->"
+WIKI_BLOCK_END = "<!-- OPENKIMO_GLOBAL_WIKI_END -->"
+WIKI_PROMPT_MAX_BYTES = 8 * 1024
+WIKI_GUIDANCE = (
+    "The global Wiki is shared across all workspaces.\n"
+    "Use Wiki search/read for durable knowledge.\n"
+    "Propose only durable, sourced conclusions for writing."
+)
+_BLOCK_PATTERN = re.compile(
+    re.escape(WIKI_BLOCK_START) + r".*?" + re.escape(WIKI_BLOCK_END),
+    flags=re.DOTALL,
+)
 
 
 def render_compact_index(
@@ -57,6 +70,44 @@ def render_compact_index(
     if len(rendered.encode("utf-8")) > byte_limit:
         return TRUNCATION_MARKER
     return rendered
+
+
+def build_wiki_context(index_text: str, *, hints: Sequence[str] = ()) -> str:
+    """Build the guidance and compact index within the total marked-block budget."""
+    fixed = f"{WIKI_BLOCK_START}\n# Global Wiki\n{WIKI_GUIDANCE}\n\n\n{WIKI_BLOCK_END}"
+    index_budget = WIKI_PROMPT_MAX_BYTES - len(fixed.encode("utf-8"))
+    compact = render_compact_index(index_text, max_bytes=index_budget, hints=hints)
+    return WIKI_GUIDANCE + (f"\n\n{compact}" if compact else "")
+
+
+def refresh_wiki_prompt_block(system_prompt: str, wiki_context: str) -> str:
+    """Replace/insert the one managed Wiki block while preserving all other prompt text."""
+    matches = list(_BLOCK_PATTERN.finditer(system_prompt))
+    if wiki_context:
+        block = _render_prompt_block(wiki_context)
+        if matches:
+            parts: list[str] = []
+            cursor = 0
+            for index, match in enumerate(matches):
+                parts.append(system_prompt[cursor : match.start()])
+                if index == 0:
+                    parts.append(block)
+                cursor = match.end()
+            parts.append(system_prompt[cursor:])
+            return "".join(parts)
+        anchor = "\n# Skills"
+        if anchor in system_prompt:
+            before, after = system_prompt.split(anchor, 1)
+            return f"{before}\n{block}\n{anchor}{after}"
+        return f"{system_prompt}\n\n{block}" if system_prompt else block
+    return _BLOCK_PATTERN.sub("", system_prompt)
+
+
+def _render_prompt_block(wiki_context: str) -> str:
+    block = f"{WIKI_BLOCK_START}\n# Global Wiki\n{wiki_context}\n{WIKI_BLOCK_END}"
+    if len(block.encode("utf-8")) > WIKI_PROMPT_MAX_BYTES:
+        raise ValueError("Wiki prompt block exceeds its UTF-8 byte budget")
+    return block
 
 
 def _validated_limit(value: object, *, minimum: int, name: str) -> int:

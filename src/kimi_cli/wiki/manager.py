@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 from kimi_cli.wiki.initialize import CATEGORY_DIRS, WikiLayout, ensure_wiki
 from kimi_cli.wiki.lint import LintReport, lint_snapshot
@@ -97,6 +98,8 @@ class WikiManager:
     """Own initialization, safe reads, admission, transactions, cache, and lint."""
 
     def __init__(self, root: Path | None = None, *, wal: bool = True) -> None:
+        self._close_lock = Lock()
+        self._closed = False
         self.layout = ensure_wiki(root)
         self.registry = WorkspaceRegistry(self.layout.metadata / "workspaces.json")
         # Exposed for lock-state diagnostics and Task 10 approval-boundary tests.
@@ -109,7 +112,11 @@ class WikiManager:
             self._search_index_current = False
 
     def close(self) -> None:
-        self.search_index.close()
+        with self._close_lock:
+            if self._closed:
+                return
+            self.search_index.close()
+            self._closed = True
 
     def ensure(self) -> WikiLayout:
         return self.layout
