@@ -37,6 +37,57 @@ def test_register_records_one_canonical_workspace_path(
     assert registry.register(workspace) == workspace_id
 
 
+def test_registry_writes_current_schema_version(
+    registry: WorkspaceRegistry, workspace: Path
+) -> None:
+    workspace_id = registry.register(workspace)
+
+    data = json.loads(registry.path.read_text(encoding="utf-8"))
+
+    assert data["schema_version"] == 1
+    assert data["workspaces"][str(workspace_id)]["path"] == str(workspace.resolve())
+    assert json.loads((workspace / ".openkimo-workspace.json").read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "workspace_id": str(workspace_id),
+    }
+
+
+def test_registry_migrates_explicit_legacy_unversioned_shape(
+    registry: WorkspaceRegistry, workspace: Path
+) -> None:
+    workspace_id = uuid4()
+    registry.path.parent.mkdir()
+    registry.path.write_text(
+        json.dumps(
+            {
+                "workspaces": {
+                    str(workspace_id): {
+                        "path": str(workspace.resolve()),
+                        "last_seen_at": "2026-07-24T12:00:00+00:00",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert registry.register(workspace) == workspace_id
+    assert json.loads(registry.path.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_registry_rejects_future_schema_without_rewriting_it(
+    registry: WorkspaceRegistry, workspace: Path
+) -> None:
+    registry.path.parent.mkdir()
+    future = json.dumps({"schema_version": 2, "workspaces": {}}, separators=(",", ":"))
+    registry.path.write_text(future, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema version is unsupported"):
+        registry.register(workspace)
+
+    assert registry.path.read_text(encoding="utf-8") == future
+
+
 def test_workspace_move_updates_only_registry(registry: WorkspaceRegistry, tmp_path: Path) -> None:
     old = tmp_path / "old"
     old.mkdir()
@@ -45,12 +96,61 @@ def test_workspace_move_updates_only_registry(registry: WorkspaceRegistry, tmp_p
     page.write_text("unchanged", encoding="utf-8")
     moved = tmp_path / "moved"
     old.rename(moved)
+    fresh_registry = WorkspaceRegistry(registry.path)
 
-    assert registry.register(moved, workspace_id=workspace_id) == workspace_id
+    assert fresh_registry.register(moved) == workspace_id
     assert json.loads(registry.path.read_text(encoding="utf-8"))["workspaces"][str(workspace_id)][
         "path"
     ] == str(moved.resolve())
     assert page.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_register_rejects_symlinked_workspace_identity_marker(
+    registry: WorkspaceRegistry, workspace: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "identity.json"
+    outside.write_text('{"schema_version":1,"workspace_id":"00000000-0000-0000-0000-000000000000"}')
+    (workspace / ".openkimo-workspace.json").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="identity marker"):
+        registry.register(workspace)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        {"schema_version": 2, "workspace_id": "00000000-0000-0000-0000-000000000000"},
+        {"schema_version": True, "workspace_id": "00000000-0000-0000-0000-000000000000"},
+        {"schema_version": 1.0, "workspace_id": "00000000-0000-0000-0000-000000000000"},
+        {"schema_version": 1, "workspace_id": "not-a-uuid"},
+        {"schema_version": 1, "workspace_id": "00000000-0000-0000-0000-000000000000", "x": 1},
+    ],
+)
+def test_register_rejects_tampered_or_future_workspace_identity_marker(
+    registry: WorkspaceRegistry, workspace: Path, marker: dict[str, object]
+) -> None:
+    marker_path = workspace / ".openkimo-workspace.json"
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="identity marker"):
+        registry.register(workspace)
+
+
+def test_marker_cannot_hijack_live_workspace_identity(
+    registry: WorkspaceRegistry, workspace: Path, tmp_path: Path
+) -> None:
+    workspace_id = registry.register(workspace)
+    other = tmp_path / "other-workspace"
+    other.mkdir()
+    (other / ".openkimo-workspace.json").write_text(
+        json.dumps({"schema_version": 1, "workspace_id": str(workspace_id)}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register(other)
+
+    assert registry.register(workspace) == workspace_id
 
 
 def test_relative_source_is_portable_and_resolves_registered_file(
