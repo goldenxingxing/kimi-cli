@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
@@ -11,6 +13,7 @@ import kimi_cli.app as app_module
 import kimi_cli.ui.shell.startup as startup_module
 from kimi_cli.app import KimiCLI
 from kimi_cli.ui.shell.startup import ShellStartupProgress
+from kimi_cli.wiki.context import WIKI_BLOCK_END, WIKI_BLOCK_START
 
 
 def test_shell_startup_progress_starts_once_and_updates_messages(monkeypatch) -> None:
@@ -116,6 +119,179 @@ async def test_kimi_cli_create_reports_startup_phases(session, config, monkeypat
         "Restoring conversation...",
     ]
     write_system_prompt.assert_awaited_once_with("Test system prompt")
+
+
+@pytest.mark.asyncio
+async def test_kimi_cli_create_refreshes_persisted_wiki_block(session, config, monkeypatch) -> None:
+    current_context = "Current Wiki guidance.\n\n# Wiki Index\n- [[concepts/current]] — 当前"
+    old_prompt = (
+        f"Keep before.\n\n{WIKI_BLOCK_START}\n# Global Wiki\nstale\n{WIKI_BLOCK_END}\n\nKeep after."
+    )
+    close = AsyncMock()
+    fake_runtime = SimpleNamespace(
+        session=session,
+        config=config,
+        llm=None,
+        approval=SimpleNamespace(is_yolo=lambda: False, is_afk=lambda: False),
+        notifications=SimpleNamespace(recover=lambda: None),
+        background_tasks=SimpleNamespace(reconcile=lambda: None),
+        builtin_args=SimpleNamespace(KIMI_WIKI_CONTEXT=current_context),
+        close=close,
+    )
+
+    @dataclass
+    class _FakeAgent:
+        name: str
+        system_prompt: str
+
+    fake_agent = _FakeAgent(name="Test Agent", system_prompt="New template")
+    fake_context = SimpleNamespace(system_prompt=old_prompt)
+    fake_context.restore = AsyncMock()
+    fake_context.replace_system_prompt = AsyncMock()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(app_module, "load_config", lambda conf: conf)
+    monkeypatch.setattr(app_module, "augment_provider_with_env_vars", lambda provider, model: {})
+    monkeypatch.setattr(app_module, "create_llm", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_module.Runtime, "create", AsyncMock(return_value=fake_runtime))
+    monkeypatch.setattr(app_module, "load_agent", AsyncMock(return_value=fake_agent))
+    monkeypatch.setattr(app_module, "Context", lambda _path: fake_context)
+
+    class _FakeSoul:
+        plan_mode = False
+
+        def __init__(self, agent, context):
+            captured["prompt"] = agent.system_prompt
+
+        def set_hook_engine(self, engine):
+            pass
+
+    monkeypatch.setattr(app_module, "KimiSoul", _FakeSoul)
+
+    await KimiCLI.create(session, config=config, resumed=True)
+
+    prompt = str(captured["prompt"])
+    assert "Keep before." in prompt and "Keep after." in prompt
+    assert "stale" not in prompt
+    assert current_context in prompt
+    assert prompt.count(WIKI_BLOCK_START) == 1
+    fake_context.replace_system_prompt.assert_awaited_once_with(prompt)
+    close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("agent failed"), asyncio.CancelledError()])
+async def test_kimi_cli_create_closes_runtime_after_initialization_failure(
+    session,
+    config,
+    monkeypatch,
+    failure: BaseException,
+) -> None:
+    close = AsyncMock()
+    fake_runtime = SimpleNamespace(
+        session=session,
+        config=config,
+        llm=None,
+        approval=SimpleNamespace(is_yolo=lambda: False, is_afk=lambda: False),
+        notifications=SimpleNamespace(recover=lambda: None),
+        background_tasks=SimpleNamespace(reconcile=lambda: None),
+        builtin_args=SimpleNamespace(KIMI_WIKI_CONTEXT=""),
+        close=close,
+    )
+    monkeypatch.setattr(app_module, "load_config", lambda conf: conf)
+    monkeypatch.setattr(app_module, "augment_provider_with_env_vars", lambda provider, model: {})
+    monkeypatch.setattr(app_module, "create_llm", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_module.Runtime, "create", AsyncMock(return_value=fake_runtime))
+    monkeypatch.setattr(app_module, "load_agent", AsyncMock(side_effect=failure))
+
+    with pytest.raises(type(failure)):
+        await KimiCLI.create(session, config=config)
+
+    close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_kimi_cli_create_closes_runtime_when_post_runtime_progress_fails(
+    session,
+    config,
+    monkeypatch,
+) -> None:
+    close = AsyncMock()
+    fake_runtime = SimpleNamespace(
+        session=session,
+        config=config,
+        llm=None,
+        approval=SimpleNamespace(is_yolo=lambda: False, is_afk=lambda: False),
+        notifications=SimpleNamespace(recover=lambda: None),
+        background_tasks=SimpleNamespace(reconcile=lambda: None),
+        builtin_args=SimpleNamespace(KIMI_WIKI_CONTEXT=""),
+        close=close,
+    )
+
+    def progress(message: str) -> None:
+        if message == "Loading agent...":
+            raise RuntimeError("progress failed")
+
+    monkeypatch.setattr(app_module, "load_config", lambda conf: conf)
+    monkeypatch.setattr(app_module, "augment_provider_with_env_vars", lambda provider, model: {})
+    monkeypatch.setattr(app_module, "create_llm", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_module.Runtime, "create", AsyncMock(return_value=fake_runtime))
+
+    with pytest.raises(RuntimeError, match="progress failed"):
+        await KimiCLI.create(session, config=config, startup_progress=progress)
+
+    close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_kimi_cli_create_closes_runtime_when_telemetry_setup_fails(
+    session,
+    config,
+    monkeypatch,
+) -> None:
+    close = AsyncMock()
+    fake_runtime = SimpleNamespace(
+        session=session,
+        config=config,
+        llm=None,
+        approval=SimpleNamespace(is_yolo=lambda: False, is_afk=lambda: False),
+        notifications=SimpleNamespace(recover=lambda: None),
+        background_tasks=SimpleNamespace(reconcile=lambda: None),
+        builtin_args=SimpleNamespace(KIMI_WIKI_CONTEXT=""),
+        close=close,
+    )
+    fake_agent = SimpleNamespace(name="Test Agent", system_prompt="Test system prompt")
+    fake_context = SimpleNamespace(
+        system_prompt=None,
+        restore=AsyncMock(),
+        write_system_prompt=AsyncMock(),
+    )
+
+    class _FakeSoul:
+        plan_mode = False
+
+        def __init__(self, agent, context):
+            pass
+
+        def set_hook_engine(self, engine):
+            pass
+
+    monkeypatch.setattr(app_module, "load_config", lambda conf: conf)
+    monkeypatch.setattr(app_module, "augment_provider_with_env_vars", lambda provider, model: {})
+    monkeypatch.setattr(app_module, "create_llm", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_module.Runtime, "create", AsyncMock(return_value=fake_runtime))
+    monkeypatch.setattr(app_module, "load_agent", AsyncMock(return_value=fake_agent))
+    monkeypatch.setattr(app_module, "Context", lambda _path: fake_context)
+    monkeypatch.setattr(app_module, "KimiSoul", _FakeSoul)
+    monkeypatch.setattr(
+        "kimi_cli.telemetry.crash.install_asyncio_handler",
+        Mock(side_effect=RuntimeError("telemetry failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="telemetry failed"):
+        await KimiCLI.create(session, config=config)
+
+    close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

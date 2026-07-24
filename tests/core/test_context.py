@@ -378,6 +378,24 @@ async def test_write_system_prompt_then_restore(tmp_path: Path) -> None:
     assert ctx2.system_prompt == "Round trip prompt"
 
 
+async def test_replace_system_prompt_updates_first_record_and_preserves_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "context.jsonl"
+    ctx = Context(path)
+    await ctx.write_system_prompt("old prompt")
+    await ctx.append_message(Message(role="user", content="keep me"))
+
+    await ctx.replace_system_prompt("new prompt")
+
+    restored = Context(path)
+    await restored.restore()
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert restored.system_prompt == "new prompt"
+    assert [message.extract_text() for message in restored.history] == ["keep me"]
+    assert sum(record.get("role") == "_system_prompt" for record in records) == 1
+
+
 @pytest.mark.asyncio
 async def test_write_append_messages_then_restore(tmp_path: Path) -> None:
     path = tmp_path / "context.jsonl"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import inspect
 import sys
 import time
 import warnings
@@ -32,6 +33,7 @@ from kimi_cli.utils.aioqueue import QueueShutDown
 from kimi_cli.utils.envvar import get_env_bool
 from kimi_cli.utils.logging import logger, open_original_stderr, redirect_stderr_to_logger
 from kimi_cli.utils.path import shorten_home
+from kimi_cli.wiki.context import refresh_wiki_prompt_block
 from kimi_cli.wire import Wire, WireUISide
 from kimi_cli.wire.types import ApprovalRequest, ApprovalResponse, ContentPart, WireMessage
 
@@ -115,6 +117,53 @@ def _cleanup_stale_foreground_subagents(runtime: Runtime) -> None:
             agent_id=agent_id,
         )
         subagent_store.update_instance(agent_id, status="failed")
+
+
+async def _close_runtime_resource(runtime: object) -> None:
+    close = getattr(runtime, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _await_startup_step(
+    awaitable: Any,
+    *,
+    runtime: Runtime,
+    background_task: asyncio.Task[None] | None,
+) -> Any:
+    try:
+        return await awaitable
+    except BaseException:
+        await _abort_startup(runtime, background_task)
+        raise
+
+
+async def _run_startup_step(
+    callback: Callable[[], Any],
+    *,
+    runtime: Runtime,
+    background_task: asyncio.Task[None] | None,
+) -> Any:
+    try:
+        return callback()
+    except BaseException:
+        await _abort_startup(runtime, background_task)
+        raise
+
+
+async def _abort_startup(
+    runtime: Runtime,
+    background_task: asyncio.Task[None] | None,
+) -> None:
+    if background_task is not None and not background_task.done():
+        background_task.cancel()
+    try:
+        await _close_runtime_resource(runtime)
+    except BaseException:
+        logger.exception("Runtime cleanup failed during startup abort")
 
 
 class KimiCLI:
@@ -265,11 +314,19 @@ class KimiCLI:
             runtime_afk=runtime_afk,
             skills_dirs=skills_dirs,
         )
-        runtime.ui_mode = ui_mode
-        runtime.resumed = resumed
-        runtime.notifications.recover()
-        runtime.background_tasks.reconcile()
-        _cleanup_stale_foreground_subagents(runtime)
+
+        def _initialize_runtime_state() -> None:
+            runtime.ui_mode = ui_mode
+            runtime.resumed = resumed
+            runtime.notifications.recover()
+            runtime.background_tasks.reconcile()
+            _cleanup_stale_foreground_subagents(runtime)
+
+        await _run_startup_step(
+            _initialize_runtime_state,
+            runtime=runtime,
+            background_task=bg_refresh_task,
+        )
         _phase_timings_ms["init_ms"] = int((time.monotonic() - _phase_t) * 1000)
 
         # Refresh plugin configs with fresh credentials (e.g. OAuth tokens)
@@ -289,92 +346,159 @@ class KimiCLI:
         if agent_file is None:
             agent_file = DEFAULT_AGENT_FILE
         if startup_progress is not None:
-            startup_progress("Loading agent...")
+            await _run_startup_step(
+                lambda: startup_progress("Loading agent..."),
+                runtime=runtime,
+                background_task=bg_refresh_task,
+            )
 
         _phase_t = time.monotonic()
-        agent = await load_agent(
-            agent_file,
-            runtime,
-            mcp_configs=mcp_configs or [],
-            start_mcp_loading=not defer_mcp_loading,
+        agent = await _await_startup_step(
+            load_agent(
+                agent_file,
+                runtime,
+                mcp_configs=mcp_configs or [],
+                start_mcp_loading=not defer_mcp_loading,
+            ),
+            runtime=runtime,
+            background_task=bg_refresh_task,
         )
         _phase_timings_ms["mcp_ms"] = int((time.monotonic() - _phase_t) * 1000)
 
         if startup_progress is not None:
-            startup_progress("Restoring conversation...")
-        context = Context(session.context_file)
-        await context.restore()
+            await _run_startup_step(
+                lambda: startup_progress("Restoring conversation..."),
+                runtime=runtime,
+                background_task=bg_refresh_task,
+            )
+        context = await _run_startup_step(
+            lambda: Context(session.context_file),
+            runtime=runtime,
+            background_task=bg_refresh_task,
+        )
+        await _await_startup_step(
+            context.restore(),
+            runtime=runtime,
+            background_task=bg_refresh_task,
+        )
 
         if context.system_prompt is not None:
-            agent = dataclasses.replace(agent, system_prompt=context.system_prompt)
+            refreshed_prompt = await _run_startup_step(
+                lambda: refresh_wiki_prompt_block(
+                    context.system_prompt or "",
+                    getattr(runtime.builtin_args, "KIMI_WIKI_CONTEXT", ""),
+                ),
+                runtime=runtime,
+                background_task=bg_refresh_task,
+            )
+            if refreshed_prompt != context.system_prompt:
+                await _await_startup_step(
+                    context.replace_system_prompt(refreshed_prompt),
+                    runtime=runtime,
+                    background_task=bg_refresh_task,
+                )
+            agent = await _run_startup_step(
+                lambda: dataclasses.replace(agent, system_prompt=refreshed_prompt),
+                runtime=runtime,
+                background_task=bg_refresh_task,
+            )
         else:
-            await context.write_system_prompt(agent.system_prompt)
+            await _await_startup_step(
+                context.write_system_prompt(agent.system_prompt),
+                runtime=runtime,
+                background_task=bg_refresh_task,
+            )
 
-        soul = KimiSoul(agent, context=context)
+        soul = await _run_startup_step(
+            lambda: KimiSoul(agent, context=context),
+            runtime=runtime,
+            background_task=bg_refresh_task,
+        )
 
         # Activate plan mode if requested (for new sessions or --plan flag)
         if plan_mode and not soul.plan_mode:
-            await soul.set_plan_mode_from_manual(True)
+            await _await_startup_step(
+                soul.set_plan_mode_from_manual(True),
+                runtime=runtime,
+                background_task=bg_refresh_task,
+            )
         elif plan_mode and soul.plan_mode:
             # Already in plan mode from restored session, trigger activation reminder
-            soul.schedule_plan_activation_reminder()
-
-        # Create and inject hook engine
-        from kimi_cli.hooks.engine import HookEngine
-
-        hook_engine = HookEngine(config.hooks, cwd=str(session.work_dir))
-        soul.set_hook_engine(hook_engine)
-        runtime.hook_engine = hook_engine
-
-        # --- Initialize telemetry ---
-        from kimi_cli.telemetry import attach_sink, set_context
-        from kimi_cli.telemetry import disable as disable_telemetry
-
-        telemetry_disabled = not config.telemetry or get_env_bool("KIMI_DISABLE_TELEMETRY")
-        if telemetry_disabled:
-            disable_telemetry()
-        else:
-            device_id = get_device_id()
-            set_context(device_id=device_id, session_id=session.id)
-            from kimi_cli.telemetry.sink import EventSink
-            from kimi_cli.telemetry.transport import AsyncTransport
-
-            def _get_token() -> str | None:
-                return oauth.get_cached_access_token(KIMI_CODE_OAUTH_KEY)
-
-            transport = AsyncTransport(device_id=device_id, get_access_token=_get_token)
-            sink = EventSink(
-                transport,
-                version=VERSION,
-                model=model.model if model else "",
-                ui_mode=ui_mode,
+            await _run_startup_step(
+                soul.schedule_plan_activation_reminder,
+                runtime=runtime,
+                background_task=bg_refresh_task,
             )
-            attach_sink(sink)
 
-        from kimi_cli.telemetry import track, track_session_started_once
-        from kimi_cli.telemetry.crash import install_asyncio_handler, set_phase
+        def _initialize_hooks() -> None:
+            from kimi_cli.hooks.engine import HookEngine
 
-        # App init finished — enter runtime phase and hook asyncio crashes.
-        install_asyncio_handler()
-        set_phase("runtime")
+            hook_engine = HookEngine(config.hooks, cwd=str(session.work_dir))
+            soul.set_hook_engine(hook_engine)
+            runtime.hook_engine = hook_engine
 
-        if ui_mode != "wire":
-            track_session_started_once(ui_mode=ui_mode, resumed=resumed)
-        track(
-            "started",
-            resumed=resumed,
-            yolo=runtime.approval.is_yolo(),
-            afk=runtime.approval.is_afk(),
-        )
-        track(
-            "startup_perf",
-            duration_ms=int((time.monotonic() - _create_t0) * 1000),
-            config_ms=_phase_timings_ms.get("config_ms", 0),
-            init_ms=_phase_timings_ms.get("init_ms", 0),
-            mcp_ms=_phase_timings_ms.get("mcp_ms", 0),
+        await _run_startup_step(
+            _initialize_hooks,
+            runtime=runtime,
+            background_task=bg_refresh_task,
         )
 
-        return KimiCLI(soul, runtime, env_overrides, bg_refresh_task)
+        def _finish_startup() -> KimiCLI:
+            # --- Initialize telemetry ---
+            from kimi_cli.telemetry import attach_sink, set_context
+            from kimi_cli.telemetry import disable as disable_telemetry
+
+            telemetry_disabled = not config.telemetry or get_env_bool("KIMI_DISABLE_TELEMETRY")
+            if telemetry_disabled:
+                disable_telemetry()
+            else:
+                device_id = get_device_id()
+                set_context(device_id=device_id, session_id=session.id)
+                from kimi_cli.telemetry.sink import EventSink
+                from kimi_cli.telemetry.transport import AsyncTransport
+
+                def _get_token() -> str | None:
+                    return oauth.get_cached_access_token(KIMI_CODE_OAUTH_KEY)
+
+                transport = AsyncTransport(device_id=device_id, get_access_token=_get_token)
+                sink = EventSink(
+                    transport,
+                    version=VERSION,
+                    model=model.model if model else "",
+                    ui_mode=ui_mode,
+                )
+                attach_sink(sink)
+
+            from kimi_cli.telemetry import track, track_session_started_once
+            from kimi_cli.telemetry.crash import install_asyncio_handler, set_phase
+
+            # App init finished — enter runtime phase and hook asyncio crashes.
+            install_asyncio_handler()
+            set_phase("runtime")
+
+            if ui_mode != "wire":
+                track_session_started_once(ui_mode=ui_mode, resumed=resumed)
+            track(
+                "started",
+                resumed=resumed,
+                yolo=runtime.approval.is_yolo(),
+                afk=runtime.approval.is_afk(),
+            )
+            track(
+                "startup_perf",
+                duration_ms=int((time.monotonic() - _create_t0) * 1000),
+                config_ms=_phase_timings_ms.get("config_ms", 0),
+                init_ms=_phase_timings_ms.get("init_ms", 0),
+                mcp_ms=_phase_timings_ms.get("mcp_ms", 0),
+            )
+
+            return KimiCLI(soul, runtime, env_overrides, bg_refresh_task)
+
+        return await _run_startup_step(
+            _finish_startup,
+            runtime=runtime,
+            background_task=bg_refresh_task,
+        )
 
     def __init__(
         self,
@@ -397,6 +521,10 @@ class KimiCLI:
     def session(self) -> Session:
         """Get the Session instance."""
         return self._runtime.session
+
+    async def close(self) -> None:
+        """Release resources owned by this app instance."""
+        await _close_runtime_resource(self._runtime)
 
     async def shutdown_background_tasks(self) -> None:
         """Kill active background tasks on exit, unless keep_alive_on_exit is configured.
@@ -424,6 +552,11 @@ class KimiCLI:
                 await toolset.cleanup()
         except (Exception, asyncio.CancelledError):
             logger.warning("Error during toolset cleanup; continuing exit", exc_info=True)
+
+        try:
+            await self.close()
+        except (Exception, asyncio.CancelledError):
+            logger.warning("Error during runtime cleanup; continuing exit", exc_info=True)
 
         bg_config = self._runtime.config.background
         if bg_config.keep_alive_on_exit:

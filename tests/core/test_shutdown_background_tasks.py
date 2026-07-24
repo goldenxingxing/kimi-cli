@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import contextlib
 import io
-from unittest.mock import MagicMock, patch
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -83,6 +84,7 @@ def _make_cli(
     runtime.config.background.keep_alive_on_exit = keep_alive
     runtime.config.background.kill_grace_period_ms = kill_grace_ms
     runtime.background_tasks = manager
+    runtime.close = AsyncMock()
 
     cli = KimiCLI.__new__(KimiCLI)
     cli._soul = MagicMock()
@@ -91,6 +93,16 @@ def _make_cli(
     cli._bg_refresh_task = None
 
     return cli, manager, state
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_runtime_even_when_no_background_tasks() -> None:
+    cli, _manager, _state = _make_cli(keep_alive=False, views=[])
+
+    await cli.shutdown_background_tasks()
+    await cli.shutdown_background_tasks()
+
+    cast(AsyncMock, cli._runtime.close).assert_awaited()
 
 
 @pytest.mark.asyncio
