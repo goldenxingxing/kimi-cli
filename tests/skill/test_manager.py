@@ -33,6 +33,19 @@ def test_manager_merges_builtin_and_writable_layers(tmp_path: Path) -> None:
     assert skills["custom"].origin == "user"
 
 
+def test_enabled_lookup_does_not_scan_all_skill_files(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = SkillManager(tmp_path / "builtin", tmp_path / "skill")
+    monkeypatch.setattr(
+        manager,
+        "list_skills",
+        lambda: (_ for _ in ()).throw(AssertionError("full scan")),
+    )
+
+    assert manager.is_enabled("any-valid-name") is True
+
+
 def test_builtin_management_is_state_only_until_edit(tmp_path: Path) -> None:
     builtin = tmp_path / "builtin"
     writable = tmp_path / "skill"

@@ -652,7 +652,12 @@ def parse_skill_text(
 
     skill_type = frontmatter.get("type") or "standard"
     if skill_type not in ("standard", "flow"):
-        raise ValueError(f'Invalid skill type "{skill_type}"')
+        logger.warning(
+            'Treating legacy skill type "{skill_type}" as "standard" for {name}.',
+            skill_type=skill_type,
+            name=name,
+        )
+        skill_type = "standard"
     flow = None
     if skill_type == "flow":
         try:
