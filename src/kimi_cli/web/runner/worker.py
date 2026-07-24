@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,13 @@ from kimi_cli.exception import MCPConfigError
 from kimi_cli.web.store.sessions import load_session_by_id
 
 
+def configure_session_environment(session: Any) -> None:
+    """Configure paths whose values depend on the selected work directory."""
+    output_dir = Path(str(session.work_dir)) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["KIMI_OUTPUT_DIR"] = str(output_dir)
+
+
 async def run_worker(session_id: UUID) -> None:
     """Run the KimiCLI worker for a session."""
     # Find session by ID using the web store
@@ -32,6 +40,7 @@ async def run_worker(session_id: UUID) -> None:
 
     # Get the kimi-cli session object
     session = joint_session.kimi_cli_session
+    configure_session_environment(session)
 
     # Load default MCP config file if it exists
     default_mcp_file = get_global_mcp_config_file()

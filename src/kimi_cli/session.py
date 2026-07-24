@@ -44,11 +44,13 @@ class Session:
     """The title of the session."""
     updated_at: float
     """The timestamp of the last update to the session."""
+    storage_dir: Path | None = None
+    """Resolved directory for this session, including legacy locations."""
 
     @property
     def dir(self) -> Path:
         """The absolute path of the session directory."""
-        path = self.work_dir_meta.sessions_dir / self.id
+        path = self.storage_dir or (self.work_dir_meta.sessions_dir / self.id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -98,7 +100,7 @@ class Session:
 
     async def delete(self) -> None:
         """Delete the session directory."""
-        session_dir = self.work_dir_meta.sessions_dir / self.id
+        session_dir = self.dir
         if not session_dir.exists():
             return
         await asyncio.to_thread(shutil.rmtree, session_dir, True)
@@ -145,6 +147,7 @@ class Session:
             session_id = str(uuid.uuid4())
         session_dir = work_dir_meta.sessions_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
+        work_dir_meta.output_dir
 
         if _context_file is None:
             context_file = session_dir / "context.jsonl"
@@ -176,6 +179,7 @@ class Session:
             state=SessionState(),
             title="",
             updated_at=0.0,
+            storage_dir=session_dir,
         )
         await session.refresh()
         return session
@@ -196,10 +200,8 @@ class Session:
             logger.debug("Work directory never been used")
             return None
 
-        _migrate_session_context_file(work_dir_meta, session_id)
-
-        session_dir = work_dir_meta.sessions_dir / session_id
-        if not session_dir.is_dir():
+        session_dir = _find_session_dir(work_dir_meta, session_id)
+        if session_dir is None:
             logger.debug("Session directory not found: {session_dir}", session_dir=session_dir)
             return None
 
@@ -219,6 +221,7 @@ class Session:
             state=load_session_state(session_dir),
             title="",
             updated_at=0.0,
+            storage_dir=session_dir,
         )
         await session.refresh()
         return session
@@ -237,15 +240,15 @@ class Session:
 
         session_ids = {
             path.name if path.is_dir() else path.stem
-            for path in work_dir_meta.sessions_dir.iterdir()
+            for sessions_dir in work_dir_meta.readable_sessions_dirs
+            for path in sessions_dir.iterdir()
             if path.is_dir() or path.suffix == ".jsonl"
         }
 
         sessions: list[Session] = []
         for session_id in session_ids:
-            _migrate_session_context_file(work_dir_meta, session_id)
-            session_dir = work_dir_meta.sessions_dir / session_id
-            if not session_dir.is_dir():
+            session_dir = _find_session_dir(work_dir_meta, session_id)
+            if session_dir is None:
                 logger.debug("Session directory not found: {session_dir}", session_dir=session_dir)
                 continue
             context_file = session_dir / "context.jsonl"
@@ -263,6 +266,7 @@ class Session:
                 state=load_session_state(session_dir),
                 title="",
                 updated_at=0.0,
+                storage_dir=session_dir,
             )
             if session.is_empty():
                 logger.debug(
@@ -306,9 +310,18 @@ class Session:
         return await Session.find(work_dir, work_dir_meta.last_session_id)
 
 
-def _migrate_session_context_file(work_dir_meta: WorkDirMeta, session_id: str) -> None:
-    old_context_file = work_dir_meta.sessions_dir / f"{session_id}.jsonl"
-    new_context_file = work_dir_meta.sessions_dir / session_id / "context.jsonl"
+def _find_session_dir(work_dir_meta: WorkDirMeta, session_id: str) -> Path | None:
+    for sessions_dir in work_dir_meta.readable_sessions_dirs:
+        _migrate_session_context_file(sessions_dir, session_id)
+        session_dir = sessions_dir / session_id
+        if session_dir.is_dir():
+            return session_dir
+    return None
+
+
+def _migrate_session_context_file(sessions_dir: Path, session_id: str) -> None:
+    old_context_file = sessions_dir / f"{session_id}.jsonl"
+    new_context_file = sessions_dir / session_id / "context.jsonl"
     if old_context_file.exists() and not new_context_file.exists():
         new_context_file.parent.mkdir(parents=True, exist_ok=True)
         old_context_file.rename(new_context_file)
