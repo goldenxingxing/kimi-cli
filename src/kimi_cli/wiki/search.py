@@ -11,6 +11,7 @@ import contextlib
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ _PAGES_COLUMNS = (
     "body",
 )
 _FTS_COLUMNS = ("logical_path", "title", "tags", "summary", "body")
+_CACHE_STATE_COLUMNS = ("id", "revision")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,8 @@ class WikiSearchIndex:
         self.trigram = trigram
         self._fts_available = _has_fts_table(connection)
         self._markdown_pages: tuple[WikiPage, ...] = ()
+        self._markdown_revision = -1
+        self._lock = threading.RLock()
 
     @classmethod
     def open(cls, database: Path, *, wal: bool) -> WikiSearchIndex:
@@ -80,7 +84,8 @@ class WikiSearchIndex:
 
     def close(self) -> None:
         """Close the derivative cache connection."""
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> WikiSearchIndex:
         return self
@@ -88,37 +93,59 @@ class WikiSearchIndex:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def rebuild(self, pages: Iterable[WikiPage]) -> None:
+    def rebuild(self, pages: Iterable[WikiPage], *, revision: int | None = None) -> bool:
         """Replace every cache row with the supplied authoritative Markdown pages."""
         materialized = _validated_pages(pages)
-        try:
-            with self._connection:
+        normalized_revision = _validate_cache_revision(revision)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                current_revision = self._cache_revision()
+                if normalized_revision is not None and normalized_revision < current_revision:
+                    self._connection.rollback()
+                    return False
                 self._connection.execute("DELETE FROM pages")
                 if self._fts_available:
                     self._connection.execute("DELETE FROM pages_fts")
                 self._insert_pages(materialized)
-        except sqlite3.Error:
-            # The caller still has Markdown and can use bounded_markdown_search.
-            self._markdown_pages = materialized
-            raise
-        self._markdown_pages = materialized
+                applied_revision = (
+                    current_revision if normalized_revision is None else normalized_revision
+                )
+                self._set_cache_revision(applied_revision)
+                self._connection.commit()
+            except sqlite3.Error:
+                self._connection.rollback()
+                self._remember_markdown(materialized, normalized_revision)
+                raise
+            self._remember_markdown(materialized, applied_revision)
+            return True
 
-    def sync(self, pages: Iterable[WikiPage]) -> None:
+    def sync(self, pages: Iterable[WikiPage], *, revision: int | None = None) -> bool:
         """Synchronize changed and deleted content-hash rows in one SQLite transaction."""
         materialized = _validated_pages(pages)
-        try:
-            existing = {
-                row[0]: row[1]
-                for row in self._connection.execute("SELECT logical_path, content_hash FROM pages")
-            }
-            incoming = {page.logical_path: _page_hash(page) for page in materialized}
-            removed_or_changed = {
-                path for path, page_hash in existing.items() if incoming.get(path) != page_hash
-            }
-            additions = tuple(
-                page for page in materialized if existing.get(page.logical_path) != _page_hash(page)
-            )
-            with self._connection:
+        normalized_revision = _validate_cache_revision(revision)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                current_revision = self._cache_revision()
+                if normalized_revision is not None and normalized_revision < current_revision:
+                    self._connection.rollback()
+                    return False
+                existing = {
+                    row[0]: row[1]
+                    for row in self._connection.execute(
+                        "SELECT logical_path, content_hash FROM pages"
+                    )
+                }
+                incoming = {page.logical_path: _page_hash(page) for page in materialized}
+                removed_or_changed = {
+                    path for path, page_hash in existing.items() if incoming.get(path) != page_hash
+                }
+                additions = tuple(
+                    page
+                    for page in materialized
+                    if existing.get(page.logical_path) != _page_hash(page)
+                )
                 for logical_path in sorted(removed_or_changed):
                     if self._fts_available:
                         self._connection.execute(
@@ -128,10 +155,17 @@ class WikiSearchIndex:
                         "DELETE FROM pages WHERE logical_path = ?", (logical_path,)
                     )
                 self._insert_pages(additions)
-        except sqlite3.Error:
-            self._markdown_pages = materialized
-            raise
-        self._markdown_pages = materialized
+                applied_revision = (
+                    current_revision if normalized_revision is None else normalized_revision
+                )
+                self._set_cache_revision(applied_revision)
+                self._connection.commit()
+            except sqlite3.Error:
+                self._connection.rollback()
+                self._remember_markdown(materialized, normalized_revision)
+                raise
+            self._remember_markdown(materialized, applied_revision)
+            return True
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
         """Search cache rows, falling back to bounded Markdown kept by this process."""
@@ -139,18 +173,41 @@ class WikiSearchIndex:
         if not normalized:
             return []
         bounded_limit = _bounded_limit(limit)
-        try:
-            if len(normalized) < 3 or not self.trigram:
-                title_tag = self._title_tag_search(normalized, bounded_limit)
-                if title_tag:
-                    return title_tag
-            if self._fts_available:
-                fts_results = self._fts_search(normalized, bounded_limit)
-                if fts_results:
-                    return fts_results
-            return self._like_search(normalized, bounded_limit)
-        except sqlite3.DatabaseError:
-            return bounded_markdown_search(self._markdown_pages, normalized, bounded_limit)
+        with self._lock:
+            try:
+                if len(normalized) < 3 or not self.trigram:
+                    title_tag = self._title_tag_search(normalized, bounded_limit)
+                    if title_tag:
+                        return title_tag
+                if self._fts_available:
+                    fts_results = self._fts_search(normalized, bounded_limit)
+                    if fts_results:
+                        return fts_results
+                return self._like_search(normalized, bounded_limit)
+            except sqlite3.DatabaseError:
+                return bounded_markdown_search(self._markdown_pages, normalized, bounded_limit)
+
+    def _cache_revision(self) -> int:
+        row = self._connection.execute("SELECT revision FROM cache_state WHERE id = 1").fetchone()
+        if row is None:
+            raise sqlite3.DatabaseError("Wiki search cache state is missing")
+        return int(row[0])
+
+    def _set_cache_revision(self, revision: int) -> None:
+        self._connection.execute(
+            "UPDATE cache_state SET revision = ? WHERE id = 1",
+            (revision,),
+        )
+
+    def _remember_markdown(
+        self,
+        pages: tuple[WikiPage, ...],
+        revision: int | None,
+    ) -> None:
+        effective_revision = self._markdown_revision if revision is None else revision
+        if effective_revision >= self._markdown_revision:
+            self._markdown_pages = pages
+            self._markdown_revision = effective_revision
 
     def _insert_pages(self, pages: Iterable[WikiPage]) -> None:
         for page in pages:
@@ -259,7 +316,7 @@ def bounded_markdown_search(
 
 
 def _open_database(path: Path, *, wal: bool) -> tuple[sqlite3.Connection, bool]:
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     try:
         if wal:
@@ -279,8 +336,17 @@ def _open_database(path: Path, *, wal: bool) -> tuple[sqlite3.Connection, bool]:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                revision INTEGER NOT NULL CHECK (revision >= 0)
+            )
+            """
+        )
         trigram = _create_fts(connection)
         _validate_cache_schema(connection)
+        connection.execute("INSERT OR IGNORE INTO cache_state(id, revision) VALUES (1, 0)")
         connection.commit()
     except Exception:
         connection.close()
@@ -336,6 +402,9 @@ def _validate_cache_schema(connection: sqlite3.Connection) -> None:
     pages_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(pages)"))
     if pages_columns != _PAGES_COLUMNS:
         raise sqlite3.DatabaseError("Wiki search cache has an invalid pages table")
+    state_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(cache_state)"))
+    if state_columns != _CACHE_STATE_COLUMNS:
+        raise sqlite3.DatabaseError("Wiki search cache has an invalid state table")
     if _has_fts_table(connection):
         fts_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(pages_fts)"))
         if fts_columns != _FTS_COLUMNS:
@@ -361,6 +430,7 @@ def _is_rebuildable_cache_error(error: sqlite3.DatabaseError) -> bool:
             "database disk image is malformed",
             "invalid pages table",
             "invalid fts table",
+            "invalid state table",
         )
     )
 
@@ -423,3 +493,11 @@ def _escape_like(value: str) -> str:
 
 def _bounded_limit(limit: int) -> int:
     return max(1, min(int(limit), _MAX_RESULTS))
+
+
+def _validate_cache_revision(revision: int | None) -> int | None:
+    if revision is None:
+        return None
+    if type(revision) is not int or revision < 0:
+        raise ValueError("Wiki cache revision must be a non-negative integer")
+    return revision
