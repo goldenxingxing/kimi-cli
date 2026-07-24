@@ -739,7 +739,12 @@ class KimiToolset:
                     break
                 # all positional parameters should be dependencies to be injected
                 if param.annotation not in dependencies:
-                    raise ValueError(f"Tool dependency not found: {param.annotation}")
+                    logger.warning(
+                        "Tool dependency not found: {annotation} for {tool_path} — skipping tool",
+                        annotation=param.annotation,
+                        tool_path=tool_path,
+                    )
+                    return None
                 args.append(dependencies[param.annotation])
         return tool_cls(*args)
 

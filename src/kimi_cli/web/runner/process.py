@@ -313,7 +313,12 @@ class SessionProcess:
                             break
                         stderr = await self._process.stderr.read()
                         if not stderr:
-                            stderr = b"No stderr"
+                            err_msg = (
+                                "Worker process exited unexpectedly"
+                                f" (exit code {self._process.returncode}). "
+                                "Check logs for details."
+                            )
+                            stderr = err_msg.encode()
                         # Clear in-flight IDs before broadcasting so that
                         # is_busy is already False when the frontend reacts
                         # to the error and sends a new prompt.
