@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import typer
 
 if TYPE_CHECKING:
+    from kimi_cli.app import KimiCLI
     from kimi_cli.session import Session
 
 from ._lazy_group import LazySubcommandGroup
@@ -54,6 +55,18 @@ class ExitCode:
     SUCCESS = 0
     FAILURE = 1
     RETRYABLE = 75  # EX_TEMPFAIL from sysexits.h
+
+
+class _CLIInstanceOwner:
+    """Track and idempotently close the root runtime created by one CLI run."""
+
+    def __init__(self, instance: KimiCLI | None = None) -> None:
+        self.instance = instance
+
+    async def close(self) -> None:
+        instance, self.instance = self.instance, None
+        if instance is not None:
+            await instance.close()
 
 
 InputFormat = Literal["text", "stream-json"]
@@ -566,6 +579,7 @@ def kimi(
             The session and the exit code (0 = success, 1 = failure, 75 = retryable).
         """
         startup_progress = ShellStartupProgress(enabled=ui == "shell")
+        instance_owner = _CLIInstanceOwner()
         try:
             startup_progress.update("Preparing session...")
 
@@ -653,6 +667,7 @@ def kimi(
                 defer_mcp_loading=ui == "shell" and prompt is None,
                 ui_mode=ui,
             )
+            instance_owner.instance = instance
             startup_progress.stop()
 
             # --- SessionStart hook ---
@@ -740,7 +755,10 @@ def kimi(
 
             return session, exit_code
         finally:
-            startup_progress.stop()
+            try:
+                startup_progress.stop()
+            finally:
+                await instance_owner.close()
 
     async def _delete_empty_session(session: Session) -> None:
         """Delete an empty session directory and clear last_session_id if it pointed to it."""

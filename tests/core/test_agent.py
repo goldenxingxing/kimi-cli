@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
@@ -213,6 +214,38 @@ async def test_cancelled_wiki_initialization_closes_partial_manager(
 
     with pytest.raises(asyncio.CancelledError):
         await _initialize_global_wiki(session, owner_id=None)
+
+    close.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_wiki_constructor_waits_for_thread_and_closes_manager(
+    session,
+    lightweight_runtime_create: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del lightweight_runtime_create
+    started = threading.Event()
+    release = threading.Event()
+    close = Mock()
+
+    class SlowWikiManager:
+        def __init__(self) -> None:
+            started.set()
+            release.wait(timeout=5)
+
+        def close(self) -> None:
+            close()
+
+    monkeypatch.setattr("kimi_cli.wiki.manager.WikiManager", SlowWikiManager)
+
+    task = asyncio.create_task(_initialize_global_wiki(session, owner_id=None))
+    assert await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     close.assert_called_once_with()
 

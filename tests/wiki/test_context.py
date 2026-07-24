@@ -78,8 +78,8 @@ def test_refresh_inserts_wiki_block_into_pre_upgrade_prompt() -> None:
     assert context in refreshed
     prefix, managed_and_suffix = refreshed.split(WIKI_BLOCK_START, 1)
     _managed, suffix = managed_and_suffix.split(WIKI_BLOCK_END, 1)
-    assert prefix == "System prefix.\n\n"
-    assert suffix == "\n\n# Skills\n\nKeep this user configuration."
+    assert prefix == "System prefix.\n"
+    assert suffix == "\n# Skills\n\nKeep this user configuration."
 
 
 def test_refresh_replaces_old_block_without_changing_other_prompt_content() -> None:
@@ -92,6 +92,96 @@ def test_refresh_replaces_old_block_without_changing_other_prompt_content() -> N
         f"Before.\n\n{WIKI_BLOCK_START}\n# Global Wiki\n{current}\n{WIKI_BLOCK_END}\n\nAfter."
     )
     assert "stale index" not in refreshed
+
+
+def test_refresh_migrates_previous_unmarked_task9_block() -> None:
+    legacy = (
+        "# Global Wiki\n\n"
+        "The global Wiki is shared across all workspaces.\n"
+        "Use Wiki search/read for durable knowledge.\n"
+        "Propose only durable, sourced conclusions for writing.\n\n"
+        "# Wiki Index\n\n"
+        "## Concepts\n\n"
+        "- [[concepts/stale]] — stale"
+    )
+    old = f"Before.\n\n{legacy}\n\n# Skills\n\nAfter."
+    current = build_wiki_context(CHINESE_INDEX)
+
+    refreshed = refresh_wiki_prompt_block(old, current)
+
+    assert "concepts/stale" not in refreshed
+    assert refreshed.count(WIKI_BLOCK_START) == 1
+    assert refreshed.count("# Global Wiki") == 1
+    assert refreshed == (
+        f"Before.\n\n{WIKI_BLOCK_START}\n# Global Wiki\n{current}\n"
+        f"{WIKI_BLOCK_END}\n\n# Skills\n\nAfter."
+    )
+
+
+def test_refresh_collapses_mixed_legacy_and_marked_blocks() -> None:
+    legacy = (
+        "# Global Wiki\n\n"
+        "The global Wiki is shared across all workspaces.\n"
+        "Use Wiki search/read for durable knowledge.\n"
+        "Propose only durable, sourced conclusions for writing.\n\n"
+        "# Wiki Index\n\n- [[concepts/legacy]] — stale"
+    )
+    marked = f"{WIKI_BLOCK_START}\n# Global Wiki\nold\n{WIKI_BLOCK_END}"
+    prompt = f"Before.\n\n{legacy}\n\nMiddle.\n\n{marked}\n\nAfter."
+
+    refreshed = refresh_wiki_prompt_block(prompt, build_wiki_context(CHINESE_INDEX))
+
+    assert refreshed.count(WIKI_BLOCK_START) == 1
+    assert refreshed.count("# Global Wiki") == 1
+    assert "concepts/legacy" not in refreshed
+    assert "Middle." in refreshed and "After." in refreshed
+
+
+def test_refresh_migrates_repeated_legacy_blocks_without_deleting_adjacent_custom_content() -> None:
+    legacy = (
+        "# Global Wiki\n\n"
+        "The global Wiki is shared across all workspaces.\n"
+        "Use Wiki search/read for durable knowledge.\n"
+        "Propose only durable, sourced conclusions for writing.\n\n"
+        "# Wiki Index\n\n- [[concepts/legacy]] — stale"
+    )
+    custom = "## Custom Policy\n\nKeep this exact adjacent content."
+    prompt = f"Before.\n\n{legacy}\n\n{custom}\n\n{legacy}\n\n# Skills\n\nAfter."
+
+    refreshed = refresh_wiki_prompt_block(prompt, build_wiki_context(CHINESE_INDEX))
+
+    assert refreshed.count(WIKI_BLOCK_START) == 1
+    assert refreshed.count("# Global Wiki") == 1
+    assert custom in refreshed
+    assert "Before." in refreshed and "# Skills\n\nAfter." in refreshed
+
+
+def test_refresh_removes_stale_legacy_block_when_wiki_is_unavailable() -> None:
+    legacy = (
+        "# Global Wiki\n\n"
+        "The global Wiki is shared across all workspaces.\n"
+        "Use Wiki search/read for durable knowledge.\n"
+        "Propose only durable, sourced conclusions for writing.\n\n"
+        "# Wiki Index\n\n- [[concepts/legacy]] — stale"
+    )
+    prompt = f"Before.\n\n{legacy}\n\n# Skills\n\nAfter."
+
+    refreshed = refresh_wiki_prompt_block(prompt, "")
+
+    assert refreshed == "Before.\n\n\n\n# Skills\n\nAfter."
+    assert "# Global Wiki" not in refreshed
+
+
+def test_refresh_true_preupgrade_prompt_preserves_all_existing_content() -> None:
+    prompt = "Before.\n\n# Custom Policy\n\nKeep me.\n\n# Skills\n\nAfter."
+
+    refreshed = refresh_wiki_prompt_block(prompt, build_wiki_context(CHINESE_INDEX))
+    without_block = (
+        refreshed[: refreshed.index(WIKI_BLOCK_START)]
+        + refreshed[refreshed.index(WIKI_BLOCK_END) + len(WIKI_BLOCK_END) :]
+    )
+
+    assert without_block == prompt
 
 
 def test_refresh_collapses_duplicate_blocks_and_removes_stale_block_when_unavailable() -> None:
