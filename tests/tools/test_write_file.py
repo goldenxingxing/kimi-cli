@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -11,7 +12,7 @@ from kaos.path import KaosPath
 from pydantic import ValidationError
 
 from kimi_cli.soul.agent import Runtime
-from kimi_cli.soul.approval import Approval
+from kimi_cli.soul.approval import Approval, ApprovalResult
 from kimi_cli.tools.file.write import Params, WriteFile
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.types import DiffDisplayBlock
@@ -215,5 +216,59 @@ async def test_write_file_rejects_symlink_alias_of_managed_wiki(
 
         assert result.is_error
         assert "Wiki tool" in result.message
+    finally:
+        manager.close()
+
+
+async def test_write_file_rechecks_target_after_approval_symlink_swap(
+    builtin_args, tmp_path: Path
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    target = Path(str(builtin_args.KIMI_WORK_DIR)) / "target.txt"
+    target.write_text("safe", encoding="utf-8")
+
+    class SwapApproval:
+        async def request(self, *_args, **_kwargs):
+            replacement = target.with_name("replacement-link.txt")
+            replacement.symlink_to(manager.layout.index)
+            os.replace(replacement, target)
+            return ApprovalResult(approved=True)
+
+    try:
+        runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+        tool = WriteFile(cast("Runtime", runtime), cast("Approval", SwapApproval()))
+
+        result = await tool(Params(path=str(target), content="must not reach Wiki"))
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+        assert "must not reach Wiki" not in manager.layout.index.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+async def test_write_file_rechecks_target_after_approval_hardlink_swap(
+    builtin_args, tmp_path: Path
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    target = Path(str(builtin_args.KIMI_WORK_DIR)) / "target.txt"
+    target.write_text("safe", encoding="utf-8")
+
+    class SwapApproval:
+        async def request(self, *_args, **_kwargs):
+            replacement = target.with_name("replacement-hardlink.txt")
+            os.link(manager.layout.index, replacement)
+            os.replace(replacement, target)
+            return ApprovalResult(approved=True)
+
+    try:
+        runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+        tool = WriteFile(cast("Runtime", runtime), cast("Approval", SwapApproval()))
+
+        result = await tool(Params(path=str(target), content="must not reach Wiki"))
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+        assert "must not reach Wiki" not in manager.layout.index.read_text(encoding="utf-8")
     finally:
         manager.close()

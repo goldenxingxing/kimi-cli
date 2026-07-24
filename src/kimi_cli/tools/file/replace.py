@@ -10,7 +10,11 @@ from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.display import DisplayBlock
 from kimi_cli.tools.file import FileActions
-from kimi_cli.tools.file.managed_wiki import reject_managed_wiki_target
+from kimi_cli.tools.file.managed_wiki import (
+    ManagedWikiMutationBlocked,
+    reject_managed_wiki_target,
+    write_verified_text,
+)
 from kimi_cli.tools.file.plan_mode import inspect_plan_edit_target
 from kimi_cli.tools.utils import load_desc
 from kimi_cli.utils.diff import build_diff_blocks
@@ -171,8 +175,9 @@ class StrReplaceFile(CallableTool2[Params]):
                 if not result:
                     return result.rejection_error()
 
-            # Write the modified content back to the file
-            await p.write_text(content, errors="replace")
+            # Final mutation revalidates the post-approval target through a
+            # no-follow file descriptor; the earlier path check is not enough.
+            await write_verified_text(p, self._runtime, content)
 
             # Count changes for success message
             total_replacements = 0
@@ -192,6 +197,11 @@ class StrReplaceFile(CallableTool2[Params]):
                 display=diff_blocks,
             )
 
+        except ManagedWikiMutationBlocked:
+            return ToolError(
+                message="Managed Wiki files can only be changed through the Wiki tool.",
+                brief="Use Wiki tool",
+            )
         except Exception as e:
             logger.warning("StrReplaceFile failed: {path}: {error}", path=params.path, error=e)
             return ToolError(
