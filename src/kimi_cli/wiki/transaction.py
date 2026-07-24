@@ -33,6 +33,17 @@ class WikiConflictError(RuntimeError):
 class WikiRecoveryRequired(RuntimeError):
     """Raised when journal damage requires operator review before another write."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        action: str = "Repair or remove the quarantined journal before retrying.",
+    ) -> None:
+        self.retryable = retryable
+        self.action = action
+        super().__init__(message)
+
 
 @dataclass(frozen=True, slots=True)
 class RecoveryResult:
@@ -131,6 +142,8 @@ class WikiTransaction:
         recovery: list[RecoveryResult] = []
         lock = _wiki_lock(layout, recovery)
         with lock.shared(_LOCK_TIMEOUT_SECONDS):
+            if recovery and recovery[0].post_commit_cleanup_pending:
+                raise _cleanup_pending_error()
             if recovery and recovery[0].writes_quarantined:
                 # Reads stay available, but do not prepare a write that can never
                 # safely commit without explicit operator repair.
@@ -156,6 +169,8 @@ class WikiTransaction:
         lock = WikiLock(_lock_path(self.layout))
         with lock.exclusive(_LOCK_TIMEOUT_SECONDS):
             recovery = _recover_transactions_locked(self.layout)
+            if recovery.post_commit_cleanup_pending:
+                raise _cleanup_pending_error()
             if recovery.writes_quarantined:
                 raise WikiRecoveryRequired("Wiki writes are quarantined pending journal repair")
             self._revalidate()
@@ -496,7 +511,7 @@ def _recover_journal(journal: _Journal, result: RecoveryResult) -> RecoveryResul
             _durable_replace(
                 target.target,
                 target.new_bytes,
-                boundary=f"recovery_{target.kind}",
+                boundary=target.kind,
             )
         committed = replace(journal, state="committed")
         _write_journal_record(committed, boundary="commit_record")
@@ -817,6 +832,14 @@ def _record_reindex_requirement(
     )
 
 
+def _cleanup_pending_error() -> WikiRecoveryRequired:
+    return WikiRecoveryRequired(
+        "Wiki committed-journal cleanup is still pending",
+        retryable=True,
+        action="Retry Wiki recovery after the cleanup I/O condition is resolved.",
+    )
+
+
 def _finalize_committed_journal(journal: _Journal) -> bool:
     """Best-effort cache invalidation and authority-journal cleanup.
 
@@ -1001,9 +1024,17 @@ def _durable_replace(
     temporary = Path(raw_path)
     try:
         with os.fdopen(descriptor, "wb") as stream:
+            if boundary is not None:
+                _hit_failpoint(f"{boundary}_temp_create")
             stream.write(data)
             stream.flush()
+            if boundary is not None:
+                _hit_failpoint(f"{boundary}_temp_write")
             os.fsync(stream.fileno())
+            if boundary is not None:
+                _hit_failpoint(f"{boundary}_temp_fsync")
+        if boundary is not None:
+            _hit_failpoint(f"{boundary}_pre_replace")
         os.replace(temporary, target)
         if boundary is not None:
             _hit_failpoint(f"{boundary}_replace")
@@ -1032,6 +1063,8 @@ def _remove_tree_durably(path: Path, *, boundary: str | None = None) -> None:
     if path.exists():
         if path.is_symlink() or not path.is_dir():
             raise ValueError("Wiki journal cleanup target must be a real directory")
+        if boundary is not None:
+            _hit_failpoint(f"{boundary}_pre_delete")
         shutil.rmtree(path)
         if boundary is not None:
             _hit_failpoint(f"{boundary}_delete")
