@@ -312,10 +312,15 @@ class SessionProcess:
                         if self._expecting_exit:
                             break
                         stderr = await self._process.stderr.read()
+                        # On Windows (ProactorEventLoop), asyncio does not
+                        # automatically set returncode when the pipe reaches EOF.
+                        # Call wait() explicitly to ensure it is populated.
+                        if self._process.returncode is None:
+                            await self._process.wait()
                         if not stderr:
                             err_msg = (
                                 "Worker process exited unexpectedly"
-                                f" (exit code {self._process.returncode or 'unknown'}). "
+                                f" (exit code {self._process.returncode}). "
                                 "Check logs for details."
                             )
                             stderr = err_msg.encode()
