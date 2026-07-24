@@ -55,12 +55,18 @@ def test_content_hash_is_sha256_prefixed_and_deterministic() -> None:
         VALID_PAGE.replace("使用", "api_key: sk-abcdefghijklmnopqrstuvwxyz0123456789"),
         VALID_PAGE.replace("使用", "记录在 /Users/person/private/research.md。"),
         VALID_PAGE.replace("使用", "记录在 /opt/openkimo/wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 /data/private/wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 /srv/private/wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 /workspace/private/wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 C:/Users/person/wiki.md。"),
         VALID_PAGE.replace("使用", r"记录在 C:\Users\person\wiki.md。"),
+        VALID_PAGE.replace("使用", r"记录在 \Windows\System32\config。"),
+        VALID_PAGE.replace("使用", r"记录在 \Users\person\private.md。"),
         VALID_PAGE.replace("使用", r"记录在 \\server\share\wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 //server/share/wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 file:///tmp/wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 file://server/share/wiki.md。"),
+        VALID_PAGE.replace("使用", r"记录在 file:\tmp\wiki.md。"),
     ],
 )
 def test_page_rejects_malformed_or_unsafe_content(text: str) -> None:
@@ -84,6 +90,8 @@ def test_page_rejects_absolute_or_sensitive_provenance() -> None:
         "参考 [文档](/docs/intro)，并",
         "请求 /api/v1/items，并",
         "参考 [公开资料](https://example.test/docs/wiki?topic=api_key)，并",
+        "术语 file: 只是标签，并",
+        "参考 https://example.test/file:/manual，并",
     ],
 )
 def test_page_allows_relative_root_relative_and_https_markdown(replacement: str) -> None:
@@ -114,11 +122,13 @@ def test_web_source_rejects_credential_bearing_url() -> None:
         ("query", "token"),
         ("query", "password"),
         ("fragment", "client_secret"),
+        ("fragment", "clientSecret"),
         ("fragment", "refresh_token"),
         ("fragment", "id%5ftoken"),
         ("fragment", "auth-token"),
         ("fragment", "user_password"),
         ("fragment", "x-goog-signature"),
+        ("fragment", "xGoogSignature"),
         ("fragment", "sig"),
     ],
 )
@@ -142,6 +152,20 @@ def test_web_source_allows_normal_query_and_fragment_names() -> None:
     )
 
     assert str(source.url) == "https://example.test/source?topic=wiki#section=overview"
+
+
+@pytest.mark.parametrize(
+    "parameter_name",
+    ["sessionTitle", "sessionization", "tokenizer", "credentialing", "apikeyword"],
+)
+def test_web_source_allows_non_secret_parameter_prefixes(parameter_name: str) -> None:
+    source = SourceRef(
+        kind="web",
+        url=f"https://example.test/source?{parameter_name}=public-value",
+        content_hash="sha256:" + "a" * 64,
+    )
+
+    assert source.url is not None
 
 
 def test_direct_page_model_rejects_unsafe_logical_path() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Literal
@@ -23,6 +24,7 @@ from kimi_cli.utils.sensitive import is_sensitive_file
 _SENSITIVE_URL_PARAMETERS = frozenset(
     {
         "apikey",
+        "accesstoken",
         "auth",
         "authorization",
         "authtoken",
@@ -83,25 +85,11 @@ def _is_sensitive_query_name(value: str) -> bool:
     normalized = _normalized_query_name(value)
     if normalized in _SENSITIVE_URL_PARAMETERS:
         return True
-    if normalized.startswith(
-        (
-            "apikey",
-            "accesstoken",
-            "authtoken",
-            "clientsecret",
-            "credential",
-            "cookie",
-            "idtoken",
-            "refreshtoken",
-            "session",
-            "token",
-            "userpassword",
-        )
-    ):
-        return True
-    return normalized.startswith(("xamz", "xgoog")) and any(
-        marker in normalized for marker in ("credential", "signature", "securitytoken")
-    )
+    camel_boundaries = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    components = tuple(part.casefold() for part in re.findall(r"[A-Za-z0-9]+", camel_boundaries))
+    if components[:2] not in {("x", "amz"), ("x", "goog")}:
+        return False
+    return "".join(components[2:]) in {"credential", "signature", "securitytoken"}
 
 
 class SourceRef(BaseModel):
