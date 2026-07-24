@@ -120,3 +120,50 @@ def test_failed_replacement_restores_previous_skill(
         )
 
     assert manager.get("custom").description == "old"
+
+
+def test_manager_recovers_orphaned_backup_on_startup(tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    writable.mkdir()
+    backup = _skill(writable, ".custom.backup", "old")
+    (backup / "SKILL.md").write_text(
+        "---\nname: custom\ndescription: old\n---\n",
+        encoding="utf-8",
+    )
+
+    manager = SkillManager(builtin, writable)
+
+    assert not backup.exists()
+    assert manager.get("custom").description == "old"
+
+
+@pytest.mark.parametrize("installer", ["markdown", "archive"])
+def test_replacement_reuses_existing_directory_casing(
+    installer: str, tmp_path: Path
+) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    writable.mkdir()
+    _skill(writable, "Demo", "old")
+    manager = SkillManager(builtin, writable)
+    content = "---\nname: demo\ndescription: new\n---\n"
+
+    if installer == "markdown":
+        manager.install_skill_md(content, replace=True)
+    else:
+        import io
+        import zipfile
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("demo/SKILL.md", content)
+        manager.install_archive(archive.getvalue(), replace=True)
+
+    assert (writable / "Demo").is_dir()
+    assert sorted(path.name for path in writable.iterdir() if not path.name.startswith(".")) == [
+        "Demo"
+    ]
+    assert manager.get("demo").description == "new"
