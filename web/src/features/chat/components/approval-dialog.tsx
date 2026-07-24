@@ -18,6 +18,37 @@ type ApprovalDialogProps = {
   canRespondToApproval: boolean;
 };
 
+type WikiApprovalDisplay = {
+  type: "wiki";
+  summary: string;
+  pages: string[];
+  workspace_id: string | null;
+  session_id: string;
+  details: string[];
+};
+
+function asWikiApprovalDisplay(
+  item: { type: string; data: unknown },
+): WikiApprovalDisplay | null {
+  if (item.type === "wiki") {
+    const value =
+      item.data && typeof item.data === "object"
+        ? { type: "wiki", ...item.data }
+        : item;
+    const candidate = value as Partial<WikiApprovalDisplay>;
+    if (
+      typeof candidate.summary === "string" &&
+      Array.isArray(candidate.pages) &&
+      candidate.pages.every((page) => typeof page === "string") &&
+      Array.isArray(candidate.details) &&
+      candidate.details.every((detail) => typeof detail === "string")
+    ) {
+      return candidate as WikiApprovalDisplay;
+    }
+  }
+  return null;
+}
+
 export function ApprovalDialog({
   messages,
   onApprovalResponse,
@@ -149,6 +180,13 @@ export function ApprovalDialog({
   if (!pendingApproval) return null;
 
   const { approval, toolCall } = pendingApproval;
+  const wikiApproval =
+    toolCall.display
+      ?.map(asWikiApprovalDisplay)
+      .find((item): item is WikiApprovalDisplay => item !== null) ?? null;
+  const otherDisplay = toolCall.display?.filter(
+    (item) => item.type !== "wiki",
+  );
 
   const sourceLabel = (() => {
     if (approval.sourceDescription) return approval.sourceDescription;
@@ -187,7 +225,9 @@ export function ApprovalDialog({
           <div className="flex items-center gap-2">
             <div className="size-2 rounded-full bg-blue-400 animate-pulse flex-shrink-0" />
             <div className="font-semibold text-sm text-foreground">
-              {t("chat:approval.allowAction", { action: approval.action })}
+              {wikiApproval
+                ? t("chat:wikiApproval.title")
+                : t("chat:approval.allowAction", { action: approval.action })}
             </div>
             {approval.sender && (
               <span className="text-xs text-muted-foreground">
@@ -211,9 +251,37 @@ export function ApprovalDialog({
           )}
 
           {/* Display blocks (if any) */}
-          {toolCall.display && toolCall.display.length > 0 && (
+          {wikiApproval && (
+            <details className="rounded-md bg-muted/30 px-3 py-2 text-xs">
+              <summary className="cursor-pointer text-muted-foreground">
+                {t("chat:wikiApproval.details")}
+              </summary>
+              <div className="mt-2 max-h-40 space-y-2 overflow-auto text-foreground/80">
+                <div>
+                  <div className="font-medium">
+                    {t("chat:wikiApproval.paths")}
+                  </div>
+                  <ul className="mt-1 list-disc pl-4 font-mono">
+                    {wikiApproval.pages.map((page) => (
+                      <li key={page}>{page}</li>
+                    ))}
+                  </ul>
+                </div>
+                {wikiApproval.details.length > 0 && (
+                  <ul className="list-disc space-y-1 pl-4">
+                    {wikiApproval.details.map((detail) => (
+                      <li key={detail}>{detail}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </details>
+          )}
+
+          {/* Non-Wiki display blocks retain their existing presentation. */}
+          {otherDisplay && otherDisplay.length > 0 && (
             <div className="rounded-md bg-muted/30 px-3 py-2 text-sm max-h-40 overflow-auto">
-              {toolCall.display.map((item) => {
+              {otherDisplay.map((item) => {
                 const displayKeyBase =
                   typeof item.data === "string" ||
                   typeof item.data === "number" ||
@@ -250,7 +318,9 @@ export function ApprovalDialog({
             >
               {approvalPending
                 ? t("chat:approval.approving")
-                : t("chat:approval.approve")}
+                : wikiApproval
+                  ? t("chat:wikiApproval.approveOnce")
+                  : t("chat:approval.approve")}
               {!approvalPending && <Kbd className="ml-1.5">1</Kbd>}
             </Button>
             <Button
@@ -262,7 +332,9 @@ export function ApprovalDialog({
             >
               {approvalPending
                 ? t("chat:approval.approving")
-                : t("chat:approval.approveForSession")}
+                : wikiApproval
+                  ? t("chat:wikiApproval.approveForSession")
+                  : t("chat:approval.approveForSession")}
               {!approvalPending && <Kbd className="ml-1.5">2</Kbd>}
             </Button>
             <Button
@@ -277,7 +349,9 @@ export function ApprovalDialog({
             >
               {approvalPending
                 ? t("chat:approval.declining")
-                : t("chat:approval.decline")}
+                : wikiApproval
+                  ? t("chat:wikiApproval.decline")
+                  : t("chat:approval.decline")}
               {!approvalPending && <Kbd className="ml-1.5">3</Kbd>}
             </Button>
             <Button

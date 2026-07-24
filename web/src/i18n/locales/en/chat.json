@@ -29,6 +29,14 @@
     "confirming": "Confirming…",
     "approvingSession": "Approving session…"
   },
+  "wikiApproval": {
+    "title": "Write to global Wiki",
+    "details": "Details",
+    "paths": "Pages",
+    "approveOnce": "Allow once",
+    "approveForSession": "Always allow this session",
+    "decline": "Decline"
+  },
   "activity": {
     "uploadingFiles": "Uploading files...",
     "errorFallback": "An error occurred",

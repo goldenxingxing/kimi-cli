@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from dataclasses import dataclass
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, replace
 from typing import Literal, cast, override
 from uuid import UUID
 
@@ -10,10 +11,12 @@ from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolRetu
 from pydantic import BaseModel, Field
 
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.tools.display import WikiApprovalBlock
 from kimi_cli.utils.logging import logger
 from kimi_cli.wiki.locking import WikiBusyError
 from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
 from kimi_cli.wiki.models import CurrentSource, WikiCandidate
+from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
 from kimi_cli.wiki.value_gate import DiscardedCandidate, WikiContext
 
@@ -61,12 +64,72 @@ class WikiToolContext:
     reliable_source: bool
 
 
-class Wiki(CallableTool2[Params]):
-    """Search and read global knowledge; prepare but never directly write changes.
+_current_wiki_turn_context = ContextVar[WikiToolContext | None](
+    "current_wiki_turn_context",
+    default=None,
+)
 
-    Task 10 adds the approval-and-commit boundary. Keeping this task preparation
-    only makes a tool call unable to bypass that future permission boundary.
+
+def set_wiki_turn_context(
+    runtime: Runtime,
+    user_text: str,
+    *,
+    trusted_user_input: bool,
+) -> Token[WikiToolContext | None]:
+    """Install ephemeral write evidence for one real user turn.
+
+    Synthetic/internal prompts keep the fail-closed base context. Only hashes
+    of current-turn text are retained; raw conversation content is never added
+    to runtime state or Wiki metadata.
     """
+    base = getattr(runtime, "wiki_tool_context", None)
+    if not trusted_user_input or not isinstance(base, WikiToolContext):
+        return _current_wiki_turn_context.set(None)
+    normalized = user_text.strip()
+    hashes = set(base.conversation_hashes)
+    if user_text:
+        hashes.add(content_hash(user_text.encode("utf-8")))
+    if normalized:
+        hashes.add(content_hash(normalized.encode("utf-8")))
+    return _current_wiki_turn_context.set(
+        WikiToolContext(
+            provenance_session_id=base.provenance_session_id,
+            conversation_hashes=frozenset(hashes),
+            allowed_workspace_ids=base.allowed_workspace_ids,
+            candidate_high_value=True,
+            stable=True,
+            user_confirmed=bool(normalized),
+            reliable_source=base.reliable_source,
+        )
+    )
+
+
+def reset_wiki_turn_context(token: Token[WikiToolContext | None]) -> None:
+    _current_wiki_turn_context.reset(token)
+
+
+def extend_wiki_turn_context(user_text: str) -> None:
+    """Add trusted steer text hashes to an already active real user turn."""
+    active = _current_wiki_turn_context.get()
+    if active is None:
+        return
+    hashes = set(active.conversation_hashes)
+    normalized = user_text.strip()
+    if user_text:
+        hashes.add(content_hash(user_text.encode("utf-8")))
+    if normalized:
+        hashes.add(content_hash(normalized.encode("utf-8")))
+    _current_wiki_turn_context.set(
+        replace(
+            active,
+            conversation_hashes=frozenset(hashes),
+            user_confirmed=active.user_confirmed or bool(normalized),
+        )
+    )
+
+
+class Wiki(CallableTool2[Params]):
+    """Search/read global knowledge and gate every managed write."""
 
     name = "Wiki"
     description = (
@@ -77,8 +140,31 @@ class Wiki(CallableTool2[Params]):
     params = Params
 
     def __init__(self, runtime: Runtime) -> None:
-        super().__init__()
+        trusted = getattr(runtime, "wiki_tool_context", None)
+        provenance_help = ""
+        if isinstance(trusted, WikiToolContext):
+            provenance_help = (
+                " For conversation SourceRef provenance, use session_id "
+                f"{trusted.provenance_session_id} and the SHA-256 hash of the exact "
+                "trusted current-turn text."
+            )
+            if runtime.workspace_id is not None:
+                provenance_help += f" The current portable workspace_id is {runtime.workspace_id}."
+        super().__init__(description=self.description + provenance_help)
         self._runtime = runtime
+
+    @staticmethod
+    def current_context(runtime: Runtime) -> WikiToolContext | None:
+        base = getattr(runtime, "wiki_tool_context", None)
+        active = _current_wiki_turn_context.get()
+        if not isinstance(base, WikiToolContext):
+            return None
+        if (
+            isinstance(active, WikiToolContext)
+            and active.provenance_session_id == base.provenance_session_id
+        ):
+            return active
+        return base
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
@@ -95,7 +181,7 @@ class Wiki(CallableTool2[Params]):
                 return await self._read(manager, params)
             if params.operation == "lint":
                 return await self._lint(manager, params)
-            return await self._prepare(manager, params)
+            return await self._write(manager, params)
         except (OSError, ValueError, UnicodeError) as exc:
             logger.warning("Wiki operation failed: {error}", error=exc)
             return ToolError(
@@ -176,7 +262,7 @@ class Wiki(CallableTool2[Params]):
             brief=f"Wiki lint: {len(report.issues)} issue(s)",
         )
 
-    async def _prepare(self, manager: WikiManager, params: Params) -> ToolReturnValue:
+    async def _write(self, manager: WikiManager, params: Params) -> ToolReturnValue:
         if params.candidate is None:
             return ToolError(
                 message=f"Wiki {params.operation} requires a structured candidate.",
@@ -211,13 +297,38 @@ class Wiki(CallableTool2[Params]):
                 message=f"Wiki candidate discarded: {prepared.reason}.",
                 brief="Wiki candidate discarded",
             )
+        approval = self._runtime.approval
+        if not approval.is_yolo():
+            trusted = self.current_context(self._runtime)
+            assert trusted is not None
+            result = await approval.request(
+                self.name,
+                "wiki.write",
+                f"Record: {prepared.summary}\nChanges: {len(prepared.pages)} pages",
+                display=[
+                    WikiApprovalBlock.from_prepared(
+                        prepared,
+                        workspace_id=(
+                            str(self._runtime.workspace_id)
+                            if self._runtime.workspace_id is not None
+                            else None
+                        ),
+                        session_id=str(trusted.provenance_session_id),
+                    )
+                ],
+            )
+            if not result:
+                return result.rejection_error()
+        committed = await asyncio.to_thread(manager.commit, prepared)
         return _ok(
             {
-                "status": "prepared",
+                "status": "committed",
                 "summary": prepared.summary,
-                "pages": list(prepared.pages),
+                "pages": list(committed.pages),
+                "global_revision": committed.global_revision,
+                "search_index_current": committed.search_index_current,
             },
-            brief=f"Wiki proposal prepared: {len(prepared.pages)} page(s)",
+            brief=f"Wiki updated: {len(committed.pages)} page(s)",
         )
 
     def _context(
@@ -226,7 +337,7 @@ class Wiki(CallableTool2[Params]):
         candidate: WikiCandidate,
         source: CurrentSource | None,
     ) -> WikiContext | ToolError:
-        trusted = getattr(self._runtime, "wiki_tool_context", None)
+        trusted = self.current_context(self._runtime)
         if not isinstance(trusted, WikiToolContext):
             return ToolError(
                 message=(
