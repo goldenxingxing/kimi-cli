@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 from kaos.path import KaosPath
 
+from kimi_cli.soul.agent import Runtime
+from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.file.replace import Edit, Params, StrReplaceFile
+from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.types import DiffDisplayBlock
 
 
@@ -246,3 +251,25 @@ async def test_replace_empty_strings(
     assert not result.is_error
     assert "successfully edited" in result.message
     assert await file_path.read_text() == "Hello !"
+
+
+async def test_replace_file_cannot_mutate_managed_wiki(builtin_args, tmp_path: Path) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    manager.layout.index.write_text("# Wiki Index\n", encoding="utf-8")
+    try:
+        runtime = SimpleNamespace(
+            builtin_args=builtin_args,
+            additional_dirs=[],
+            wiki=manager,
+        )
+        tool = StrReplaceFile(cast("Runtime", runtime), Approval(yolo=True))
+
+        result = await tool(
+            Params(path=str(manager.layout.index), edit=Edit(old="Wiki", new="Mutated"))
+        )
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+        assert "Mutated" not in manager.layout.index.read_text(encoding="utf-8")
+    finally:
+        manager.close()

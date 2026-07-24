@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from kaos.path import KaosPath
 from pydantic import ValidationError
 
+from kimi_cli.soul.agent import Runtime
+from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.file.write import Params, WriteFile
+from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.types import DiffDisplayBlock
 
 
@@ -171,3 +176,44 @@ async def test_write_large_content(write_file_tool: WriteFile, temp_work_dir: Ka
     assert not result.is_error
     assert await file_path.exists()
     assert await file_path.read_text() == content
+
+
+async def test_write_file_cannot_mutate_managed_wiki(builtin_args, tmp_path: Path) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    try:
+        runtime = SimpleNamespace(
+            builtin_args=builtin_args,
+            additional_dirs=[],
+            wiki=manager,
+        )
+        tool = WriteFile(cast("Runtime", runtime), Approval(yolo=True))
+
+        result = await tool(Params(path=str(manager.layout.index), content="x"))
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+        assert manager.layout.index.read_text(encoding="utf-8") != "x"
+    finally:
+        manager.close()
+
+
+async def test_write_file_rejects_symlink_alias_of_managed_wiki(
+    builtin_args, tmp_path: Path
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    alias = tmp_path / "wiki-alias"
+    alias.symlink_to(manager.layout.root, target_is_directory=True)
+    try:
+        runtime = SimpleNamespace(
+            builtin_args=builtin_args,
+            additional_dirs=[],
+            wiki=manager,
+        )
+        tool = WriteFile(cast("Runtime", runtime), Approval(yolo=True))
+
+        result = await tool(Params(path=str(alias / "index.md"), content="x"))
+
+        assert result.is_error
+        assert "Wiki tool" in result.message
+    finally:
+        manager.close()
