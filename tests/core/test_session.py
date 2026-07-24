@@ -81,6 +81,36 @@ async def test_create_sets_fallback_title(isolated_share_dir: Path, work_dir: Ka
     assert session.context_file.exists()
 
 
+async def test_new_session_uses_work_directory_layout(
+    isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    session = await Session.create(work_dir)
+    local_work_dir = Path(str(work_dir))
+
+    assert session.dir.parent == local_work_dir / "session-data"
+    assert (local_work_dir / "session-data").is_dir()
+    assert (local_work_dir / "output").is_dir()
+    assert not (local_work_dir / "skill").exists()
+    assert not (local_work_dir / "skills").exists()
+
+
+async def test_existing_metadata_keeps_legacy_sessions_readable(
+    isolated_share_dir: Path, work_dir: KaosPath
+) -> None:
+    from kimi_cli.metadata import Metadata, WorkDirMeta, save_metadata
+
+    legacy_meta = WorkDirMeta(path=str(work_dir))
+    save_metadata(Metadata(work_dirs=[legacy_meta]))
+    legacy_session_dir = legacy_meta.legacy_sessions_dir / "old-session"
+    _write_context_message(legacy_session_dir / "context.jsonl", "legacy message")
+
+    session = await Session.find(work_dir, "old-session")
+
+    assert session is not None
+    assert session.dir == legacy_session_dir
+    assert session.dir.parent.is_relative_to(isolated_share_dir)
+
+
 async def test_find_uses_wire_title(isolated_share_dir: Path, work_dir: KaosPath):
     session = await Session.create(work_dir)
     _write_wire_turn(session.dir, "hello world from wire file")

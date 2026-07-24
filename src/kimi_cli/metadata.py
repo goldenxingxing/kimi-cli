@@ -33,11 +33,34 @@ class WorkDirMeta(BaseModel):
     @property
     def sessions_dir(self) -> Path:
         """The directory to store sessions for this work directory."""
+        if self.kaos == local_kaos.name:
+            session_dir = Path(self.path) / "session-data"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            return session_dir
+        return self.legacy_sessions_dir
+
+    @property
+    def output_dir(self) -> Path:
+        """The output directory for local sessions in this work directory."""
+        output_dir = Path(self.path) / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+
+    @property
+    def legacy_sessions_dir(self) -> Path:
+        """The pre-OpenKimo-0.2 session location, retained for reads."""
         path_md5 = md5(self.path.encode(encoding="utf-8")).hexdigest()
         dir_basename = path_md5 if self.kaos == local_kaos.name else f"{self.kaos}_{path_md5}"
         session_dir = get_share_dir() / "sessions" / dir_basename
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
+
+    @property
+    def readable_sessions_dirs(self) -> tuple[Path, ...]:
+        """Session roots in write-first lookup order."""
+        current = self.sessions_dir
+        legacy = self.legacy_sessions_dir
+        return (current,) if current == legacy else (current, legacy)
 
 
 class Metadata(BaseModel):

@@ -114,17 +114,19 @@ def _iter_session_dirs(wd: WorkDirMeta) -> list[tuple[Path, Path]]:
     session_dirs: list[tuple[Path, Path]] = []
 
     # Latest sessions
-    for context_file in wd.sessions_dir.glob("*/context.jsonl"):
-        session_dir = context_file.parent
-        session_dirs.append((session_dir, context_file))
+    for sessions_root in wd.readable_sessions_dirs:
+        for context_file in sessions_root.glob("*/context.jsonl"):
+            session_dir = context_file.parent
+            session_dirs.append((session_dir, context_file))
 
     # Legacy sessions
-    for context_file in wd.sessions_dir.glob("*.jsonl"):
-        session_dir = context_file.parent / context_file.stem
-        converted_context_file = session_dir / "context.jsonl"
-        if converted_context_file.exists():
-            continue
-        session_dirs.append((session_dir, context_file))
+    for sessions_root in wd.readable_sessions_dirs:
+        for context_file in sessions_root.glob("*.jsonl"):
+            session_dir = context_file.parent / context_file.stem
+            converted_context_file = session_dir / "context.jsonl"
+            if converted_context_file.exists():
+                continue
+            session_dirs.append((session_dir, context_file))
 
     return session_dirs
 
@@ -162,6 +164,7 @@ def _build_kimi_session(entry: SessionIndexEntry) -> KimiCLISession:
         state=entry.state,
         title=entry.title,
         updated_at=entry.last_updated.timestamp(),
+        storage_dir=entry.session_dir,
     )
 
 
