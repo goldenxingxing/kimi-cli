@@ -65,6 +65,7 @@ class SkillManager:
         self.builtin_dir = (builtin_dir or get_builtin_skills_dir()).resolve()
         self.writable_dir = (writable_dir or get_managed_skill_dir()).resolve()
         self.state_file = self.writable_dir.parent / "skill-state.json"
+        self._recover_backups()
 
     @contextmanager
     def _mutation_lock(self, name: str):
@@ -115,6 +116,25 @@ class SkillManager:
         else:
             if backup.exists():
                 shutil.rmtree(backup)
+
+    def _recover_backups(self) -> None:
+        """Restore or remove leftovers from an interrupted directory swap."""
+        if not self.writable_dir.is_dir():
+            return
+        for backup in self.writable_dir.glob(".*.backup"):
+            if not backup.is_dir():
+                continue
+            destination_name = backup.name[1:-len(".backup")]
+            try:
+                key = normalize_managed_skill_name(destination_name)
+            except ValueError:
+                continue
+            with self._mutation_lock(key):
+                destination = self.writable_dir / destination_name
+                if destination.exists():
+                    shutil.rmtree(backup)
+                else:
+                    os.replace(backup, destination)
 
     def _load_state(self) -> SkillState:
         if not self.state_file.is_file():
@@ -349,13 +369,17 @@ class SkillManager:
             prepared = extract_skill_archive(data, temp)
             key = normalize_managed_skill_name(prepared.name)
             with self._mutation_lock(key):
+                writable = self._directories(self.writable_dir)
                 existing = {
                     **self._directories(self.builtin_dir),
-                    **self._directories(self.writable_dir),
+                    **writable,
                 }
                 if key in existing and not replace:
                     raise FileExistsError(prepared.name)
-                destination = self.writable_dir / prepared.name
+                existing_path = existing.get(key)
+                destination = writable.get(key) or self.writable_dir / (
+                    existing_path.name if existing_path else prepared.name
+                )
                 staged = temp / ".staged"
                 shutil.copytree(prepared.directory, staged)
                 self._replace_directory(staged, destination)
@@ -371,13 +395,20 @@ class SkillManager:
             raise ValueError("A standalone SKILL.md must declare a name")
         name = raw_name.strip()
         key = normalize_managed_skill_name(name)
-        existing = {**self._directories(self.builtin_dir), **self._directories(self.writable_dir)}
-        if key in existing and not replace:
-            raise FileExistsError(name)
         with self._mutation_lock(key):
             self.writable_dir.mkdir(parents=True, exist_ok=True)
+            writable = self._directories(self.writable_dir)
+            existing = {
+                **self._directories(self.builtin_dir),
+                **writable,
+            }
+            if key in existing and not replace:
+                raise FileExistsError(name)
+            existing_path = existing.get(key)
+            destination = writable.get(key) or self.writable_dir / (
+                existing_path.name if existing_path else name
+            )
             temp = Path(tempfile.mkdtemp(prefix=".skill-markdown-", dir=self.writable_dir))
-            destination = self.writable_dir / name
             try:
                 staged = temp / name
                 staged.mkdir()
