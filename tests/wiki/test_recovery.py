@@ -623,3 +623,293 @@ def test_reindex_ack_does_not_clear_a_newer_revision_marker(tmp_path: Path) -> N
     assert acknowledgement.acknowledged is False
     assert acknowledgement.required_revision == 2
     assert recover_transactions(transaction.layout).required_reindex_revision == 2
+
+
+def test_pending_post_commit_cleanup_blocks_writes_but_not_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transaction, target = _prepare_update(tmp_path / "wiki")
+
+    def fail_cleanup(name: str) -> None:
+        if name == "journal_cleanup_pre_delete":
+            raise OSError("cleanup temporarily unavailable")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", fail_cleanup)
+    assert transaction.commit() == 1
+    with wiki_read_lock(transaction.layout) as read_result:
+        assert target.read_text(encoding="utf-8").endswith("After.\n")
+    assert read_result.post_commit_cleanup_pending == 1
+    assert read_result.writes_quarantined is False
+
+    with pytest.raises(WikiRecoveryRequired, match="cleanup") as error:
+        WikiTransaction.prepare(
+            layout=transaction.layout,
+            changes=[
+                PageChange(
+                    page=_page("concepts/second.md", revision=1, body="Second.\n"),
+                    expected_revision=None,
+                )
+            ],
+            expected_global_revision=1,
+            index_bytes=b"# Wiki Index\n\nSecond.\n",
+            log_bytes=b"# Wiki Log\n\n## [2026-07-24] remember | second\n",
+        )
+    assert error.value.retryable is True
+    assert "recover" in error.value.action.casefold()
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", lambda _name: None)
+    recovered = recover_transactions(transaction.layout)
+    assert recovered.post_commit_cleanup_pending == 0
+    assert recovered.writes_quarantined is False
+    second = WikiTransaction.prepare(
+        layout=transaction.layout,
+        changes=[
+            PageChange(
+                page=_page("concepts/second.md", revision=1, body="Second.\n"),
+                expected_revision=None,
+            )
+        ],
+        expected_global_revision=1,
+        index_bytes=b"# Wiki Index\n\nSecond.\n",
+        log_bytes=b"# Wiki Log\n\n## [2026-07-24] remember | second\n",
+    )
+    assert second.commit() == 2
+    assert recover_transactions(transaction.layout).writes_quarantined is False
+
+
+def test_commit_rejects_pending_cleanup_before_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transaction, target = _prepare_update(tmp_path / "wiki")
+    before = _snapshot(transaction, target)
+    pending = transaction_module.RecoveryResult(post_commit_cleanup_pending=1)
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_transactions_locked",
+        lambda _layout: pending,
+    )
+
+    with pytest.raises(WikiRecoveryRequired, match="cleanup") as error:
+        transaction.commit()
+
+    assert error.value.retryable is True
+    assert _snapshot(transaction, target) == before
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        f"{boundary}_{stage}"
+        for boundary in ("page", "index", "log", "revision")
+        for stage in (
+            "temp_create",
+            "temp_write",
+            "temp_fsync",
+            "pre_replace",
+            "replace",
+            "directory_fsync",
+        )
+    ],
+)
+def test_each_target_replace_failpoint_recovers_complete_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failpoint: str,
+) -> None:
+    transaction, target = _prepare_update(tmp_path / failpoint)
+    before = _snapshot(transaction, target)
+
+    def inject(name: str) -> None:
+        if name == failpoint:
+            raise OSError(f"injected {name}")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", inject)
+    with pytest.raises(OSError, match="injected"):
+        transaction.commit()
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", lambda _name: None)
+
+    result = recover_transactions(transaction.layout)
+    assert result.writes_quarantined is False
+    if failpoint in {
+        "page_temp_create",
+        "page_temp_write",
+        "page_temp_fsync",
+        "page_pre_replace",
+    }:
+        assert _snapshot(transaction, target) == before
+        return
+    assert target.read_text(encoding="utf-8").endswith("After.\n")
+    assert transaction.layout.index.read_bytes().endswith(b"[[concepts/atomic-writes]]\n")
+    assert transaction.layout.log.read_bytes().endswith(b"remember | atomic writes\n")
+    assert transaction.layout.revision.read_bytes() == b"1\n"
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        f"{boundary}_{stage}"
+        for boundary in ("prepared_record", "commit_record")
+        for stage in (
+            "temp_create",
+            "temp_write",
+            "temp_fsync",
+            "pre_replace",
+            "replace",
+            "directory_fsync",
+        )
+    ],
+)
+def test_each_record_replace_failpoint_has_deterministic_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failpoint: str,
+) -> None:
+    transaction, target = _prepare_update(tmp_path / failpoint)
+    before = _snapshot(transaction, target)
+
+    def inject(name: str) -> None:
+        if name == failpoint:
+            raise OSError(f"injected {name}")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", inject)
+    with pytest.raises(OSError, match="injected"):
+        transaction.commit()
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", lambda _name: None)
+
+    result = recover_transactions(transaction.layout)
+    assert result.writes_quarantined is False
+    snapshot = _snapshot(transaction, target)
+    if failpoint.startswith("prepared_record"):
+        assert snapshot == before
+    else:
+        assert snapshot[0].decode().endswith("After.\n")
+        assert snapshot[3] == b"1\n"
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        "reindex_marker_temp_create",
+        "reindex_marker_temp_write",
+        "reindex_marker_temp_fsync",
+        "reindex_marker_pre_replace",
+        "reindex_marker_replace",
+        "reindex_marker_directory_fsync",
+        "journal_cleanup_pre_delete",
+        "journal_cleanup_delete",
+        "journal_cleanup_directory_fsync",
+    ],
+)
+def test_each_post_commit_cleanup_failpoint_remains_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failpoint: str,
+) -> None:
+    transaction, target = _prepare_update(tmp_path / failpoint)
+
+    def inject(name: str) -> None:
+        if name == failpoint:
+            raise OSError(f"injected {name}")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", inject)
+    assert transaction.commit() == 1
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", lambda _name: None)
+
+    result = recover_transactions(transaction.layout)
+    assert result.writes_quarantined is False
+    assert result.required_reindex_revision == 1
+    assert target.read_text(encoding="utf-8").endswith("After.\n")
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        "rollback_temp_create",
+        "rollback_temp_write",
+        "rollback_temp_fsync",
+        "rollback_pre_replace",
+        "rollback_replace",
+        "rollback_directory_fsync",
+    ],
+)
+def test_each_rollback_replace_failpoint_can_be_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failpoint: str,
+) -> None:
+    transaction, target = _prepare_update(tmp_path / failpoint)
+    before = _snapshot(transaction, target)
+
+    def stop_after_page(name: str) -> None:
+        if name == "page_replace":
+            raise OSError("initial interruption")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", stop_after_page)
+    with pytest.raises(OSError):
+        transaction.commit()
+    journal = next(transaction.layout.metadata.joinpath("journal").glob("*"))
+    (journal / "new" / "0001").unlink()
+
+    def inject(name: str) -> None:
+        if name == failpoint:
+            raise OSError(f"injected {name}")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", inject)
+    with pytest.raises(OSError, match="injected"):
+        recover_transactions(transaction.layout)
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", lambda _name: None)
+
+    result = recover_transactions(transaction.layout)
+    assert result.writes_quarantined is False
+    assert _snapshot(transaction, target) == before
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    ["rollback_remove", "rollback_directory_fsync"],
+)
+def test_each_rollback_remove_failpoint_can_be_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failpoint: str,
+) -> None:
+    layout = ensure_wiki(tmp_path / failpoint)
+    target = layout.root / "concepts" / "new.md"
+    transaction = WikiTransaction.prepare(
+        layout=layout,
+        changes=[
+            PageChange(
+                page=_page("concepts/new.md", revision=1, body="New.\n"),
+                expected_revision=None,
+            )
+        ],
+        expected_global_revision=0,
+        index_bytes=b"# Wiki Index\n\nNew.\n",
+        log_bytes=b"# Wiki Log\n\n## [2026-07-24] remember | new\n",
+    )
+
+    def stop_after_page(name: str) -> None:
+        if name == "page_replace":
+            raise OSError("initial interruption")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", stop_after_page)
+    with pytest.raises(OSError):
+        transaction.commit()
+    journal = next(layout.metadata.joinpath("journal").glob("*"))
+    (journal / "new" / "0001").unlink()
+
+    def inject(name: str) -> None:
+        if name == failpoint:
+            raise OSError(f"injected {name}")
+
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", inject)
+    with pytest.raises(OSError, match="injected"):
+        recover_transactions(layout)
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", lambda _name: None)
+
+    result = recover_transactions(layout)
+    assert result.writes_quarantined is False
+    assert not target.exists()
+    assert layout.revision.read_bytes() == b"0\n"
