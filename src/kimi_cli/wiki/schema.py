@@ -21,10 +21,13 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})\b"),
 )
 _MACHINE_ABSOLUTE_PATH_PATTERNS = (
-    # The negative lookbehind keeps `https://host/path` and `and/or` prose intact.
-    re.compile(r"(?<![\w:/])/(?=\S)[^\s\])}>]+"),
+    re.compile(r"(?i)(?<![\w-])file:(?://)?[^\s\])}>]*"),
+    re.compile(
+        r"(?<![\w:/])/(?:Applications|Library|System|Users|Volumes|bin|dev|etc|home|mnt|opt|private|proc|root|run|sbin|tmp|usr|var)(?:/|(?=\s|[\])}>.,;!?]|$))"
+    ),
     re.compile(r"(?<!\w)[A-Za-z]:[\\/]+[^\s\])}>]*"),
     re.compile(r"(?<![\\/:])\\\\+[^\s\])}>]+"),
+    re.compile(r"(?<![/:])//[^\s\])}>]+"),
 )
 _FRONTMATTER_FIELDS = frozenset({"title", "created", "updated", "tags", "sources", "revision"})
 
