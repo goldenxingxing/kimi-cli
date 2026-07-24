@@ -6,10 +6,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pydantic
 from jinja2 import Environment as JinjaEnvironment
 from jinja2 import FileSystemLoader, StrictUndefined, TemplateError, UndefinedError
+from kaos.local import local_kaos
 from kaos.path import KaosPath
 from kosong.tooling import Toolset
 
@@ -46,6 +48,9 @@ from kimi_cli.wire.root_hub import RootWireHub
 if TYPE_CHECKING:
     from fastmcp.mcp_config import MCPConfig
 
+    from kimi_cli.tools.wiki import WikiToolContext
+    from kimi_cli.wiki.manager import WikiManager
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BuiltinSystemPromptArgs:
@@ -71,9 +76,18 @@ class BuiltinSystemPromptArgs:
     """The shell executable used by the Shell tool, e.g. 'bash (`/bin/bash`)'."""
     KIMI_OUTPUT_DIR: str
     """The directory where the agent must save all output and intermediate files."""
+    KIMI_WIKI_CONTEXT: str = ""
+    """Bounded awareness of the shared global Wiki."""
 
 
 _AGENTS_MD_MAX_BYTES = 32 * 1024  # 32 KiB
+_WIKI_CONTEXT_MAX_BYTES = 8 * 1024
+_WIKI_GUIDANCE = (
+    "The global Wiki is shared across all workspaces.\n"
+    "Use Wiki search/read for durable knowledge.\n"
+    "Propose only durable, sourced conclusions for writing."
+)
+_WIKI_SESSION_NAMESPACE = uuid5(NAMESPACE_URL, "openkimo.global-wiki.session")
 
 
 async def _dirs_root_to_leaf(work_dir: KaosPath, project_root: KaosPath) -> list[KaosPath]:
@@ -210,6 +224,9 @@ class Runtime:
     managed_skill_revision: int = 0
     skills_prompt: str = ""
     requested_skills_dirs: list[KaosPath] | None = None
+    wiki: WikiManager | None = None
+    workspace_id: UUID | None = None
+    wiki_tool_context: WikiToolContext | None = None
 
     def __post_init__(self) -> None:
         if self.subagent_store is None:
@@ -331,6 +348,10 @@ class Runtime:
             session.context_file.parent / "notifications",
             config.notifications,
         )
+        wiki, workspace_id, wiki_tool_context, wiki_context = await _initialize_global_wiki(
+            session,
+            owner_id=owner_id,
+        )
 
         return Runtime(
             config=config,
@@ -348,6 +369,7 @@ class Runtime:
                 KIMI_OS=environment.os_kind,
                 KIMI_SHELL=f"{environment.shell_name} (`{environment.shell_path}`)",
                 KIMI_OUTPUT_DIR=os.environ.get("KIMI_OUTPUT_DIR", "/app/output"),
+                KIMI_WIKI_CONTEXT=wiki_context,
             ),
             denwa_renji=DenwaRenji(),
             approval=Approval(state=approval_state),
@@ -374,6 +396,9 @@ class Runtime:
             managed_skill_revision=managed_skill_revision,
             skills_prompt=skills_formatted or "No skills found.",
             requested_skills_dirs=skills_dirs,
+            wiki=wiki,
+            workspace_id=workspace_id,
+            wiki_tool_context=wiki_tool_context,
         )
 
     def copy_for_subagent(
@@ -410,7 +435,72 @@ class Runtime:
             managed_skill_revision=self.managed_skill_revision,
             skills_prompt=self.skills_prompt,
             requested_skills_dirs=self.requested_skills_dirs,
+            wiki=self.wiki,
+            workspace_id=self.workspace_id,
+            wiki_tool_context=self.wiki_tool_context,
         )
+
+
+async def _initialize_global_wiki(
+    session: Session,
+    *,
+    owner_id: str | None,
+) -> tuple[WikiManager | None, UUID | None, WikiToolContext | None, str]:
+    """Initialize shared Wiki state without making session creation depend on it."""
+    from kimi_cli.tools.wiki import WikiToolContext
+    from kimi_cli.wiki.context import render_compact_index
+    from kimi_cli.wiki.manager import WikiManager
+
+    manager: WikiManager | None = None
+    try:
+        manager = await asyncio.to_thread(WikiManager)
+        layout = await asyncio.to_thread(manager.ensure)
+        workspace_id = None
+        if session.work_dir_meta.kaos == local_kaos.name:
+            work_dir_local = Path(str(session.work_dir))
+            workspace_id = await asyncio.to_thread(manager.registry.register, work_dir_local)
+        workspace_hint = Path(str(session.work_dir).replace("\\", "/")).name
+        index_text = await asyncio.to_thread(layout.index.read_text, encoding="utf-8")
+        separator = "\n\n"
+        compact_budget = _WIKI_CONTEXT_MAX_BYTES - len((_WIKI_GUIDANCE + separator).encode("utf-8"))
+        compact = await asyncio.to_thread(
+            render_compact_index,
+            index_text,
+            max_bytes=compact_budget,
+            hints=(workspace_hint,),
+        )
+        wiki_context = _WIKI_GUIDANCE + (separator + compact if compact else "")
+        provenance_session_id = uuid5(
+            _WIKI_SESSION_NAMESPACE,
+            "\0".join(
+                (
+                    owner_id or "",
+                    session.work_dir_meta.kaos,
+                    str(workspace_id or session.work_dir_meta.path),
+                    session.id,
+                )
+            ),
+        )
+        tool_context = WikiToolContext(
+            provenance_session_id=provenance_session_id,
+            conversation_hashes=frozenset(),
+            allowed_workspace_ids=(
+                frozenset({workspace_id}) if workspace_id is not None else frozenset()
+            ),
+            candidate_high_value=False,
+            stable=False,
+            user_confirmed=False,
+            reliable_source=False,
+        )
+        return manager, workspace_id, tool_context, wiki_context
+    except Exception:
+        logger.exception("Global Wiki unavailable; continuing without Wiki")
+        if manager is not None:
+            try:
+                await asyncio.to_thread(manager.close)
+            except Exception:
+                logger.exception("Failed to close unavailable global Wiki")
+        return None, None, None, ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

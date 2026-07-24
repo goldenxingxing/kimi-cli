@@ -135,6 +135,12 @@ When working on files in subdirectories, always check whether those directories 
 
 If you modified any files/styles/structures/configurations/workflows/... mentioned in `AGENTS.md` files, you MUST update the corresponding `AGENTS.md` files to keep them up-to-date.
 
+{% if KIMI_WIKI_CONTEXT %}
+# Global Wiki
+
+${KIMI_WIKI_CONTEXT}
+{% endif %}
+
 {% if KIMI_KNOWLEDGE_BASE %}
 # Shared Knowledge Base
 

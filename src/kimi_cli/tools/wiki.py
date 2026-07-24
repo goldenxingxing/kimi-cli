@@ -1,26 +1,21 @@
 """The sole model-facing interface for the shared, managed Wiki."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast, override
+from typing import Literal, cast, override
 from uuid import UUID
 
 from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolReturnValue
 from pydantic import BaseModel, Field
 
+from kimi_cli.soul.agent import Runtime
 from kimi_cli.utils.logging import logger
 from kimi_cli.wiki.locking import WikiBusyError
+from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
 from kimi_cli.wiki.models import CurrentSource, WikiCandidate
 from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
 from kimi_cli.wiki.value_gate import DiscardedCandidate, WikiContext
-
-if TYPE_CHECKING:
-    from kimi_cli.soul.agent import Runtime
-    from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
-
 
 _ARCHIVE_SUFFIXES = frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip"})
 
