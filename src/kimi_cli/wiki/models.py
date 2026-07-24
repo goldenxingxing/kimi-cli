@@ -1,0 +1,191 @@
+"""Strict data models for authoritative global Wiki Markdown."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Literal
+from urllib.parse import parse_qsl, urlsplit
+from uuid import UUID
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PositiveInt,
+    field_validator,
+    model_validator,
+)
+
+from kimi_cli.utils.sensitive import is_sensitive_file
+
+_SENSITIVE_URL_PARAMETERS = frozenset(
+    {"access_token", "api_key", "key", "password", "secret", "token"}
+)
+
+
+class UnsafeWikiPath(ValueError):
+    """Raised when a Wiki logical or resolved path escapes its managed root."""
+
+
+class UnsafeWikiPage(ValueError):
+    """Raised when Wiki content cannot be stored safely."""
+
+
+def _relative_source_path(value: str) -> str:
+    """Validate portable provenance without allowing host-specific paths."""
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or path.is_absolute()
+        or "." in path.parts
+        or ".." in path.parts
+        or path.as_posix() != value
+        or is_sensitive_file(value)
+    ):
+        raise ValueError("source paths must be safe relative POSIX paths")
+    return value
+
+
+class SourceRef(BaseModel):
+    """Portable provenance for information recorded in a Wiki page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["workspace-file", "conversation", "web"]
+    workspace_id: UUID | None = None
+    path: str | None = None
+    session_id: UUID | None = None
+    url: HttpUrl | None = None
+    content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str | None) -> str | None:
+        return _relative_source_path(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def require_kind_specific_provenance(self) -> SourceRef:
+        workspace = self.workspace_id is not None and self.path is not None
+        if self.kind == "workspace-file":
+            if not workspace or self.session_id is not None or self.url is not None:
+                raise ValueError("workspace-file sources require only workspace_id and path")
+        elif self.kind == "conversation":
+            if self.session_id is None or any(
+                value is not None for value in (self.workspace_id, self.path, self.url)
+            ):
+                raise ValueError("conversation sources require only session_id")
+        else:
+            if self.url is None or any(
+                value is not None for value in (self.workspace_id, self.path, self.session_id)
+            ):
+                raise ValueError("web sources require only url")
+            if self.url.username is not None or self.url.password is not None:
+                raise ValueError("web source URLs cannot contain credentials")
+            query_names = {name.lower() for name, _ in parse_qsl(urlsplit(str(self.url)).query)}
+            if query_names & _SENSITIVE_URL_PARAMETERS:
+                raise ValueError("web source URLs cannot contain secret query parameters")
+        return self
+
+
+class CurrentSource(BaseModel):
+    """Content supplied in the active session and eligible for controlled ingest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["inline", "workspace-file"]
+    content: str | None = None
+    workspace_id: UUID | None = None
+    relative_path: str | None = None
+
+    @field_validator("relative_path")
+    @classmethod
+    def validate_relative_path(cls, value: str | None) -> str | None:
+        return _relative_source_path(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def require_current_source_content(self) -> CurrentSource:
+        if self.kind == "inline":
+            if not self.content or self.workspace_id is not None or self.relative_path is not None:
+                raise ValueError("inline sources require non-empty content only")
+        elif self.content is not None or self.workspace_id is None or self.relative_path is None:
+            raise ValueError("workspace-file sources require workspace_id and relative_path only")
+        return self
+
+
+class WikiPage(BaseModel):
+    """A parsed content page, excluding special generated Wiki files."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    logical_path: str
+    title: str = Field(min_length=1, max_length=500)
+    created: datetime
+    updated: datetime
+    tags: list[str] = Field(default_factory=list)
+    sources: list[SourceRef]
+    revision: PositiveInt
+    body: str = Field(min_length=1)
+
+    @field_validator("logical_path")
+    @classmethod
+    def validate_logical_path(cls, value: str) -> str:
+        # The public validator lives in schema.py; importing it lazily avoids a module cycle.
+        from kimi_cli.wiki.schema import validate_logical_page
+
+        return validate_logical_page(value).as_posix()
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("title cannot be blank")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: list[str]) -> list[str]:
+        if any(not tag or tag != tag.strip() for tag in value):
+            raise ValueError("tags cannot be blank or padded")
+        if len(set(value)) != len(value):
+            raise ValueError("tags must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_timestamps(self) -> WikiPage:
+        if self.created.tzinfo is None or self.updated.tzinfo is None:
+            raise ValueError("timestamps must include a timezone")
+        if self.updated < self.created:
+            raise ValueError("updated timestamp cannot precede created timestamp")
+        return self
+
+
+class PageChange(BaseModel):
+    """A revision-checked replacement for one logical Wiki content page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    page: WikiPage
+    expected_revision: PositiveInt | None = None
+
+
+class WikiCandidate(BaseModel):
+    """A proposed, still-uncommitted global Wiki update."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=500)
+    pages: list[PageChange] = Field(min_length=1)
+    sources: list[SourceRef]
+    value: Literal["high", "medium", "low"]
+
+    @model_validator(mode="after")
+    def require_unique_pages(self) -> WikiCandidate:
+        paths = [change.page.logical_path for change in self.pages]
+        if len(set(paths)) != len(paths):
+            raise ValueError("candidate pages must have distinct logical paths")
+        return self
