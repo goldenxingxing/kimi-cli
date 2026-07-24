@@ -54,6 +54,11 @@ def test_content_hash_is_sha256_prefixed_and_deterministic() -> None:
         VALID_PAGE.replace("[[concepts/atomic-writes]]", "[[concepts/atomic-writes"),
         VALID_PAGE.replace("使用", "api_key: sk-abcdefghijklmnopqrstuvwxyz0123456789"),
         VALID_PAGE.replace("使用", "记录在 /Users/person/private/research.md。"),
+        VALID_PAGE.replace("使用", "记录在 /opt/openkimo/wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 C:/Users/person/wiki.md。"),
+        VALID_PAGE.replace("使用", r"记录在 C:\Users\person\wiki.md。"),
+        VALID_PAGE.replace("使用", r"记录在 \\server\share\wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 //server/share/wiki.md。"),
     ],
 )
 def test_page_rejects_malformed_or_unsafe_content(text: str) -> None:
@@ -70,6 +75,14 @@ def test_page_rejects_absolute_or_sensitive_provenance() -> None:
             parse_page(text, "concepts/atomic-writes.md")
 
 
+def test_page_allows_normal_https_url_in_markdown_body() -> None:
+    text = VALID_PAGE.replace(
+        "使用", "参考 [公开资料](https://example.test/docs/wiki?topic=api_key)，并"
+    )
+
+    assert parse_page(text, "concepts/atomic-writes.md").title == "原子写入"
+
+
 def test_web_source_rejects_credential_bearing_url() -> None:
     with pytest.raises(ValidationError):
         SourceRef(
@@ -79,11 +92,25 @@ def test_web_source_rejects_credential_bearing_url() -> None:
         )
 
 
-def test_web_source_rejects_token_query_parameter() -> None:
+@pytest.mark.parametrize(
+    "query_name",
+    [
+        "apiKey",
+        "api%4bey",
+        "credential",
+        "cookie",
+        "sessionid",
+        "X-Amz-Signature",
+        "authorization",
+        "token",
+        "password",
+    ],
+)
+def test_web_source_rejects_normalized_secret_query_parameter(query_name: str) -> None:
     with pytest.raises(ValidationError):
         SourceRef(
             kind="web",
-            url="https://example.test/source?access_token=secret-value",
+            url=f"https://example.test/source?{query_name}=secret-value",
             content_hash="sha256:" + "a" * 64,
         )
 

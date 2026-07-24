@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
@@ -20,7 +21,22 @@ from pydantic import (
 from kimi_cli.utils.sensitive import is_sensitive_file
 
 _SENSITIVE_URL_PARAMETERS = frozenset(
-    {"access_token", "api_key", "key", "password", "secret", "token"}
+    {
+        "apikey",
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+        "key",
+        "password",
+        "secret",
+        "session",
+        "sessionid",
+        "signature",
+        "token",
+    }
 )
 
 
@@ -34,13 +50,15 @@ class UnsafeWikiPage(ValueError):
 
 def _relative_source_path(value: str) -> str:
     """Validate portable provenance without allowing host-specific paths."""
-    from pathlib import PurePosixPath
-
     path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
     if (
         not value
         or "\\" in value
         or path.is_absolute()
+        or windows_path.drive
+        or windows_path.is_absolute()
+        or value.startswith(("//", "\\\\"))
         or "." in path.parts
         or ".." in path.parts
         or path.as_posix() != value
@@ -48,6 +66,22 @@ def _relative_source_path(value: str) -> str:
     ):
         raise ValueError("source paths must be safe relative POSIX paths")
     return value
+
+
+def _normalized_query_name(value: str) -> str:
+    """Canonicalize decoded query parameter names before secret-family matching."""
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _is_sensitive_query_name(value: str) -> bool:
+    normalized = _normalized_query_name(value)
+    if normalized in _SENSITIVE_URL_PARAMETERS:
+        return True
+    if normalized.startswith(("apikey", "accesstoken", "credential", "cookie", "session", "token")):
+        return True
+    return normalized.startswith("xamz") and any(
+        marker in normalized for marker in ("credential", "signature", "securitytoken")
+    )
 
 
 class SourceRef(BaseModel):
@@ -85,8 +119,8 @@ class SourceRef(BaseModel):
                 raise ValueError("web sources require only url")
             if self.url.username is not None or self.url.password is not None:
                 raise ValueError("web source URLs cannot contain credentials")
-            query_names = {name.lower() for name, _ in parse_qsl(urlsplit(str(self.url)).query)}
-            if query_names & _SENSITIVE_URL_PARAMETERS:
+            query_names = parse_qsl(urlsplit(str(self.url)).query, keep_blank_values=True)
+            if any(_is_sensitive_query_name(name) for name, _ in query_names):
                 raise ValueError("web source URLs cannot contain secret query parameters")
         return self
 

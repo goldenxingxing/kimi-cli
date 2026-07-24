@@ -20,9 +20,11 @@ _SECRET_PATTERNS = (
     re.compile(r"(?im)^\s*(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[^\s]{12,}$"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})\b"),
 )
-_ABSOLUTE_PATH_PATTERNS = (
-    re.compile(r"(?<![\w:])/(?:Users|home|tmp|var|private|etc)/[^\s\])}]+"),
-    re.compile(r"\b[A-Za-z]:\\(?:Users|Windows|Program Files|tmp)\\[^\s\])}]+"),
+_MACHINE_ABSOLUTE_PATH_PATTERNS = (
+    # The negative lookbehind keeps `https://host/path` and `and/or` prose intact.
+    re.compile(r"(?<![\w:/])/(?=\S)[^\s\])}>]+"),
+    re.compile(r"(?<!\w)[A-Za-z]:[\\/]+[^\s\])}>]*"),
+    re.compile(r"(?<![\\/:])\\\\+[^\s\])}>]+"),
 )
 _FRONTMATTER_FIELDS = frozenset({"title", "created", "updated", "tags", "sources", "revision"})
 
@@ -94,7 +96,7 @@ def _validate_body(body: str) -> None:
             validate_logical_page(f"{link.group(1)}.md")
     if any(pattern.search(body) for pattern in _SECRET_PATTERNS):
         raise UnsafeWikiPage("Wiki pages cannot contain credentials or secrets")
-    if any(pattern.search(body) for pattern in _ABSOLUTE_PATH_PATTERNS):
+    if any(pattern.search(body) for pattern in _MACHINE_ABSOLUTE_PATH_PATTERNS):
         raise UnsafeWikiPage("Wiki pages cannot contain machine-specific absolute paths")
 
 
