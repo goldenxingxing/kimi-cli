@@ -63,11 +63,12 @@ def test_stale_cache_schema_is_replaced_without_touching_markdown(tmp_path: Path
 def test_open_honors_wal_configuration(tmp_path: Path) -> None:
     from kimi_cli.wiki.search import WikiSearchIndex
 
-    with WikiSearchIndex.open(tmp_path / "wal.sqlite3", wal=True) as index:
+    database = tmp_path / "cache.sqlite3"
+    with WikiSearchIndex.open(database, wal=True) as index:
         assert index._connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 
-    with WikiSearchIndex.open(tmp_path / "rollback.sqlite3", wal=False) as index:
-        assert index._connection.execute("PRAGMA journal_mode").fetchone()[0] != "wal"
+    with WikiSearchIndex.open(database, wal=False) as index:
+        assert index._connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
 def test_bounded_markdown_search_never_needs_sqlite_and_limits_results() -> None:

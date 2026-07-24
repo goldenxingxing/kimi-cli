@@ -264,6 +264,8 @@ def _open_database(path: Path, *, wal: bool) -> tuple[sqlite3.Connection, bool]:
     try:
         if wal:
             connection.execute("PRAGMA journal_mode=WAL")
+        else:
+            connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS pages (
