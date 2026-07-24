@@ -11,9 +11,15 @@ from kaos.path import KaosPath
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval, ApprovalResult
+from kimi_cli.tools.file import managed_wiki
 from kimi_cli.tools.file.replace import Edit, Params, StrReplaceFile
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.types import DiffDisplayBlock
+
+
+class _AutoApproval:
+    async def request(self, *_args, **_kwargs):
+        return ApprovalResult(approved=True)
 
 
 async def test_replace_single_occurrence(
@@ -328,5 +334,57 @@ async def test_replace_file_rechecks_target_after_approval_hardlink_swap(
         assert result.is_error
         assert "Wiki tool" in result.message
         assert manager.layout.index.read_text(encoding="utf-8") == "old index"
+    finally:
+        manager.close()
+
+
+async def test_windows_replace_allows_regular_file_but_rejects_wiki_target(
+    builtin_args, tmp_path: Path, monkeypatch
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+    tool = StrReplaceFile(cast("Runtime", runtime), cast("Approval", _AutoApproval()))
+    normal = Path(str(builtin_args.KIMI_WORK_DIR)) / "normal.txt"
+    normal.write_text("old", encoding="utf-8")
+    manager.layout.index.write_text("old Wiki", encoding="utf-8")
+    monkeypatch.setattr(managed_wiki, "_is_windows", lambda: True)
+    try:
+        allowed = await tool(Params(path=str(normal), edit=Edit(old="old", new="new")))
+        blocked = await tool(
+            Params(path=str(manager.layout.index), edit=Edit(old="old", new="blocked"))
+        )
+
+        assert not allowed.is_error
+        assert normal.read_text(encoding="utf-8") == "new"
+        assert blocked.is_error and "Wiki tool" in blocked.message
+        assert "blocked" not in manager.layout.index.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+async def test_nonlocal_replace_allows_regular_file_but_rejects_expressed_wiki_root(
+    builtin_args, tmp_path: Path, monkeypatch
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+    tool = StrReplaceFile(cast("Runtime", runtime), cast("Approval", _AutoApproval()))
+    normal = Path(str(builtin_args.KIMI_WORK_DIR)) / "normal-remote.txt"
+    normal.write_text("old", encoding="utf-8")
+    manager.layout.index.write_text("old Wiki", encoding="utf-8")
+
+    class RemoteKaos:
+        name = "ssh"
+
+    monkeypatch.setattr(managed_wiki, "get_current_kaos", lambda: RemoteKaos())
+    try:
+        allowed = await tool(Params(path=str(normal), edit=Edit(old="old", new="new")))
+        blocked = await tool(
+            Params(path=str(manager.layout.index), edit=Edit(old="old", new="blocked"))
+        )
+
+        assert not allowed.is_error
+        assert normal.read_text(encoding="utf-8") == "new"
+        assert blocked.is_error and "Wiki tool" in blocked.message
+        assert "blocked" not in manager.layout.index.read_text(encoding="utf-8")
     finally:
         manager.close()

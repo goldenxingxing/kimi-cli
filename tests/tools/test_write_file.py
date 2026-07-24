@@ -13,9 +13,15 @@ from pydantic import ValidationError
 
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.soul.approval import Approval, ApprovalResult
+from kimi_cli.tools.file import managed_wiki
 from kimi_cli.tools.file.write import Params, WriteFile
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wire.types import DiffDisplayBlock
+
+
+class _AutoApproval:
+    async def request(self, *_args, **_kwargs):
+        return ApprovalResult(approved=True)
 
 
 async def test_write_new_file(write_file_tool: WriteFile, temp_work_dir: KaosPath):
@@ -270,5 +276,55 @@ async def test_write_file_rechecks_target_after_approval_hardlink_swap(
         assert result.is_error
         assert "Wiki tool" in result.message
         assert "must not reach Wiki" not in manager.layout.index.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+async def test_windows_write_allows_regular_file_but_rejects_wiki_alias_and_hardlink(
+    builtin_args, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+    tool = WriteFile(cast("Runtime", runtime), cast("Approval", _AutoApproval()))
+    normal = Path(str(builtin_args.KIMI_WORK_DIR)) / "normal.txt"
+    alias = Path(str(builtin_args.KIMI_WORK_DIR)) / "wiki-alias.txt"
+    hardlink = Path(str(builtin_args.KIMI_WORK_DIR)) / "wiki-hardlink.txt"
+    alias.symlink_to(manager.layout.index)
+    os.link(manager.layout.index, hardlink)
+    monkeypatch.setattr(managed_wiki, "_is_windows", lambda: True)
+    try:
+        allowed = await tool(Params(path=str(normal), content="normal"))
+        via_alias = await tool(Params(path=str(alias), content="blocked"))
+        via_hardlink = await tool(Params(path=str(hardlink), content="blocked"))
+
+        assert not allowed.is_error
+        assert normal.read_text(encoding="utf-8") == "normal"
+        assert via_alias.is_error and "Wiki tool" in via_alias.message
+        assert via_hardlink.is_error and "Wiki tool" in via_hardlink.message
+        assert "blocked" not in manager.layout.index.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+async def test_nonlocal_write_allows_regular_file_but_rejects_expressed_wiki_root(
+    builtin_args, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    runtime = SimpleNamespace(builtin_args=builtin_args, additional_dirs=[], wiki=manager)
+    tool = WriteFile(cast("Runtime", runtime), cast("Approval", _AutoApproval()))
+    normal = Path(str(builtin_args.KIMI_WORK_DIR)) / "normal-remote.txt"
+
+    class RemoteKaos:
+        name = "ssh"
+
+    monkeypatch.setattr(managed_wiki, "get_current_kaos", lambda: RemoteKaos())
+    try:
+        allowed = await tool(Params(path=str(normal), content="normal"))
+        blocked = await tool(Params(path=str(manager.layout.index), content="blocked"))
+
+        assert not allowed.is_error
+        assert normal.read_text(encoding="utf-8") == "normal"
+        assert blocked.is_error and "Wiki tool" in blocked.message
+        assert "blocked" not in manager.layout.index.read_text(encoding="utf-8")
     finally:
         manager.close()
