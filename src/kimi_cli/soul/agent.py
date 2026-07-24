@@ -478,7 +478,21 @@ async def _initialize_global_wiki(
 
     manager: WikiManager | None = None
     try:
-        manager = await asyncio.to_thread(WikiManager)
+        construction_task = asyncio.create_task(asyncio.to_thread(WikiManager))
+        try:
+            manager = await asyncio.shield(construction_task)
+        except asyncio.CancelledError:
+            try:
+                manager_after_cancel = await construction_task
+            except Exception:
+                logger.exception("Global Wiki construction failed during cancellation cleanup")
+            else:
+                try:
+                    await asyncio.to_thread(manager_after_cancel.close)
+                except Exception:
+                    logger.exception("Failed to close cancelled global Wiki construction")
+            raise
+        assert manager is not None
         layout = await asyncio.to_thread(manager.ensure)
         workspace_id = None
         if session.work_dir_meta.kaos == local_kaos.name:

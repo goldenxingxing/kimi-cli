@@ -18,6 +18,18 @@ _BLOCK_PATTERN = re.compile(
     re.escape(WIKI_BLOCK_START) + r".*?" + re.escape(WIKI_BLOCK_END),
     flags=re.DOTALL,
 )
+_LEGACY_INDEX_LINE = (
+    r"(?:## (?:Entities|Concepts|Comparisons|Sources|Queries|Lint)|"
+    r"[ \t]*[-*+][ \t]+[^\n]*|" + re.escape(TRUNCATION_MARKER) + r"|[ \t]*)(?=\n|$)"
+)
+_LEGACY_BLOCK_PATTERN = re.compile(
+    r"^# Global Wiki\n\n"
+    + re.escape(WIKI_GUIDANCE)
+    + r"(?:\n\n# Wiki Index(?:\n"
+    + _LEGACY_INDEX_LINE
+    + r")*)?",
+    flags=re.MULTILINE,
+)
 
 
 def render_compact_index(
@@ -82,25 +94,33 @@ def build_wiki_context(index_text: str, *, hints: Sequence[str] = ()) -> str:
 
 def refresh_wiki_prompt_block(system_prompt: str, wiki_context: str) -> str:
     """Replace/insert the one managed Wiki block while preserving all other prompt text."""
-    matches = list(_BLOCK_PATTERN.finditer(system_prompt))
+    matches = _wiki_block_spans(system_prompt)
     if wiki_context:
         block = _render_prompt_block(wiki_context)
         if matches:
             parts: list[str] = []
             cursor = 0
-            for index, match in enumerate(matches):
-                parts.append(system_prompt[cursor : match.start()])
+            for index, (start, end) in enumerate(matches):
+                parts.append(system_prompt[cursor:start])
                 if index == 0:
                     parts.append(block)
-                cursor = match.end()
+                cursor = end
             parts.append(system_prompt[cursor:])
             return "".join(parts)
         anchor = "\n# Skills"
         if anchor in system_prompt:
             before, after = system_prompt.split(anchor, 1)
-            return f"{before}\n{block}\n{anchor}{after}"
+            return f"{before}{block}{anchor}{after}"
         return f"{system_prompt}\n\n{block}" if system_prompt else block
-    return _BLOCK_PATTERN.sub("", system_prompt)
+    if not matches:
+        return system_prompt
+    parts = []
+    cursor = 0
+    for start, end in matches:
+        parts.append(system_prompt[cursor:start])
+        cursor = end
+    parts.append(system_prompt[cursor:])
+    return "".join(parts)
 
 
 def _render_prompt_block(wiki_context: str) -> str:
@@ -108,6 +128,20 @@ def _render_prompt_block(wiki_context: str) -> str:
     if len(block.encode("utf-8")) > WIKI_PROMPT_MAX_BYTES:
         raise ValueError("Wiki prompt block exceeds its UTF-8 byte budget")
     return block
+
+
+def _wiki_block_spans(system_prompt: str) -> list[tuple[int, int]]:
+    """Find marked blocks plus exact previous-Task-9 unmarked blocks."""
+    marked = [(match.start(), match.end()) for match in _BLOCK_PATTERN.finditer(system_prompt)]
+    legacy: list[tuple[int, int]] = []
+    for match in _LEGACY_BLOCK_PATTERN.finditer(system_prompt):
+        if any(start <= match.start() < end for start, end in marked):
+            continue
+        end = match.end()
+        while end > match.start() and system_prompt[end - 1] == "\n":
+            end -= 1
+        legacy.append((match.start(), end))
+    return sorted((*marked, *legacy))
 
 
 def _validated_limit(value: object, *, minimum: int, name: str) -> int:
