@@ -6,11 +6,17 @@ import hashlib
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
+from urllib.parse import unquote
 
 import yaml
 from pydantic import ValidationError
 
-from kimi_cli.wiki.models import UnsafeWikiPage, UnsafeWikiPath, WikiPage
+from kimi_cli.wiki.models import (
+    UnsafeWikiPage,
+    UnsafeWikiPath,
+    WikiPage,
+    has_sensitive_url_parameters,
+)
 
 _CATEGORIES = frozenset({"entities", "concepts", "comparisons", "sources", "queries", "lint"})
 _SLUG_RE = re.compile(r"[\w][\w-]*", flags=re.UNICODE)
@@ -20,9 +26,15 @@ _SECRET_PATTERNS = (
     re.compile(r"(?im)^\s*(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[^\s]{12,}$"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})\b"),
 )
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?im)^\s*(?:access[_-]?token|api[_-]?key|auth[_-]?token|client[_-]?secret|cookie|id[_-]?token|private[_-]?key|refresh[_-]?token|secret[_-]?key|session[_-]?token|user[_-]?password|user[_-]?token)\s*[:=]\s*\S+"
+)
+_SECRET_HEADER_RE = re.compile(r"(?im)^\s*(?:authorization|cookie|set-cookie)\s*:\s*\S+")
 _FILE_URI_RE = re.compile(r"(?i)(?<![\w:/-])file:(?://|[\\/])")
 _ROOT_RELATIVE_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*/(?!/)[^\s)]+\s*\)")
-_API_ENDPOINT_RE = re.compile(r"(?<![\w:/])/api(?:/[^\s\])}>.,;!?]+)*")
+_API_ENDPOINT_RE = re.compile(r"(?<![\w:/])/api(?:/[^\s\])}>,;!?]+)*")
+_BODY_HTTP_URL_RE = re.compile(r"https?://[^\s\])}>]+", flags=re.IGNORECASE)
+_MARKDOWN_URL_TARGET_RE = re.compile(r"!?\[[^\]]*\]\(\s*([^\s)]+)")
 _MACHINE_ABSOLUTE_PATH_PATTERNS = (
     # After safe Markdown links and API endpoints are removed, a leading slash is
     # unambiguously a local POSIX path rather than a root-relative web route.
@@ -102,8 +114,19 @@ def _validate_body(body: str) -> None:
             validate_logical_page(f"{link.group(1)}.md")
     if any(pattern.search(body) for pattern in _SECRET_PATTERNS):
         raise UnsafeWikiPage("Wiki pages cannot contain credentials or secrets")
+    if _SECRET_ASSIGNMENT_RE.search(body) or _SECRET_HEADER_RE.search(body):
+        raise UnsafeWikiPage("Wiki pages cannot contain credential assignments or headers")
+    url_candidates = _BODY_HTTP_URL_RE.findall(body) + _MARKDOWN_URL_TARGET_RE.findall(body)
+    if any(has_sensitive_url_parameters(url) for url in url_candidates):
+        raise UnsafeWikiPage("Wiki page URLs cannot contain credential parameters")
     if _FILE_URI_RE.search(body):
         raise UnsafeWikiPage("Wiki pages cannot contain local file URIs")
+    api_endpoints = tuple(_API_ENDPOINT_RE.finditer(body))
+    if any(
+        any(segment in {".", ".."} for segment in unquote(match.group()).split("/"))
+        for match in api_endpoints
+    ):
+        raise UnsafeWikiPage("Wiki pages cannot contain traversal segments in API paths")
     path_context = _ROOT_RELATIVE_MARKDOWN_LINK_RE.sub("", body)
     path_context = _API_ENDPOINT_RE.sub("", path_context)
     if any(pattern.search(path_context) for pattern in _MACHINE_ABSOLUTE_PATH_PATTERNS):

@@ -58,6 +58,8 @@ def test_content_hash_is_sha256_prefixed_and_deterministic() -> None:
         VALID_PAGE.replace("使用", "记录在 /data/private/wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 /srv/private/wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 /workspace/private/wiki.md。"),
+        VALID_PAGE.replace("使用", "请求 /api/../private。"),
+        VALID_PAGE.replace("使用", "请求 /api/%2e%2e/private。"),
         VALID_PAGE.replace("使用", "记录在 C:/Users/person/wiki.md。"),
         VALID_PAGE.replace("使用", r"记录在 C:\Users\person\wiki.md。"),
         VALID_PAGE.replace("使用", r"记录在 \Windows\System32\config。"),
@@ -67,6 +69,12 @@ def test_content_hash_is_sha256_prefixed_and_deterministic() -> None:
         VALID_PAGE.replace("使用", "记录在 file:///tmp/wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 file://server/share/wiki.md。"),
         VALID_PAGE.replace("使用", r"记录在 file:\tmp\wiki.md。"),
+        VALID_PAGE.replace("使用", "参考 https://example.test/?api_key=secret-value。"),
+        VALID_PAGE.replace("使用", "参考 https://example.test/#client_secret=secret-value。"),
+        VALID_PAGE.replace("使用", "参考 https://example.test/?api%5fkey=secret-value。"),
+        VALID_PAGE.replace("使用", "session_token=secret-value"),
+        VALID_PAGE.replace("使用", "Cookie: session=secret-value"),
+        VALID_PAGE.replace("使用", "private_key: secret-value"),
     ],
 )
 def test_page_rejects_malformed_or_unsafe_content(text: str) -> None:
@@ -92,6 +100,7 @@ def test_page_rejects_absolute_or_sensitive_provenance() -> None:
         "参考 [公开资料](https://example.test/docs/wiki?topic=api_key)，并",
         "术语 file: 只是标签，并",
         "参考 https://example.test/file:/manual，并",
+        "讨论 ?topic=api_key，并",
     ],
 )
 def test_page_allows_relative_root_relative_and_https_markdown(replacement: str) -> None:
@@ -121,6 +130,13 @@ def test_web_source_rejects_credential_bearing_url() -> None:
         ("query", "authorization"),
         ("query", "token"),
         ("query", "password"),
+        ("query", "session_token"),
+        ("query", "secret_key"),
+        ("query", "private_key"),
+        ("query", "user_token"),
+        ("query", "XAmzSignature"),
+        ("query", "XAmzSecurityToken"),
+        ("query", "XGoogSignature"),
         ("fragment", "client_secret"),
         ("fragment", "clientSecret"),
         ("fragment", "refresh_token"),
@@ -130,6 +146,9 @@ def test_web_source_rejects_credential_bearing_url() -> None:
         ("fragment", "x-goog-signature"),
         ("fragment", "xGoogSignature"),
         ("fragment", "sig"),
+        ("fragment", "session_token"),
+        ("fragment", "private_key"),
+        ("fragment", "XAmzSignature"),
     ],
 )
 def test_web_source_rejects_normalized_secret_url_component(

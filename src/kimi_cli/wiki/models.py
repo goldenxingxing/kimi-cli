@@ -36,14 +36,22 @@ _SENSITIVE_URL_PARAMETERS = frozenset(
         "key",
         "password",
         "idtoken",
+        "privatekey",
         "refreshtoken",
         "secret",
+        "secretkey",
         "session",
         "sessionid",
+        "sessiontoken",
         "signature",
         "sig",
         "token",
+        "usertoken",
         "userpassword",
+        "xamzcredential",
+        "xamzsecuritytoken",
+        "xamzsignature",
+        "xgoogsignature",
     }
 )
 
@@ -81,7 +89,8 @@ def _normalized_query_name(value: str) -> str:
     return "".join(character for character in value.casefold() if character.isalnum())
 
 
-def _is_sensitive_query_name(value: str) -> bool:
+def is_sensitive_url_parameter(value: str) -> bool:
+    """Return whether a decoded URL parameter name is a credential-bearing alias."""
     normalized = _normalized_query_name(value)
     if normalized in _SENSITIVE_URL_PARAMETERS:
         return True
@@ -90,6 +99,16 @@ def _is_sensitive_query_name(value: str) -> bool:
     if components[:2] not in {("x", "amz"), ("x", "goog")}:
         return False
     return "".join(components[2:]) in {"credential", "signature", "securitytoken"}
+
+
+def has_sensitive_url_parameters(url: str) -> bool:
+    """Inspect both query and fragment parameters using the shared alias rules."""
+    parts = urlsplit(url)
+    return any(
+        is_sensitive_url_parameter(name)
+        for component in (parts.query, parts.fragment)
+        for name, _ in parse_qsl(component, keep_blank_values=True)
+    )
 
 
 class SourceRef(BaseModel):
@@ -127,14 +146,7 @@ class SourceRef(BaseModel):
                 raise ValueError("web sources require only url")
             if self.url.username is not None or self.url.password is not None:
                 raise ValueError("web source URLs cannot contain credentials")
-            parts = urlsplit(str(self.url))
-            components = (parts.query, parts.fragment)
-            parameter_names = [
-                name
-                for component in components
-                for name, _ in parse_qsl(component, keep_blank_values=True)
-            ]
-            if any(_is_sensitive_query_name(name) for name in parameter_names):
+            if has_sensitive_url_parameters(str(self.url)):
                 raise ValueError("web source URLs cannot contain secret query parameters")
         return self
 
