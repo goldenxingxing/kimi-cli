@@ -12,6 +12,7 @@ from uuid import UUID
 import pytest
 
 from kimi_cli.soul.agent import Runtime
+from kimi_cli.soul.approval import Approval
 from kimi_cli.tools.wiki import Params, Wiki, WikiToolContext
 from kimi_cli.wiki.models import CurrentSource, PageChange, SourceRef, WikiCandidate, WikiPage
 from kimi_cli.wiki.schema import content_hash
@@ -81,10 +82,18 @@ def _tool_context(
 def wiki_tool(manager):
     runtime = SimpleNamespace(
         wiki=manager,
+        approval=Approval(yolo=True),
         session=SimpleNamespace(id="named-shell-session"),
+        workspace_id=None,
         wiki_tool_context=_tool_context(),
     )
     return Wiki(cast("Runtime", runtime))
+
+
+def test_tool_description_exposes_only_portable_provenance(wiki_tool) -> None:
+    assert str(_SESSION_ID) in wiki_tool.description
+    assert "SHA-256" in wiki_tool.description
+    assert "/Users/" not in wiki_tool.description
 
 
 async def test_search_read_and_lint_are_read_only(wiki_tool, manager) -> None:
@@ -112,19 +121,21 @@ async def test_search_read_and_lint_are_read_only(wiki_tool, manager) -> None:
     assert manager.layout.revision.read_text(encoding="ascii") == before
 
 
-async def test_remember_only_prepares_a_high_value_candidate(wiki_tool, manager) -> None:
+async def test_remember_yolo_commits_a_high_value_candidate(wiki_tool, manager) -> None:
     result = await wiki_tool(Params(operation="remember", candidate=_candidate()))
 
     assert not result.is_error
     assert json.loads(result.output) == {
-        "status": "prepared",
+        "status": "committed",
         "summary": "Record controlled Wiki tooling guidance",
         "pages": ["concepts/controlled-tools.md"],
+        "global_revision": 1,
+        "search_index_current": True,
     }
-    assert not (manager.layout.root / "concepts" / "controlled-tools.md").exists()
+    assert (manager.layout.root / "concepts" / "controlled-tools.md").is_file()
 
 
-async def test_ingest_accepts_only_current_inline_content_and_prepares_change(
+async def test_ingest_accepts_only_current_inline_content_and_commits_in_yolo(
     wiki_tool, manager
 ) -> None:
     raw = "Current-turn evidence supports controlled global Wiki writes."
@@ -143,8 +154,8 @@ async def test_ingest_accepts_only_current_inline_content_and_prepares_change(
     )
 
     assert not result.is_error
-    assert json.loads(result.output)["status"] == "prepared"
-    assert not (manager.layout.root / "concepts" / "controlled-tools.md").exists()
+    assert json.loads(result.output)["status"] == "committed"
+    assert (manager.layout.root / "concepts" / "controlled-tools.md").is_file()
 
 
 @pytest.mark.parametrize("source", ["/etc/passwd", "wiki.zip", "."])

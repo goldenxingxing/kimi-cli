@@ -679,6 +679,9 @@ class KimiSoul:
             raise LLMNotSet()
         if missing_caps := check_message(message, self._runtime.llm.capabilities):
             raise LLMNotSupported(self._runtime.llm, list(missing_caps))
+        from kimi_cli.tools.wiki import extend_wiki_turn_context
+
+        extend_wiki_turn_context(message.extract_text(" "))
         await self._context.append_message(message)
 
     @property
@@ -697,6 +700,7 @@ class KimiSoul:
         turn_finished = False
         interrupt_reason: str | None = None
         turn_t0 = time.monotonic()
+        wiki_turn_token = None
         self._set_trace_id(None)
         if get_current_approval_source_or_none() is None:
             created_approval_source = ApprovalSource(kind="foreground_turn", id=uuid.uuid4().hex)
@@ -750,7 +754,15 @@ class KimiSoul:
                 **_provider_telemetry_kwargs(self._runtime.llm),
             )
             user_message = Message(role="user", content=user_input)
-            text_input = user_message.extract_text(" ").strip()
+            raw_text_input = user_message.extract_text(" ")
+            text_input = raw_text_input.strip()
+            from kimi_cli.tools.wiki import set_wiki_turn_context
+
+            wiki_turn_token = set_wiki_turn_context(
+                self._runtime,
+                raw_text_input,
+                trusted_user_input=not skip_user_prompt_hook,
+            )
 
             if command_call := parse_slash_command_call(text_input):
                 command = self._find_slash_command(command_call.name)
@@ -866,6 +878,10 @@ class KimiSoul:
                 )
             if approval_source_token is not None:
                 reset_current_approval_source(approval_source_token)
+            if wiki_turn_token is not None:
+                from kimi_cli.tools.wiki import reset_wiki_turn_context
+
+                reset_wiki_turn_context(wiki_turn_token)
             self._set_trace_id(None)
 
     async def _refresh_managed_skills(self) -> None:

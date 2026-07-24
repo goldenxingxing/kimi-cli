@@ -29,6 +29,14 @@
     "confirming": "确认中…",
     "approvingSession": "授权会话中…"
   },
+  "wikiApproval": {
+    "title": "写入全局 Wiki",
+    "details": "详情",
+    "paths": "页面",
+    "approveOnce": "仅允许一次",
+    "approveForSession": "本会话始终允许",
+    "decline": "拒绝"
+  },
   "activity": {
     "uploadingFiles": "正在上传文件...",
     "errorFallback": "出错了",
