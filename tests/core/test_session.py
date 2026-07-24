@@ -111,6 +111,34 @@ async def test_existing_metadata_keeps_legacy_sessions_readable(
     assert session.dir.parent.is_relative_to(isolated_share_dir)
 
 
+def test_readable_session_roots_do_not_create_work_directory(
+    isolated_share_dir: Path, tmp_path: Path
+) -> None:
+    from kimi_cli.metadata import WorkDirMeta
+
+    missing_work_dir = tmp_path / "removed-project"
+    meta = WorkDirMeta(path=str(missing_work_dir))
+
+    roots = meta.readable_sessions_dirs
+
+    assert roots[0] == missing_work_dir / "session-data"
+    assert not missing_work_dir.exists()
+
+
+def test_non_local_metadata_does_not_create_host_output_directory(
+    isolated_share_dir: Path, tmp_path: Path
+) -> None:
+    from kimi_cli.metadata import WorkDirMeta
+
+    remote_path = tmp_path / "remote-path"
+    meta = WorkDirMeta(path=str(remote_path), kaos="ssh")
+
+    output_dir = meta.output_dir
+
+    assert output_dir is None
+    assert not (remote_path / "output").exists()
+
+
 async def test_find_uses_wire_title(isolated_share_dir: Path, work_dir: KaosPath):
     session = await Session.create(work_dir)
     _write_wire_turn(session.dir, "hello world from wire file")

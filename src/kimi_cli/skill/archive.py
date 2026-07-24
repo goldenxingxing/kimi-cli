@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import shutil
 import stat
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -56,8 +57,16 @@ def extract_skill_archive(
             raise ValueError("archive entry count exceeds limit")
         expanded = 0
         safe_entries: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
+        normalized_targets: set[str] = set()
         for entry in entries:
             parts = _safe_parts(entry.filename)
+            normalized_target = "/".join(
+                unicodedata.normalize("NFC", part).casefold().rstrip(" .")
+                for part in parts
+            )
+            if not normalized_target or normalized_target in normalized_targets:
+                raise ValueError("archive contains duplicate normalized paths")
+            normalized_targets.add(normalized_target)
             mode = entry.external_attr >> 16
             if stat.S_ISLNK(mode):
                 raise ValueError("archive symbolic links are not allowed")

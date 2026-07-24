@@ -24,6 +24,7 @@ from kimi_cli.memory import get_user_memory_dir, load_knowledge_base
 from kimi_cli.notifications import NotificationManager
 from kimi_cli.session import Session
 from kimi_cli.skill import (
+    ScopedSkillsRoot,
     Skill,
     discover_skills_from_roots,
     filter_skills,
@@ -246,22 +247,31 @@ class Runtime:
         owner_id = os.environ.get("KIMI_USER_ID") or session.state.owner_id
         user_memory_dir = get_user_memory_dir(owner_id)
 
-        # Discover and format skills (grouped by scope for the system prompt).
-        scoped_roots = await resolve_skills_roots(
-            session.work_dir,
-            skills_dirs=skills_dirs,
-            merge_brands=config.merge_all_available_skills,
-            extra_skill_dirs=config.extra_skill_dirs or None,
-        )
+        # Discover a revision-consistent snapshot. If mutations keep racing
+        # initialization, store -1 so the next turn is guaranteed to refresh.
+        from kimi_cli.skill.manager import SkillManager
+
+        managed_skill_revision = -1
+        scoped_roots: list[ScopedSkillsRoot] = []
+        skills: list[Skill] = []
+        for _attempt in range(3):
+            revision_before = SkillManager().revision
+            scoped_roots = await resolve_skills_roots(
+                session.work_dir,
+                skills_dirs=skills_dirs,
+                merge_brands=config.merge_all_available_skills,
+                extra_skill_dirs=config.extra_skill_dirs or None,
+            )
+            skills = await discover_skills_from_roots(scoped_roots)
+            revision_after = SkillManager().revision
+            if revision_before == revision_after:
+                managed_skill_revision = revision_after
+                break
         # Canonicalize so symlinked skill directories match resolved paths
         skills_roots_canonical = [s.root.canonical() for s in scoped_roots]
-        skills = await discover_skills_from_roots(scoped_roots)
         skills_by_name = index_skills(skills)
         logger.info("Discovered {count} skill(s)", count=len(skills))
         skills_formatted = format_skills_for_prompt(skills)
-        from kimi_cli.skill.manager import SkillManager
-
-        managed_skill_revision = SkillManager().revision
 
         # Restore additional directories from session state, pruning stale entries
         additional_dirs: list[KaosPath] = []
