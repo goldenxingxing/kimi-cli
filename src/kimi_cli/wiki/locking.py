@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import errno
+import math
 import os
 import stat
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -24,6 +25,8 @@ class WikiLock:
     finish before any reader observes authoritative Markdown.
     """
 
+    supports_concurrent_shared = os.name != "nt"
+
     def __init__(
         self,
         path: Path,
@@ -38,33 +41,37 @@ class WikiLock:
         """Acquire a shared lock, running configured recovery first."""
         self._validate_timeout(timeout)
         stream = self._open_lock_file()
+        acquired = False
         try:
             initial_mode: Literal["shared", "exclusive"] = (
                 "exclusive" if self._before_shared is not None else "shared"
             )
             self._acquire(stream, initial_mode, timeout)
+            acquired = True
             if self._before_shared is not None:
                 self._before_shared()
                 self._convert_to_shared(stream)
             yield
         finally:
-            self._unlock_and_close(stream)
+            self._unlock_and_close(stream, acquired=acquired)
 
     @contextmanager
     def exclusive(self, timeout: float) -> Iterator[None]:
         """Acquire the exclusive writer lock until the context exits."""
         self._validate_timeout(timeout)
         stream = self._open_lock_file()
+        acquired = False
         try:
             self._acquire(stream, "exclusive", timeout)
+            acquired = True
             yield
         finally:
-            self._unlock_and_close(stream)
+            self._unlock_and_close(stream, acquired=acquired)
 
     @staticmethod
     def _validate_timeout(timeout: float) -> None:
-        if timeout < 0:
-            raise ValueError("Wiki lock timeout must be non-negative")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("Wiki lock timeout must be a finite non-negative number")
 
     def _open_lock_file(self) -> BinaryIO:
         parent = self.path.parent
@@ -129,9 +136,10 @@ class WikiLock:
         fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
 
     @staticmethod
-    def _unlock_and_close(stream: BinaryIO) -> None:
+    def _unlock_and_close(stream: BinaryIO, *, acquired: bool) -> None:
         try:
-            _unlock(stream)
+            if acquired:
+                _unlock(stream)
         finally:
             stream.close()
 
@@ -155,9 +163,7 @@ def _unlock(stream: BinaryIO) -> None:
         import msvcrt
 
         stream.seek(0)
-        # The acquisition path may have raised before the byte was locked.
-        with suppress(OSError):
-            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
         return
 
     import fcntl

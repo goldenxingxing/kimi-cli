@@ -168,6 +168,28 @@ def test_prepare_rejects_non_monotonic_page_revision(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("revision", [False, 0.0, 1.0])
+def test_expected_global_revision_is_a_strict_integer(
+    tmp_path: Path,
+    revision: object,
+) -> None:
+    layout = ensure_wiki(tmp_path / "wiki")
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        WikiTransaction.prepare(
+            layout=layout,
+            changes=[
+                PageChange(
+                    page=_page("concepts/new.md", revision=1, body="New.\n"),
+                    expected_revision=None,
+                )
+            ],
+            expected_global_revision=revision,  # type: ignore[arg-type]
+            index_bytes=b"# Wiki Index\n",
+            log_bytes=b"# Wiki Log\n",
+        )
+
+
 def test_journal_contains_only_relative_managed_targets(tmp_path: Path, monkeypatch) -> None:
     import kimi_cli.wiki.transaction as transaction_module
 
@@ -188,6 +210,38 @@ def test_journal_contains_only_relative_managed_targets(tmp_path: Path, monkeypa
     assert '"target":"concepts/atomic-writes.md"' in text
     assert '"target":"index.md"' in text
     assert '"target":".openkimo/revision"' in text
+
+
+def test_commit_exposes_all_durable_boundary_failpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kimi_cli.wiki.transaction as transaction_module
+
+    transaction, _ = _prepare_update(tmp_path / "wiki")
+    observed: list[str] = []
+    monkeypatch.setattr(transaction_module, "_hit_failpoint", observed.append)
+
+    transaction.commit()
+
+    assert {
+        "journal_directory_fsync",
+        "artifact_create",
+        "artifact_fsync",
+        "artifact_directory_fsync",
+        "prepared_record_replace",
+        "prepared_record_directory_fsync",
+        "page_replace",
+        "index_replace",
+        "log_replace",
+        "revision_replace",
+        "commit_record_replace",
+        "commit_record_directory_fsync",
+        "reindex_marker_replace",
+        "reindex_marker_directory_fsync",
+        "journal_cleanup_delete",
+        "journal_cleanup_directory_fsync",
+    } <= set(observed)
 
 
 def test_concurrent_writers_serialize_and_one_detects_conflict(tmp_path: Path) -> None:

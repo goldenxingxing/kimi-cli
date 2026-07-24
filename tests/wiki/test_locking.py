@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
+import math
 import multiprocessing
+import os
 import time
 from pathlib import Path
 
@@ -58,7 +61,8 @@ def test_shared_locks_coexist_but_block_a_writer(tmp_path: Path) -> None:
 
     assert reader.exitcode == 0
     assert writer.exitcode == 0
-    assert reader_queue.get(timeout=1) == "acquired"
+    expected_reader = "busy" if os.name == "nt" else "acquired"
+    assert reader_queue.get(timeout=1) == expected_reader
     assert writer_queue.get(timeout=1) == "busy"
 
 
@@ -104,6 +108,15 @@ def test_negative_timeout_is_rejected(tmp_path: Path) -> None:
         pass
 
 
+@pytest.mark.parametrize("timeout", [False, math.nan, math.inf, -math.inf])
+def test_non_finite_or_boolean_timeout_is_rejected(tmp_path: Path, timeout: float) -> None:
+    with (
+        pytest.raises(ValueError, match="finite non-negative"),
+        WikiLock(tmp_path / "writer.lock").shared(timeout),
+    ):
+        pass
+
+
 def test_timeout_is_deadline_based_not_attempt_count(tmp_path: Path) -> None:
     lock_path = tmp_path / "locks" / "writer.lock"
     started = time.monotonic()
@@ -114,3 +127,43 @@ def test_timeout_is_deadline_based_not_attempt_count(tmp_path: Path) -> None:
     ):
         pass
     assert time.monotonic() - started < 0.5
+
+
+def test_failed_acquisition_does_not_attempt_windows_style_unlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kimi_cli.wiki.locking as locking_module
+
+    def always_busy(*_args: object) -> None:
+        raise OSError(errno.EAGAIN, "busy")
+
+    def unexpected_unlock(*_args: object) -> None:
+        raise AssertionError("unlock must only run after acquisition")
+
+    monkeypatch.setattr(locking_module, "_try_lock", always_busy)
+    monkeypatch.setattr(locking_module, "_unlock", unexpected_unlock)
+
+    with (
+        pytest.raises(WikiBusyError),
+        WikiLock(tmp_path / "writer.lock").exclusive(0.0),
+    ):
+        pass
+
+
+def test_unlock_error_after_acquisition_is_not_suppressed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kimi_cli.wiki.locking as locking_module
+
+    def fail_unlock(*_args: object) -> None:
+        raise OSError("unlock failed")
+
+    monkeypatch.setattr(locking_module, "_unlock", fail_unlock)
+
+    with (
+        pytest.raises(OSError, match="unlock failed"),
+        WikiLock(tmp_path / "writer.lock").exclusive(1.0),
+    ):
+        pass
