@@ -25,17 +25,23 @@ _SENSITIVE_URL_PARAMETERS = frozenset(
         "apikey",
         "auth",
         "authorization",
+        "authtoken",
+        "clientsecret",
         "credential",
         "credentials",
         "cookie",
         "cookies",
         "key",
         "password",
+        "idtoken",
+        "refreshtoken",
         "secret",
         "session",
         "sessionid",
         "signature",
+        "sig",
         "token",
+        "userpassword",
     }
 )
 
@@ -77,9 +83,23 @@ def _is_sensitive_query_name(value: str) -> bool:
     normalized = _normalized_query_name(value)
     if normalized in _SENSITIVE_URL_PARAMETERS:
         return True
-    if normalized.startswith(("apikey", "accesstoken", "credential", "cookie", "session", "token")):
+    if normalized.startswith(
+        (
+            "apikey",
+            "accesstoken",
+            "authtoken",
+            "clientsecret",
+            "credential",
+            "cookie",
+            "idtoken",
+            "refreshtoken",
+            "session",
+            "token",
+            "userpassword",
+        )
+    ):
         return True
-    return normalized.startswith("xamz") and any(
+    return normalized.startswith(("xamz", "xgoog")) and any(
         marker in normalized for marker in ("credential", "signature", "securitytoken")
     )
 
@@ -119,8 +139,14 @@ class SourceRef(BaseModel):
                 raise ValueError("web sources require only url")
             if self.url.username is not None or self.url.password is not None:
                 raise ValueError("web source URLs cannot contain credentials")
-            query_names = parse_qsl(urlsplit(str(self.url)).query, keep_blank_values=True)
-            if any(_is_sensitive_query_name(name) for name, _ in query_names):
+            parts = urlsplit(str(self.url))
+            components = (parts.query, parts.fragment)
+            parameter_names = [
+                name
+                for component in components
+                for name, _ in parse_qsl(component, keep_blank_values=True)
+            ]
+            if any(_is_sensitive_query_name(name) for name in parameter_names):
                 raise ValueError("web source URLs cannot contain secret query parameters")
         return self
 

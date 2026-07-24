@@ -59,6 +59,8 @@ def test_content_hash_is_sha256_prefixed_and_deterministic() -> None:
         VALID_PAGE.replace("使用", r"记录在 C:\Users\person\wiki.md。"),
         VALID_PAGE.replace("使用", r"记录在 \\server\share\wiki.md。"),
         VALID_PAGE.replace("使用", "记录在 //server/share/wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 file:///tmp/wiki.md。"),
+        VALID_PAGE.replace("使用", "记录在 file://server/share/wiki.md。"),
     ],
 )
 def test_page_rejects_malformed_or_unsafe_content(text: str) -> None:
@@ -75,10 +77,17 @@ def test_page_rejects_absolute_or_sensitive_provenance() -> None:
             parse_page(text, "concepts/atomic-writes.md")
 
 
-def test_page_allows_normal_https_url_in_markdown_body() -> None:
-    text = VALID_PAGE.replace(
-        "使用", "参考 [公开资料](https://example.test/docs/wiki?topic=api_key)，并"
-    )
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "参考 ./docs/intro，并",
+        "参考 [文档](/docs/intro)，并",
+        "请求 /api/v1/items，并",
+        "参考 [公开资料](https://example.test/docs/wiki?topic=api_key)，并",
+    ],
+)
+def test_page_allows_relative_root_relative_and_https_markdown(replacement: str) -> None:
+    text = VALID_PAGE.replace("使用", replacement)
 
     assert parse_page(text, "concepts/atomic-writes.md").title == "原子写入"
 
@@ -93,26 +102,46 @@ def test_web_source_rejects_credential_bearing_url() -> None:
 
 
 @pytest.mark.parametrize(
-    "query_name",
+    ("component", "parameter_name"),
     [
-        "apiKey",
-        "api%4bey",
-        "credential",
-        "cookie",
-        "sessionid",
-        "X-Amz-Signature",
-        "authorization",
-        "token",
-        "password",
+        ("query", "apiKey"),
+        ("query", "api%4bey"),
+        ("query", "credential"),
+        ("query", "cookie"),
+        ("query", "sessionid"),
+        ("query", "X-Amz-Signature"),
+        ("query", "authorization"),
+        ("query", "token"),
+        ("query", "password"),
+        ("fragment", "client_secret"),
+        ("fragment", "refresh_token"),
+        ("fragment", "id%5ftoken"),
+        ("fragment", "auth-token"),
+        ("fragment", "user_password"),
+        ("fragment", "x-goog-signature"),
+        ("fragment", "sig"),
     ],
 )
-def test_web_source_rejects_normalized_secret_query_parameter(query_name: str) -> None:
+def test_web_source_rejects_normalized_secret_url_component(
+    component: str, parameter_name: str
+) -> None:
+    separator = "?" if component == "query" else "#"
     with pytest.raises(ValidationError):
         SourceRef(
             kind="web",
-            url=f"https://example.test/source?{query_name}=secret-value",
+            url=f"https://example.test/source{separator}{parameter_name}=secret-value",
             content_hash="sha256:" + "a" * 64,
         )
+
+
+def test_web_source_allows_normal_query_and_fragment_names() -> None:
+    source = SourceRef(
+        kind="web",
+        url="https://example.test/source?topic=wiki#section=overview",
+        content_hash="sha256:" + "a" * 64,
+    )
+
+    assert str(source.url) == "https://example.test/source?topic=wiki#section=overview"
 
 
 def test_direct_page_model_rejects_unsafe_logical_path() -> None:
