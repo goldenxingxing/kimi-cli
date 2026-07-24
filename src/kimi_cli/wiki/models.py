@@ -64,7 +64,7 @@ class UnsafeWikiPage(ValueError):
     """Raised when Wiki content cannot be stored safely."""
 
 
-def _relative_source_path(value: str) -> str:
+def validate_relative_source_path(value: str) -> str:
     """Validate portable provenance without allowing host-specific paths."""
     path = PurePosixPath(value)
     windows_path = PureWindowsPath(value)
@@ -136,7 +136,7 @@ class SourceRef(BaseModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str | None) -> str | None:
-        return _relative_source_path(value) if value is not None else None
+        return validate_relative_source_path(value) if value is not None else None
 
     @model_validator(mode="after")
     def require_kind_specific_provenance(self) -> SourceRef:
@@ -172,7 +172,7 @@ class CurrentSource(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def validate_relative_path(cls, value: str | None) -> str | None:
-        return _relative_source_path(value) if value is not None else None
+        return validate_relative_source_path(value) if value is not None else None
 
     @model_validator(mode="after")
     def require_current_source_content(self) -> CurrentSource:
