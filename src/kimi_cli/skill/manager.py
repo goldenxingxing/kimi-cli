@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict, cast
@@ -64,6 +65,56 @@ class SkillManager:
         self.builtin_dir = (builtin_dir or get_builtin_skills_dir()).resolve()
         self.writable_dir = (writable_dir or get_managed_skill_dir()).resolve()
         self.state_file = self.writable_dir.parent / "skill-state.json"
+
+    @contextmanager
+    def _mutation_lock(self, name: str):
+        """Cross-process lock for one logical skill or the shared state."""
+        lock_dir = self.writable_dir.parent / ".skill-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / f"{normalize_managed_skill_name(name)}.lock"
+        with lock_path.open("a+b") as lock_file:
+            if os.name == "nt":
+                import msvcrt
+
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _replace_directory(staged: Path, destination: Path) -> None:
+        """Swap a directory with rollback if the second rename fails."""
+        backup = destination.with_name(f".{destination.name}.backup")
+        if backup.exists() and not destination.exists():
+            os.replace(backup, destination)
+        if backup.exists():
+            shutil.rmtree(backup)
+        had_destination = destination.exists()
+        if had_destination:
+            os.replace(destination, backup)
+        try:
+            os.replace(staged, destination)
+        except BaseException:
+            if had_destination and backup.exists():
+                os.replace(backup, destination)
+            raise
+        else:
+            if backup.exists():
+                shutil.rmtree(backup)
 
     def _load_state(self) -> SkillState:
         if not self.state_file.is_file():
@@ -212,69 +263,80 @@ class SkillManager:
     ) -> None:
         key = normalize_managed_skill_name(name)
         self.get(name)
-        state = self._load_state()
-        values: set[str] = set(state[field])
-        if present:
-            values.add(key)
-        else:
-            values.discard(key)
-        state[field] = sorted(values)
-        self._save_state(state)
+        with self._mutation_lock("state"):
+            state = self._load_state()
+            values: set[str] = set(state[field])
+            if present:
+                values.add(key)
+            else:
+                values.discard(key)
+            state[field] = sorted(values)
+            self._save_state(state)
 
     def disable(self, name: str) -> None:
         self._change_set("disabled", name, True)
 
     def enable(self, name: str) -> None:
         key = normalize_managed_skill_name(name)
-        state = self._load_state()
-        state["disabled"] = sorted(set(state["disabled"]) - {key})
-        state["deleted"] = sorted(set(state["deleted"]) - {key})
-        self._save_state(state)
+        with self._mutation_lock("state"):
+            state = self._load_state()
+            state["disabled"] = sorted(set(state["disabled"]) - {key})
+            state["deleted"] = sorted(set(state["deleted"]) - {key})
+            self._save_state(state)
 
     def delete(self, name: str) -> None:
         key = normalize_managed_skill_name(name)
         skill = self.get(name)
-        writable = self._directories(self.writable_dir).get(key)
-        if writable:
-            shutil.rmtree(writable)
-        state = self._load_state()
-        if skill.origin == "builtin":
-            state["deleted"] = sorted(set(state["deleted"]) | {key})
-        state["disabled"] = sorted(set(state["disabled"]) - {key})
-        self._save_state(state)
+        with self._mutation_lock(key):
+            writable = self._directories(self.writable_dir).get(key)
+            if writable:
+                shutil.rmtree(writable)
+        with self._mutation_lock("state"):
+            state = self._load_state()
+            if skill.origin == "builtin":
+                state["deleted"] = sorted(set(state["deleted"]) | {key})
+            state["disabled"] = sorted(set(state["disabled"]) - {key})
+            self._save_state(state)
 
     def restore(self, name: str) -> None:
         key = normalize_managed_skill_name(name)
         if key not in self._directories(self.builtin_dir):
             raise ValueError("Only built-in skills can be restored")
-        writable = self._directories(self.writable_dir).get(key)
-        if writable:
-            shutil.rmtree(writable)
-        state = self._load_state()
-        state["disabled"] = sorted(set(state["disabled"]) - {key})
-        state["deleted"] = sorted(set(state["deleted"]) - {key})
-        self._save_state(state)
+        with self._mutation_lock(key):
+            writable = self._directories(self.writable_dir).get(key)
+            if writable:
+                shutil.rmtree(writable)
+        with self._mutation_lock("state"):
+            state = self._load_state()
+            state["disabled"] = sorted(set(state["disabled"]) - {key})
+            state["deleted"] = sorted(set(state["deleted"]) - {key})
+            self._save_state(state)
 
     def write_skill_md(self, name: str, content: str) -> ManagedSkill:
         key = normalize_managed_skill_name(name)
+        frontmatter = parse_frontmatter(content) or {}
+        edited_name = frontmatter.get("name")
+        if edited_name is not None and (
+            not isinstance(edited_name, str)
+            or normalize_managed_skill_name(edited_name) != key
+        ):
+            raise ValueError("Editing SKILL.md cannot change the skill name")
         builtins = self._directories(self.builtin_dir)
         writable = self._directories(self.writable_dir)
         source = writable.get(key) or builtins.get(key)
         if source is None:
             raise KeyError(name)
-        self.writable_dir.mkdir(parents=True, exist_ok=True)
-        destination = self.writable_dir / source.name
-        temp = Path(tempfile.mkdtemp(prefix=".skill-edit-", dir=self.writable_dir))
-        try:
-            shutil.copytree(source, temp / source.name)
-            edited = temp / source.name
-            (edited / "SKILL.md").write_text(content, encoding="utf-8")
-            parse_frontmatter(content)
-            if destination.exists():
-                shutil.rmtree(destination)
-            os.replace(edited, destination)
-        finally:
-            shutil.rmtree(temp, ignore_errors=True)
+        with self._mutation_lock(key):
+            self.writable_dir.mkdir(parents=True, exist_ok=True)
+            destination = self.writable_dir / source.name
+            temp = Path(tempfile.mkdtemp(prefix=".skill-edit-", dir=self.writable_dir))
+            try:
+                shutil.copytree(source, temp / source.name)
+                edited = temp / source.name
+                (edited / "SKILL.md").write_text(content, encoding="utf-8")
+                self._replace_directory(edited, destination)
+            finally:
+                shutil.rmtree(temp, ignore_errors=True)
         self.enable(name)
         return self.get(name)
 
@@ -286,15 +348,17 @@ class SkillManager:
         try:
             prepared = extract_skill_archive(data, temp)
             key = normalize_managed_skill_name(prepared.name)
-            existing = {**self._directories(self.builtin_dir), **self._directories(self.writable_dir)}
-            if key in existing and not replace:
-                raise FileExistsError(prepared.name)
-            destination = self.writable_dir / prepared.name
-            staged = temp / ".staged"
-            shutil.copytree(prepared.directory, staged)
-            if destination.exists():
-                shutil.rmtree(destination)
-            os.replace(staged, destination)
+            with self._mutation_lock(key):
+                existing = {
+                    **self._directories(self.builtin_dir),
+                    **self._directories(self.writable_dir),
+                }
+                if key in existing and not replace:
+                    raise FileExistsError(prepared.name)
+                destination = self.writable_dir / prepared.name
+                staged = temp / ".staged"
+                shutil.copytree(prepared.directory, staged)
+                self._replace_directory(staged, destination)
         finally:
             shutil.rmtree(temp, ignore_errors=True)
         self.enable(prepared.name)
@@ -310,17 +374,16 @@ class SkillManager:
         existing = {**self._directories(self.builtin_dir), **self._directories(self.writable_dir)}
         if key in existing and not replace:
             raise FileExistsError(name)
-        self.writable_dir.mkdir(parents=True, exist_ok=True)
-        temp = Path(tempfile.mkdtemp(prefix=".skill-markdown-", dir=self.writable_dir))
-        destination = self.writable_dir / name
-        try:
-            staged = temp / name
-            staged.mkdir()
-            (staged / "SKILL.md").write_text(content, encoding="utf-8")
-            if destination.exists():
-                shutil.rmtree(destination)
-            os.replace(staged, destination)
-        finally:
-            shutil.rmtree(temp, ignore_errors=True)
+        with self._mutation_lock(key):
+            self.writable_dir.mkdir(parents=True, exist_ok=True)
+            temp = Path(tempfile.mkdtemp(prefix=".skill-markdown-", dir=self.writable_dir))
+            destination = self.writable_dir / name
+            try:
+                staged = temp / name
+                staged.mkdir()
+                (staged / "SKILL.md").write_text(content, encoding="utf-8")
+                self._replace_directory(staged, destination)
+            finally:
+                shutil.rmtree(temp, ignore_errors=True)
         self.enable(name)
         return self.get(name)

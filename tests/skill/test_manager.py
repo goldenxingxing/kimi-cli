@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import pytest
 
 from kimi_cli.skill.manager import SkillManager
 
@@ -67,3 +69,54 @@ def test_deleted_builtin_can_be_restored(tmp_path: Path) -> None:
     manager.restore("factory")
     assert manager.get("factory").deleted is False
     assert manager.get("factory").enabled is True
+
+
+def test_edit_rejects_logical_rename_without_changing_skill(tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    _skill(builtin, "factory")
+    manager = SkillManager(builtin, writable)
+
+    try:
+        manager.write_skill_md(
+            "factory",
+            "---\nname: renamed\ndescription: Renamed\n---\n",
+        )
+    except ValueError as error:
+        assert "name" in str(error)
+    else:
+        raise AssertionError("logical rename should be rejected")
+
+    assert not (writable / "factory").exists()
+    assert manager.get("factory").description == "description"
+
+
+def test_failed_replacement_restores_previous_skill(
+    monkeypatch, tmp_path: Path
+) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    writable.mkdir()
+    _skill(writable, "custom", "old")
+    manager = SkillManager(builtin, writable)
+    real_replace = os.replace
+    calls = 0
+
+    def fail_staged_swap(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated swap failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("kimi_cli.skill.manager.os.replace", fail_staged_swap)
+
+    with pytest.raises(OSError, match="simulated"):
+        manager.write_skill_md(
+            "custom",
+            "---\nname: custom\ndescription: new\n---\n",
+        )
+
+    assert manager.get("custom").description == "old"

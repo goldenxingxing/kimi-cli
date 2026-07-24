@@ -43,3 +43,28 @@ def test_enforces_expanded_size_limit(tmp_path: Path) -> None:
             tmp_path,
             ArchiveLimits(max_expanded_bytes=32),
         )
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        [
+            ("demo/SKILL.md", "---\nname: demo\n---\n"),
+            ("demo/SKILL.md", "---\nname: other\n---\n"),
+        ],
+        [
+            ("demo/SKILL.md", "---\nname: demo\n---\n"),
+            ("demo/skill.md", "collision"),
+        ],
+    ],
+)
+def test_rejects_normalized_target_collisions(
+    tmp_path: Path, files: list[tuple[str, str]]
+) -> None:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        for name, content in files:
+            archive.writestr(name, content)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        extract_skill_archive(stream.getvalue(), tmp_path)

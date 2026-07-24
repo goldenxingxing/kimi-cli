@@ -148,7 +148,8 @@ class Session:
             session_id = str(uuid.uuid4())
         session_dir = work_dir_meta.sessions_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
-        work_dir_meta.output_dir
+        if output_dir := work_dir_meta.output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         if _context_file is None:
             context_file = session_dir / "context.jsonl"
@@ -242,6 +243,7 @@ class Session:
         session_ids = {
             path.name if path.is_dir() else path.stem
             for sessions_dir in work_dir_meta.readable_sessions_dirs
+            if sessions_dir.is_dir()
             for path in sessions_dir.iterdir()
             if path.is_dir() or path.suffix == ".jsonl"
         }
