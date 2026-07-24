@@ -142,6 +142,7 @@ class Session:
         work_dir_meta = metadata.get_work_dir_meta(work_dir)
         if work_dir_meta is None:
             work_dir_meta = metadata.new_work_dir_meta(work_dir)
+        metadata.last_work_dir = str(work_dir)
 
         if session_id is None:
             session_id = str(uuid.uuid4())

@@ -70,6 +70,8 @@ class Metadata(BaseModel):
 
     work_dirs: list[WorkDirMeta] = Field(default_factory=list[WorkDirMeta])
     """Work directory list."""
+    last_work_dir: str | None = None
+    """Most recently selected local work directory."""
 
     def get_work_dir_meta(self, path: KaosPath) -> WorkDirMeta | None:
         """Get the metadata for a work directory."""
