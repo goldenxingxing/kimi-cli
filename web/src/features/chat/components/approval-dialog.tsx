@@ -22,9 +22,18 @@ type WikiApprovalDisplay = {
   type: "wiki";
   summary: string;
   pages: string[];
+  sources: string[];
+  duplicate_pages: string[];
+  conflict_pages: string[];
   workspace_id: string | null;
   session_id: string;
   details: string[];
+  omitted: {
+    pages: number;
+    sources: number;
+    duplicates: number;
+    conflicts: number;
+  };
 };
 
 function asWikiApprovalDisplay(
@@ -43,7 +52,40 @@ function asWikiApprovalDisplay(
       Array.isArray(candidate.details) &&
       candidate.details.every((detail) => typeof detail === "string")
     ) {
-      return candidate as WikiApprovalDisplay;
+      const stringList = (items: unknown): string[] =>
+        Array.isArray(items) &&
+        items.every((entry) => typeof entry === "string")
+          ? items
+          : [];
+      const omitted =
+        candidate.omitted && typeof candidate.omitted === "object"
+          ? candidate.omitted
+          : {};
+      const omittedCount = (key: keyof WikiApprovalDisplay["omitted"]) => {
+        const value = (omitted as Record<string, unknown>)[key];
+        return typeof value === "number" && value >= 0 ? value : 0;
+      };
+      return {
+        type: "wiki",
+        summary: candidate.summary,
+        pages: candidate.pages,
+        sources: stringList(candidate.sources),
+        duplicate_pages: stringList(candidate.duplicate_pages),
+        conflict_pages: stringList(candidate.conflict_pages),
+        workspace_id:
+          typeof candidate.workspace_id === "string"
+            ? candidate.workspace_id
+            : null,
+        session_id:
+          typeof candidate.session_id === "string" ? candidate.session_id : "",
+        details: candidate.details,
+        omitted: {
+          pages: omittedCount("pages"),
+          sources: omittedCount("sources"),
+          duplicates: omittedCount("duplicates"),
+          conflicts: omittedCount("conflicts"),
+        },
+      };
     }
   }
   return null;
@@ -260,6 +302,10 @@ export function ApprovalDialog({
                 <div>
                   <div className="font-medium">
                     {t("chat:wikiApproval.paths")}
+                    {wikiApproval.omitted.pages > 0 &&
+                      ` · ${t("chat:wikiApproval.omitted", {
+                        count: wikiApproval.omitted.pages,
+                      })}`}
                   </div>
                   <ul className="mt-1 list-disc pl-4 font-mono">
                     {wikiApproval.pages.map((page) => (
@@ -267,6 +313,57 @@ export function ApprovalDialog({
                     ))}
                   </ul>
                 </div>
+                {(wikiApproval.sources.length > 0 ||
+                  wikiApproval.omitted.sources > 0) && (
+                  <div>
+                    <div className="font-medium">
+                      {t("chat:wikiApproval.sources")}
+                      {wikiApproval.omitted.sources > 0 &&
+                        ` · ${t("chat:wikiApproval.omitted", {
+                          count: wikiApproval.omitted.sources,
+                        })}`}
+                    </div>
+                    <ul className="mt-1 list-disc pl-4 font-mono">
+                      {wikiApproval.sources.map((source) => (
+                        <li key={source}>{source}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {(wikiApproval.duplicate_pages.length > 0 ||
+                  wikiApproval.omitted.duplicates > 0) && (
+                  <div>
+                    <div className="font-medium">
+                      {t("chat:wikiApproval.duplicates")}
+                      {wikiApproval.omitted.duplicates > 0 &&
+                        ` · ${t("chat:wikiApproval.omitted", {
+                          count: wikiApproval.omitted.duplicates,
+                        })}`}
+                    </div>
+                    <ul className="mt-1 list-disc pl-4 font-mono">
+                      {wikiApproval.duplicate_pages.map((page) => (
+                        <li key={page}>{page}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {(wikiApproval.conflict_pages.length > 0 ||
+                  wikiApproval.omitted.conflicts > 0) && (
+                  <div>
+                    <div className="font-medium">
+                      {t("chat:wikiApproval.conflicts")}
+                      {wikiApproval.omitted.conflicts > 0 &&
+                        ` · ${t("chat:wikiApproval.omitted", {
+                          count: wikiApproval.omitted.conflicts,
+                        })}`}
+                    </div>
+                    <ul className="mt-1 list-disc pl-4 font-mono">
+                      {wikiApproval.conflict_pages.map((page) => (
+                        <li key={page}>{page}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {wikiApproval.details.length > 0 && (
                   <ul className="list-disc space-y-1 pl-4">
                     {wikiApproval.details.map((detail) => (

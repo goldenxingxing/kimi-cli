@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Literal, cast, override
@@ -21,6 +22,21 @@ from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
 from kimi_cli.wiki.value_gate import DiscardedCandidate, WikiContext
 
 _ARCHIVE_SUFFIXES = frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip"})
+_EXPLICIT_REMEMBER_INTENT = re.compile(
+    r"(?is)(?:"
+    r"\bremember\s+(?:this|that|the\s+following)\b|"
+    r"\b(?:record|save|store|add)\b.{0,48}\b(?:wiki|memory|knowledge)\b|"
+    r"\b(?:wiki|memory|knowledge)\b.{0,48}\b(?:record|save|store|add)\b|"
+    r"(?:记住|记录|保存|写入|添加).{0,32}(?:wiki|知识库|记忆|这(?:个|些)?|此)|"
+    r"(?:wiki|知识库|记忆).{0,32}(?:记录|保存|写入|添加)"
+    r")"
+)
+_EXPLICIT_REMEMBER_NEGATION = re.compile(
+    r"(?is)(?:"
+    r"\b(?:do\s+not|don't|never)\b.{0,16}\b(?:remember|record|save|store|add)\b|"
+    r"(?:不要|别|无需|不必).{0,8}(?:记住|记录|保存|写入|添加)"
+    r")"
+)
 
 
 class Params(BaseModel):
@@ -62,6 +78,7 @@ class WikiToolContext:
     stable: bool
     user_confirmed: bool
     reliable_source: bool
+    explicit_remember_intent: bool = False
 
 
 _current_wiki_turn_context = ContextVar[WikiToolContext | None](
@@ -86,6 +103,7 @@ def set_wiki_turn_context(
     if not trusted_user_input or not isinstance(base, WikiToolContext):
         return _current_wiki_turn_context.set(None)
     normalized = user_text.strip()
+    explicit_remember_intent = _has_explicit_remember_intent(normalized)
     hashes = set(base.conversation_hashes)
     if user_text:
         hashes.add(content_hash(user_text.encode("utf-8")))
@@ -96,10 +114,11 @@ def set_wiki_turn_context(
             provenance_session_id=base.provenance_session_id,
             conversation_hashes=frozenset(hashes),
             allowed_workspace_ids=base.allowed_workspace_ids,
-            candidate_high_value=True,
-            stable=True,
-            user_confirmed=bool(normalized),
+            candidate_high_value=base.candidate_high_value,
+            stable=base.stable,
+            user_confirmed=base.user_confirmed or explicit_remember_intent,
             reliable_source=base.reliable_source,
+            explicit_remember_intent=(base.explicit_remember_intent or explicit_remember_intent),
         )
     )
 
@@ -115,6 +134,7 @@ def extend_wiki_turn_context(user_text: str) -> None:
         return
     hashes = set(active.conversation_hashes)
     normalized = user_text.strip()
+    explicit_remember_intent = _has_explicit_remember_intent(normalized)
     if user_text:
         hashes.add(content_hash(user_text.encode("utf-8")))
     if normalized:
@@ -123,7 +143,8 @@ def extend_wiki_turn_context(user_text: str) -> None:
         replace(
             active,
             conversation_hashes=frozenset(hashes),
-            user_confirmed=active.user_confirmed or bool(normalized),
+            user_confirmed=active.user_confirmed or explicit_remember_intent,
+            explicit_remember_intent=(active.explicit_remember_intent or explicit_remember_intent),
         )
     )
 
@@ -316,6 +337,7 @@ class Wiki(CallableTool2[Params]):
                         session_id=str(trusted.provenance_session_id),
                     )
                 ],
+                request_policy="session_only",
             )
             if not result:
                 return result.rejection_error()
@@ -345,11 +367,6 @@ class Wiki(CallableTool2[Params]):
                 ),
                 brief="Wiki context unavailable",
             )
-        if not trusted.candidate_high_value or not trusted.stable:
-            return ToolError(
-                message="Wiki candidate lacks trusted high-value or stability evidence.",
-                brief="Wiki candidate discarded",
-            )
         if (
             source is not None
             and source.kind == "workspace-file"
@@ -364,10 +381,20 @@ class Wiki(CallableTool2[Params]):
                 message="Wiki candidate is not grounded in this session's trusted sources.",
                 brief="Wiki candidate discarded",
             )
+        source_evidence = _has_independent_source_evidence(candidate, trusted)
+        cross_turn_utility = (
+            trusted.candidate_high_value or trusted.explicit_remember_intent or source_evidence
+        )
+        stable = trusted.stable or trusted.explicit_remember_intent or source_evidence
+        if not cross_turn_utility or not stable:
+            return ToolError(
+                message="Wiki candidate lacks trusted high-value or stability evidence.",
+                brief="Wiki candidate discarded",
+            )
         return WikiContext(
             session_id=trusted.provenance_session_id,
-            cross_turn_utility=trusted.candidate_high_value,
-            stable=trusted.stable,
+            cross_turn_utility=cross_turn_utility,
+            stable=stable,
             user_confirmed=trusted.user_confirmed,
             reliable_source=trusted.reliable_source,
             operation=operation,
@@ -387,6 +414,15 @@ def _is_archive_source(source: CurrentSource) -> bool:
     if source.kind != "workspace-file" or source.relative_path is None:
         return False
     return any(source.relative_path.casefold().endswith(suffix) for suffix in _ARCHIVE_SUFFIXES)
+
+
+def _has_explicit_remember_intent(user_text: str) -> bool:
+    """Recognize a narrow user-authored request to persist durable knowledge."""
+    return bool(
+        user_text
+        and not _EXPLICIT_REMEMBER_NEGATION.search(user_text)
+        and _EXPLICIT_REMEMBER_INTENT.search(user_text)
+    )
 
 
 def _sources_are_trusted(
@@ -418,3 +454,19 @@ def _sources_are_trusted(
         elif not context.reliable_source:
             return False
     return True
+
+
+def _has_independent_source_evidence(
+    candidate: WikiCandidate,
+    context: WikiToolContext,
+) -> bool:
+    """Derive durable-source evidence without trusting candidate value labels."""
+    sources = (
+        *candidate.sources,
+        *(source for page in candidate.pages for source in page.page.sources),
+    )
+    return bool(sources) and all(
+        (source.kind == "workspace-file" and source.workspace_id in context.allowed_workspace_ids)
+        or (source.kind == "web" and context.reliable_source)
+        for source in sources
+    )

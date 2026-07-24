@@ -33,6 +33,10 @@
     "title": "Write to global Wiki",
     "details": "Details",
     "paths": "Pages",
+    "sources": "Sources",
+    "duplicates": "Duplicates omitted",
+    "conflicts": "Conflicts preserved",
+    "omitted": "{{count}} more omitted",
     "approveOnce": "Allow once",
     "approveForSession": "Always allow this session",
     "decline": "Decline"
