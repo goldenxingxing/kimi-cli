@@ -75,6 +75,13 @@ def test_content_hash_is_sha256_prefixed_and_deterministic() -> None:
         VALID_PAGE.replace("使用", "session_token=secret-value"),
         VALID_PAGE.replace("使用", "Cookie: session=secret-value"),
         VALID_PAGE.replace("使用", "private_key: secret-value"),
+        VALID_PAGE.replace("使用", "参考 https://user:password@example.test/source。"),
+        VALID_PAGE.replace(
+            "使用", "参考 [受保护资料](https://user:password@example.test/source)。"
+        ),
+        VALID_PAGE.replace("使用", "- session_token=secret-value"),
+        VALID_PAGE.replace("使用", "- Cookie: session=secret-value"),
+        VALID_PAGE.replace("使用", "prefix api_key=secret-value"),
     ],
 )
 def test_page_rejects_malformed_or_unsafe_content(text: str) -> None:
@@ -101,6 +108,7 @@ def test_page_rejects_absolute_or_sensitive_provenance() -> None:
         "术语 file: 只是标签，并",
         "参考 https://example.test/file:/manual，并",
         "讨论 ?topic=api_key，并",
+        "讨论 api_key 这一字段，并",
     ],
 )
 def test_page_allows_relative_root_relative_and_https_markdown(replacement: str) -> None:

@@ -111,6 +111,16 @@ def has_sensitive_url_parameters(url: str) -> bool:
     )
 
 
+def has_url_credentials(url: str) -> bool:
+    """Return whether a URL has userinfo or sensitive query/fragment parameters."""
+    parts = urlsplit(url)
+    return (
+        parts.username is not None
+        or parts.password is not None
+        or has_sensitive_url_parameters(url)
+    )
+
+
 class SourceRef(BaseModel):
     """Portable provenance for information recorded in a Wiki page."""
 
@@ -144,10 +154,8 @@ class SourceRef(BaseModel):
                 value is not None for value in (self.workspace_id, self.path, self.session_id)
             ):
                 raise ValueError("web sources require only url")
-            if self.url.username is not None or self.url.password is not None:
+            if has_url_credentials(str(self.url)):
                 raise ValueError("web source URLs cannot contain credentials")
-            if has_sensitive_url_parameters(str(self.url)):
-                raise ValueError("web source URLs cannot contain secret query parameters")
         return self
 
 

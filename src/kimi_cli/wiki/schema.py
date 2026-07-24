@@ -15,7 +15,7 @@ from kimi_cli.wiki.models import (
     UnsafeWikiPage,
     UnsafeWikiPath,
     WikiPage,
-    has_sensitive_url_parameters,
+    has_url_credentials,
 )
 
 _CATEGORIES = frozenset({"entities", "concepts", "comparisons", "sources", "queries", "lint"})
@@ -27,9 +27,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})\b"),
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?im)^\s*(?:access[_-]?token|api[_-]?key|auth[_-]?token|client[_-]?secret|cookie|id[_-]?token|private[_-]?key|refresh[_-]?token|secret[_-]?key|session[_-]?token|user[_-]?password|user[_-]?token)\s*[:=]\s*\S+"
+    r"(?i)(?<![\w?&-])(?:access[_-]?token|api[_-]?key|auth[_-]?token|client[_-]?secret|cookie|id[_-]?token|private[_-]?key|refresh[_-]?token|secret[_-]?key|session[_-]?token|user[_-]?password|user[_-]?token)\s*[:=]\s*\S+"
 )
-_SECRET_HEADER_RE = re.compile(r"(?im)^\s*(?:authorization|cookie|set-cookie)\s*:\s*\S+")
+_SECRET_HEADER_RE = re.compile(r"(?i)(?<![\w?&-])(?:authorization|cookie|set-cookie)\s*:\s*\S+")
 _FILE_URI_RE = re.compile(r"(?i)(?<![\w:/-])file:(?://|[\\/])")
 _ROOT_RELATIVE_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*/(?!/)[^\s)]+\s*\)")
 _API_ENDPOINT_RE = re.compile(r"(?<![\w:/])/api(?:/[^\s\])}>,;!?]+)*")
@@ -117,8 +117,8 @@ def _validate_body(body: str) -> None:
     if _SECRET_ASSIGNMENT_RE.search(body) or _SECRET_HEADER_RE.search(body):
         raise UnsafeWikiPage("Wiki pages cannot contain credential assignments or headers")
     url_candidates = _BODY_HTTP_URL_RE.findall(body) + _MARKDOWN_URL_TARGET_RE.findall(body)
-    if any(has_sensitive_url_parameters(url) for url in url_candidates):
-        raise UnsafeWikiPage("Wiki page URLs cannot contain credential parameters")
+    if any(has_url_credentials(url) for url in url_candidates):
+        raise UnsafeWikiPage("Wiki page URLs cannot contain credentials")
     if _FILE_URI_RE.search(body):
         raise UnsafeWikiPage("Wiki pages cannot contain local file URIs")
     api_endpoints = tuple(_API_ENDPOINT_RE.finditer(body))
