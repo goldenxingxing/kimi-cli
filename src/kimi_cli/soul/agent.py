@@ -78,6 +78,8 @@ class BuiltinSystemPromptArgs:
     """The directory where the agent must save all output and intermediate files."""
     KIMI_WIKI_CONTEXT: str = ""
     """Bounded awareness of the shared global Wiki."""
+    KIMI_AGENT_NAME: str = "Kimi Code CLI"
+    """The product identity the agent presents to users (brandable via KIMI_AGENT_NAME env)."""
 
 
 _AGENTS_MD_MAX_BYTES = 32 * 1024  # 32 KiB
@@ -389,6 +391,7 @@ class Runtime:
                 KIMI_SHELL=f"{environment.shell_name} (`{environment.shell_path}`)",
                 KIMI_OUTPUT_DIR=os.environ.get("KIMI_OUTPUT_DIR", "/app/output"),
                 KIMI_WIKI_CONTEXT=wiki_context,
+                KIMI_AGENT_NAME=os.environ.get("KIMI_AGENT_NAME") or "Kimi Code CLI",
             ),
             denwa_renji=DenwaRenji(),
             approval=Approval(state=approval_state),

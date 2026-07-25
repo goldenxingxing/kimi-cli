@@ -78,6 +78,8 @@ def test_system_prompt_renders_os_and_shell(temp_work_dir, os_kind, shell, expec
         KIMI_ADDITIONAL_DIRS_INFO="",
         KIMI_OS=os_kind,
         KIMI_SHELL=shell,
+        KIMI_KNOWLEDGE_BASE="",
+        KIMI_OUTPUT_DIR="",
     )
     prompt = _load_system_prompt(
         DEFAULT_AGENT_FILE.parent / "system.md",
@@ -91,6 +93,23 @@ def test_system_prompt_renders_os_and_shell(temp_work_dir, os_kind, shell, expec
         assert _WINDOWS_SHELL_HINT in prompt
     else:
         assert _WINDOWS_SHELL_HINT not in prompt
+
+
+def test_default_prompt_identity_is_brandable(builtin_args: BuiltinSystemPromptArgs):
+    """The identity line renders from KIMI_AGENT_NAME so packagers can rebrand it."""
+    from dataclasses import replace
+
+    from kimi_cli.agentspec import DEFAULT_AGENT_FILE
+
+    system_md = DEFAULT_AGENT_FILE.parent / "system.md"
+
+    prompt = _load_system_prompt(system_md, {"ROLE_ADDITIONAL": ""}, builtin_args)
+    assert "You are Kimi Code CLI," in prompt
+
+    branded = replace(builtin_args, KIMI_AGENT_NAME="OpenKimo")
+    prompt = _load_system_prompt(system_md, {"ROLE_ADDITIONAL": ""}, branded)
+    assert "You are OpenKimo," in prompt
+    assert "Kimi Code CLI" not in prompt
 
 
 def test_load_system_prompt_allows_literal_dollar(builtin_args: BuiltinSystemPromptArgs):
