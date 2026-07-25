@@ -1,7 +1,5 @@
 """User-approved installation of a skill into OpenKimo's managed layer."""
 
-from __future__ import annotations
-
 import asyncio
 import http.client
 import json

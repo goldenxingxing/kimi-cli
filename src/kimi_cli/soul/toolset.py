@@ -733,7 +733,13 @@ class KimiToolset:
         args: list[Any] = []
         if "__init__" in tool_cls.__dict__:
             # the tool class overrides the `__init__` of base class
-            for param in inspect.signature(tool_cls).parameters.values():
+            try:
+                # eval_str resolves PEP 563 string annotations back to classes so
+                # dependency lookup works in modules using `from __future__ import annotations`
+                signature = inspect.signature(tool_cls, eval_str=True)
+            except Exception:
+                signature = inspect.signature(tool_cls)
+            for param in signature.parameters.values():
                 if param.kind == inspect.Parameter.KEYWORD_ONLY:
                     # once we encounter a keyword-only parameter, we stop injecting dependencies
                     break
@@ -744,7 +750,7 @@ class KimiToolset:
                         annotation=param.annotation,
                         tool_path=tool_path,
                     )
-                    return None
+                    raise SkipThisTool()
                 args.append(dependencies[param.annotation])
         return tool_cls(*args)
 
