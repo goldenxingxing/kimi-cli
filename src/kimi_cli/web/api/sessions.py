@@ -222,6 +222,9 @@ def _read_wire_lines(wire_file: Path) -> list[str]:
                     "method": "request" if _is_req else "event",
                     "params": message_raw,
                 }
+                ts = record.get("timestamp")
+                if isinstance(ts, (int, float)):
+                    event_msg["timestamp"] = ts
                 if _is_req:
                     # JSON-RPC requests require a top-level ``id`` so the
                     # client can correlate its response.  Use the request's

@@ -745,3 +745,57 @@ def test_read_wire_lines_request_id(tmp_path: Path):
     approval_msg = parsed[2]
     assert approval_msg["method"] == "request"
     assert approval_msg["id"] == "a-def-456"
+
+
+def test_read_wire_lines_preserves_record_timestamp(tmp_path: Path):
+    """Verify _read_wire_lines emits the wire record's top-level ``timestamp``.
+
+    Each wire.jsonl line carries a top-level ``timestamp`` next to ``message``.
+    The frontend computes a message's completion time from the JSON-RPC event's
+    top-level ``timestamp`` field, so replayed events must propagate it for both
+    event and request messages.
+    """
+    import json
+
+    from kimi_cli.web.api.sessions import _read_wire_lines
+
+    wire_file = tmp_path / "wire.jsonl"
+
+    step_begin = StepBegin(n=1)
+    question_req = QuestionRequest(
+        id="q-ts-1",
+        tool_call_id="tc-1",
+        questions=[
+            QuestionItem(
+                question="Pick one?",
+                options=[
+                    QuestionOption(label="A", description="Option A"),
+                    QuestionOption(label="B", description="Option B"),
+                ],
+            )
+        ],
+    )
+
+    event_ts = 1_721_234_567.25
+    request_ts = 1_721_234_999.5
+
+    records = []
+    for msg, ts in [(step_begin, event_ts), (question_req, request_ts)]:
+        envelope = WireMessageEnvelope.from_wire_message(msg)
+        record = {"timestamp": ts, "message": envelope.model_dump(mode="json")}
+        records.append(json.dumps(record, ensure_ascii=False))
+
+    wire_file.write_text("\n".join(records) + "\n")
+
+    lines = _read_wire_lines(wire_file)
+    assert len(lines) == 2
+
+    parsed = [json.loads(line) for line in lines]
+
+    # Event message keeps its record timestamp
+    assert parsed[0]["method"] == "event"
+    assert parsed[0]["timestamp"] == event_ts
+
+    # Request message keeps its record timestamp too
+    assert parsed[1]["method"] == "request"
+    assert parsed[1]["timestamp"] == request_ts
