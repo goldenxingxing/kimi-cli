@@ -121,8 +121,7 @@ export function GlobalConfigControls({
   const activeModel =
     config?.models.find((m) => m.name === config?.defaultModel) ??
     config?.models.find((m) => m.provider === config?.defaultModel);
-  const triggerLabel =
-    activeModel?.model ?? config?.models[0]?.model ?? config?.defaultModel;
+  const triggerLabel = activeModel?.name ?? config?.defaultModel;
 
   return (
     <div className={cn("flex items-center gap-1", className)}>
@@ -165,11 +164,11 @@ export function GlobalConfigControls({
             <ModelSelectorGroup heading={t("config:model.heading")}>
               {(config?.models ?? []).map((m) => {
                 const isSelected = m.name === config?.defaultModel;
-                const label = `${m.model} (${m.provider})`;
+                const label = `${m.name} (${m.model})`;
                 return (
                   <ModelSelectorItem
                     key={m.name}
-                    value={`${m.model} ${m.provider}`}
+                    value={`${m.name} ${m.model} ${m.provider}`}
                     onSelect={(_value) => handleSelectModel(m.name)}
                     className="flex items-center gap-2"
                   >
@@ -179,10 +178,10 @@ export function GlobalConfigControls({
                       <span className="size-4" />
                     )}
                     <ModelSelectorName title={label}>
-                      {m.model}
+                      {m.name}
                     </ModelSelectorName>
                     <span className="shrink-0 text-xs text-muted-foreground">
-                      {m.provider}
+                      {m.model}
                     </span>
                   </ModelSelectorItem>
                 );

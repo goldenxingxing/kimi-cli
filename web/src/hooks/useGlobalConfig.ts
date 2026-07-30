@@ -29,9 +29,14 @@ export function useGlobalConfig(): UseGlobalConfigReturn {
   const [error, setError] = useState<string | null>(null);
 
   const isInitializedRef = useRef(false);
+  const lastRefreshAtRef = useRef(0);
 
-  const refresh = useCallback(async () => {
-    setIsLoading(true);
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+    const quiet = options?.quiet ?? false;
+    lastRefreshAtRef.current = Date.now();
+    if (!quiet) {
+      setIsLoading(true);
+    }
     setError(null);
     try {
       const nextConfig = await apiClient.config.getGlobalConfigApiConfigGet();
@@ -42,7 +47,9 @@ export function useGlobalConfig(): UseGlobalConfigReturn {
       setError(message);
       console.error("[useGlobalConfig] Failed to load global config:", err);
     } finally {
-      setIsLoading(false);
+      if (!quiet) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -93,6 +100,30 @@ export function useGlobalConfig(): UseGlobalConfigReturn {
     };
     window.addEventListener("kimi:config-update", handler);
     return () => window.removeEventListener("kimi:config-update", handler);
+  }, [refresh]);
+
+  // Re-fetch config when the window regains focus or becomes visible again.
+  // In the desktop app, switching back from the native Settings window
+  // triggers focus; this picks up config changes made outside this page
+  // (e.g. Settings saved -> backend restarted). Throttled so bursts of
+  // focus/visibility events only trigger one request.
+  useEffect(() => {
+    const MIN_INTERVAL_MS = 2000;
+    const maybeRefresh = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      if (Date.now() - lastRefreshAtRef.current < MIN_INTERVAL_MS) {
+        return;
+      }
+      refresh({ quiet: true });
+    };
+    window.addEventListener("focus", maybeRefresh);
+    document.addEventListener("visibilitychange", maybeRefresh);
+    return () => {
+      window.removeEventListener("focus", maybeRefresh);
+      document.removeEventListener("visibilitychange", maybeRefresh);
+    };
   }, [refresh]);
 
   return {
