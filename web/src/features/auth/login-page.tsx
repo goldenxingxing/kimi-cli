@@ -58,7 +58,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           <CardHeader className="pb-2">
             <CardTitle className="text-center text-xl">Sign in</CardTitle>
             <CardDescription className="text-center">
-              Enter your credentials to access Kimi Code
+              Enter your credentials to access OpenKimo
             </CardDescription>
           </CardHeader>
 
