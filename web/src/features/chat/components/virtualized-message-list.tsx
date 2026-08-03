@@ -18,6 +18,7 @@ import type React from "react";
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -29,6 +30,7 @@ import {
   MessageOutputTime,
   shouldShowMessageOutputTime,
 } from "../message-output-time";
+import { decideFollowOutput, nextCatchUp } from "./scroll-follow-policy";
 
 export type VirtualizedMessageListProps = {
   messages: LiveMessage[];
@@ -195,23 +197,59 @@ function VirtualizedMessageListComponent(
   // followOutput for the incoming items (a useEffect would run after
   // Virtuoso's own effects — too late).
   if (prevItemCountRef.current === 0 && listItems.length > 0) {
-    catchUpRef.current = true;
+    catchUpRef.current = nextCatchUp(catchUpRef.current, {
+      type: "list-rebuilt",
+    });
   }
   prevItemCountRef.current = listItems.length;
 
   const handleAtBottomChange = useCallback(
     (atBottom: boolean) => {
-      // Catch-up complete once the viewport actually reaches the bottom;
-      // afterwards the normal gap rule decides whether to follow.
-      if (atBottom) catchUpRef.current = false;
+      // Deliberately does not end catch-up. Early in a replay only a few
+      // messages exist, so the viewport reaches the bottom trivially; ending
+      // catch-up there strands the reader at the top once the rest of the
+      // history arrives. Only the reader's own scrolling ends it — see
+      // nextCatchUp() and its tests.
       onAtBottomChange?.(atBottom);
     },
     [onAtBottomChange],
   );
 
+  // Catch-up ends when the reader moves the viewport themselves. Wheel, touch,
+  // and key events are the intent signals; programmatic scrolling (ours) is
+  // not, which is why this listens for input rather than for scroll events.
+  const detachReaderIntentRef = useRef<(() => void) | null>(null);
   const handleScrollerRef = useCallback(
     (ref: HTMLElement | Window | null) => {
-      scrollerRef.current = ref instanceof HTMLElement ? ref : null;
+      detachReaderIntentRef.current?.();
+      detachReaderIntentRef.current = null;
+
+      const element = ref instanceof HTMLElement ? ref : null;
+      scrollerRef.current = element;
+      if (!element) return;
+
+      const takeControl = () => {
+        catchUpRef.current = nextCatchUp(catchUpRef.current, {
+          type: "reader-took-control",
+        });
+      };
+      const options = { passive: true } as const;
+      element.addEventListener("wheel", takeControl, options);
+      element.addEventListener("touchmove", takeControl, options);
+      element.addEventListener("keydown", takeControl, options);
+      detachReaderIntentRef.current = () => {
+        element.removeEventListener("wheel", takeControl);
+        element.removeEventListener("touchmove", takeControl);
+        element.removeEventListener("keydown", takeControl);
+      };
+    },
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      detachReaderIntentRef.current?.();
+      detachReaderIntentRef.current = null;
     },
     [],
   );
@@ -222,21 +260,15 @@ function VirtualizedMessageListComponent(
   // default tight threshold for the scroll-to-bottom button.
   const handleFollowOutput = useCallback(
     (isAtBottom: boolean) => {
-      // During history replay the list is rebuilt from empty and hundreds
-      // of messages stream in within a few frames.  The scroll gap easily
-      // exceeds the 1500px tolerance below, which would permanently pin
-      // the viewport to the top — always stick to the bottom instead.
-      // catchUpRef covers the same window even if isReplayingHistory was
-      // cleared early by a session_status event arriving mid-replay.
-      if (isReplayingHistory || catchUpRef.current) return "auto" as const;
-      if (isAtBottom) return "auto" as const;
       const scroller = scrollerRef.current;
-      if (scroller) {
-        const gap =
-          scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-        if (gap <= 1500) return "auto" as const;
-      }
-      return false;
+      return decideFollowOutput({
+        isAtBottom,
+        isReplayingHistory,
+        isCatchingUp: catchUpRef.current,
+        gapToBottom: scroller
+          ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+          : null,
+      });
     },
     [isReplayingHistory],
   );
