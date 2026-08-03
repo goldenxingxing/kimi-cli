@@ -295,6 +295,7 @@ def _runtime_with_provider(runtime: Runtime, provider, *, oauth: bool = False) -
         additional_dirs=runtime.additional_dirs,
         skills_dirs=runtime.skills_dirs,
         role=runtime.role,
+        user_memory_dir=runtime.user_memory_dir,
     )
 
 

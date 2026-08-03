@@ -54,6 +54,7 @@ def _runtime_with_llm(runtime: Runtime, llm: LLM) -> Runtime:
         oauth=runtime.oauth,
         additional_dirs=runtime.additional_dirs,
         skills_dirs=runtime.skills_dirs,
+        user_memory_dir=runtime.user_memory_dir,
     )
 
 

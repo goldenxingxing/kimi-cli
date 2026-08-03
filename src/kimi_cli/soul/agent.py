@@ -504,13 +504,26 @@ class Runtime:
         return copy
 
     async def close(self) -> None:
-        """Close root-owned Wiki resources once; subagents only borrow them."""
+        """Close root-owned Wiki resources once; subagents only borrow them.
+
+        Shutdown never resolves a pending checkpoint by calling the model or
+        writing a page — it only invalidates outstanding authority. The
+        coordinator closes first so no grant can outlive the manager, and a
+        failure in either step still lets the other run.
+        """
         if self.role != "root":
             return
         if self.wiki_coordinator is not None:
-            await self.wiki_coordinator.close()
+            try:
+                await self.wiki_coordinator.close()
+            except Exception:
+                logger.warning("Wiki coordinator shutdown failed; closing the manager anyway")
         if self.wiki is not None:
-            await asyncio.to_thread(self.wiki.close)
+            manager, self.wiki = self.wiki, None
+            try:
+                await asyncio.to_thread(manager.close)
+            except Exception:
+                logger.warning("Wiki manager shutdown failed")
 
 
 async def _initialize_global_wiki(

@@ -93,6 +93,7 @@ def _runtime_with_llm(runtime: Runtime, llm: LLM) -> Runtime:
         additional_dirs=runtime.additional_dirs,
         skills_dirs=runtime.skills_dirs,
         role=runtime.role,
+        user_memory_dir=runtime.user_memory_dir,
     )
 
 
