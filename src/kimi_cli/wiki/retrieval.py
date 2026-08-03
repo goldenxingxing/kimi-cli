@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from kimi_cli.wiki.telemetry import track_wiki_event
 from kimi_cli.wiki.value_gate import contains_sensitive_text
 
 if TYPE_CHECKING:
@@ -60,11 +61,13 @@ async def retrieve_for_turn(
     # bounded query must never be hidden by normalization or UTF-8 truncation.
     if contains_sensitive_text(raw_text):
         await _record_outcome(coordinator, "sensitive")
+        track_wiki_event("wiki_retrieval_skipped", reason="sensitive")
         return None
     query = build_retrieval_query(raw_text)
     skip_reason = _skip_reason(query, synthetic=synthetic, slash_command=slash_command)
     if skip_reason is not None:
         await _record_outcome(coordinator, skip_reason)
+        track_wiki_event("wiki_retrieval_skipped", reason=skip_reason)
         return None
 
     try:
@@ -72,24 +75,34 @@ async def retrieve_for_turn(
         bounded_results = tuple(results[:RETRIEVAL_MAX_RESULTS])
         if not bounded_results:
             await _record_outcome(coordinator, "empty")
+            track_wiki_event("wiki_retrieval_miss", reason="empty")
             return None
         block = _render_retrieval_block(bounded_results)
         if not block:
             await _record_outcome(coordinator, "empty")
+            track_wiki_event("wiki_retrieval_miss", reason="empty")
             return None
         refs = tuple(
             (result.logical_path, result.revision, result.content_hash)
             for result in bounded_results
         )
         await _record_outcome(coordinator, "success", result_refs=refs)
-        return WikiRetrievalResult(
+        result = WikiRetrievalResult(
             block=block,
             result_count=len(bounded_results),
             injected_bytes=len(block.encode("utf-8")),
             revision=max(result.revision for result in bounded_results),
         )
-    except Exception:
+        track_wiki_event(
+            "wiki_retrieval_hit",
+            result_count=result.result_count,
+            injected_bytes=result.injected_bytes,
+            revision=result.revision,
+        )
+        return result
+    except Exception as exc:
         await _record_outcome(coordinator, "failed")
+        track_wiki_event("wiki_trigger_failed", stage="retrieval", error_class=type(exc).__name__)
         return None
 
 

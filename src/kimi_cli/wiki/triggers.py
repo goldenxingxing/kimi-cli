@@ -17,6 +17,7 @@ from kimi_cli.telemetry import track
 from kimi_cli.wiki.intent import DurableIntent, DurableIntentFamily
 from kimi_cli.wiki.models import SourceRef, validate_relative_source_path
 from kimi_cli.wiki.schema import content_hash
+from kimi_cli.wiki.telemetry import CheckpointOutcome, track_wiki_event
 
 CheckpointCause = Literal["root_evidence", "subagent_result", "explicit_user_durable"]
 CheckpointState = Literal["pending", "persisting", "discarded", "consumed", "cancelled"]
@@ -44,6 +45,11 @@ _MAX_CHECKPOINT_EVIDENCE = 8
 _MAX_CHECKPOINT_SUMMARY_BYTES = 1024
 _MAX_BATCH_BYTES = 6 * 1024
 _MAX_RENDERED_SOURCES = 8
+_RESOLVED_OUTCOME: dict[str, CheckpointOutcome] = {
+    "cancelled": "cancelled",
+    "unresolved": "unresolved",
+    "unavailable": "unavailable",
+}
 
 OPENKIMO_WIKI_CHECKPOINT_START = "<OPENKIMO_WIKI_CHECKPOINT_START>"
 OPENKIMO_WIKI_CHECKPOINT_END = "<OPENKIMO_WIKI_CHECKPOINT_END>"
@@ -339,6 +345,15 @@ class WikiTurnCoordinator:
         self._evidence[evidence.evidence_id] = evidence
         self._evidence_by_key[key] = evidence.evidence_id
         self._safe_track("wiki_trigger_evidence_recorded", source_class=observation.source_class)
+        track_wiki_event(
+            "wiki_evidence_recorded",
+            producer_role=observation.producer_role,
+            evidence_class=observation.source_class,
+            reliable=observation.reliable,
+            stable=observation.stable_snapshot,
+            triggering=observation.triggering,
+            source_count=len(source_refs),
+        )
         return _evidence_snapshot(evidence)
 
     async def import_evidence(self, evidence: WikiEvidence) -> WikiEvidence:
@@ -413,6 +428,13 @@ class WikiTurnCoordinator:
         self._checkpoints[checkpoint.checkpoint_id] = checkpoint
         self._checkpoint_by_key[dedupe_key] = checkpoint.checkpoint_id
         self._safe_track("wiki_trigger_checkpoint_created", cause=cause)
+        track_wiki_event(
+            "wiki_checkpoint_created",
+            cause=cause,
+            producer_role="subagent" if producer_id is not None else "root",
+            evidence_count=len(evidence_ids),
+            checkpoint_id=checkpoint.checkpoint_id,
+        )
         return checkpoint
 
     async def accept_subagent_result(
@@ -710,6 +732,9 @@ class WikiTurnCoordinator:
             state: CheckpointState = "consumed" if outcome == "persisted" else "discarded"
             self._checkpoints[checkpoint_id] = replace(checkpoint, state=state)
             self._safe_track("wiki_trigger_grant_finished", outcome=outcome)
+            # Spending the grant is the terminal transition for this checkpoint,
+            # so this is where its single resolved outcome belongs.
+            self._track_resolved(checkpoint, "persist" if outcome == "persisted" else "discard")
 
     async def release_retry(self, checkpoint_id: str, candidate_hash: str) -> bool:
         """Return a checkpoint to pending after a retryable revision conflict.
@@ -780,6 +805,7 @@ class WikiTurnCoordinator:
             self._checkpoints[checkpoint_id] = replace(checkpoint, state="consumed")
             self._grants.pop(checkpoint_id, None)
             self._safe_track("wiki_trigger_checkpoint_consumed", cause=checkpoint.cause)
+            self._track_resolved(checkpoint, "persist")
             return True
 
     async def mark_delivered(self, checkpoint_ids: Sequence[str]) -> None:
@@ -861,6 +887,7 @@ class WikiTurnCoordinator:
             self._checkpoints[checkpoint_id] = replace(checkpoint, state="discarded")
             self._grants.pop(checkpoint_id, None)
             self._safe_track("wiki_trigger_checkpoint_discarded", reason=reason)
+            self._track_resolved(checkpoint, _RESOLVED_OUTCOME.get(reason, "discard"))
 
     async def cancel_turn(self, root_turn_id: str) -> None:
         async with self._locked():
@@ -873,6 +900,7 @@ class WikiTurnCoordinator:
                 }:
                     self._checkpoints[checkpoint_id] = replace(checkpoint, state="cancelled")
                     self._grants.pop(checkpoint_id, None)
+                    self._track_resolved(checkpoint, "cancelled")
             if self._active_root_turn_id == root_turn_id:
                 self._active_root_turn_id = None
             self._safe_track("wiki_trigger_turn_cancelled")
@@ -884,6 +912,7 @@ class WikiTurnCoordinator:
             for checkpoint_id, checkpoint in tuple(self._checkpoints.items()):
                 if checkpoint.state in {"pending", "persisting"}:
                     self._checkpoints[checkpoint_id] = replace(checkpoint, state="cancelled")
+                    self._track_resolved(checkpoint, "cancelled")
             self._grants.clear()
             self._active_root_turn_id = None
             self._closed = True
@@ -1005,6 +1034,15 @@ class WikiTurnCoordinator:
         if checkpoint is None:
             raise WikiTriggerRejected("unknown checkpoint for this runtime")
         return checkpoint
+
+    def _track_resolved(self, checkpoint: WikiCheckpoint, outcome: CheckpointOutcome) -> None:
+        """Emit exactly one terminal outcome per checkpoint, at its transition."""
+        track_wiki_event(
+            "wiki_checkpoint_resolved",
+            outcome=outcome,
+            checkpoint_id=checkpoint.checkpoint_id,
+            duration_ms=int(max(time.monotonic() - checkpoint.created_at, 0.0) * 1000),
+        )
 
     def _safe_track(self, event: str, **properties: str | int | float | bool | None) -> None:
         with suppress(Exception):

@@ -18,6 +18,7 @@ from kimi_cli.wiki.locking import WikiBusyError
 from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
 from kimi_cli.wiki.models import CurrentSource, SourceRef, WikiCandidate, has_url_credentials
 from kimi_cli.wiki.schema import content_hash
+from kimi_cli.wiki.telemetry import track_wiki_event
 from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
 from kimi_cli.wiki.triggers import (
     CheckpointDiscardReason,
@@ -259,8 +260,13 @@ class Wiki(CallableTool2[Params]):
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Unexpected Wiki operation failure")
+            track_wiki_event(
+                "wiki_trigger_failed",
+                stage=f"wiki_{params.operation}",
+                error_class=type(exc).__name__,
+            )
             return ToolError(
                 message="Wiki operation failed. Check the request and try again.",
                 brief="Wiki operation failed",
@@ -532,6 +538,12 @@ class Wiki(CallableTool2[Params]):
         if isinstance(prepared, DiscardedCandidate):
             # The gate already decided; the opportunity is spent either way.
             await self._finish_grant(grant, "discarded")
+            track_wiki_event(
+                "wiki_candidate_discarded",
+                reason=prepared.reason,
+                checkpoint_id=_checkpoint_id_of(resolvable),
+                page_count=len(params.candidate.pages),
+            )
             await self._close_checkpoint(resolvable, "not_useful")
             return ToolError(
                 message=f"Wiki candidate discarded: {prepared.reason}.",
@@ -541,6 +553,12 @@ class Wiki(CallableTool2[Params]):
         if not approval.is_yolo():
             trusted = self.current_context(self._runtime)
             assert trusted is not None
+            track_wiki_event(
+                "wiki_approval_requested",
+                mode="afk" if approval.is_afk() else "normal",
+                page_count=len(prepared.pages),
+                checkpoint_id=_checkpoint_id_of(resolvable),
+            )
             result = await approval.request(
                 self.name,
                 "wiki.write",
@@ -563,6 +581,12 @@ class Wiki(CallableTool2[Params]):
                 await self._close_checkpoint(resolvable, "user_declined")
                 return result.rejection_error()
         committed = await asyncio.to_thread(manager.commit, prepared)
+        track_wiki_event(
+            "wiki_committed",
+            page_count=len(committed.pages),
+            global_revision=committed.global_revision,
+            checkpoint_id=_checkpoint_id_of(resolvable),
+        )
         await self._finish_grant(grant, "persisted")
         await self._consume_checkpoint(resolvable)
         return _ok(
@@ -622,6 +646,10 @@ class Wiki(CallableTool2[Params]):
             reliable_source=trusted.reliable_source,
             operation=operation,
         )
+
+
+def _checkpoint_id_of(checkpoint: object) -> str | None:
+    return checkpoint.checkpoint_id if isinstance(checkpoint, WikiCheckpoint) else None
 
 
 def _candidate_hash(candidate: WikiCandidate) -> str:
