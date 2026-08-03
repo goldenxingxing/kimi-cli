@@ -20,6 +20,7 @@ from kimi_cli.session_state import SessionState
 from kimi_cli.soul.agent import Runtime, _initialize_global_wiki, _load_system_prompt
 from kimi_cli.tools.wiki import WikiToolContext
 from kimi_cli.wiki.manager import WikiManager
+from kimi_cli.wiki.triggers import WikiTurnCoordinator
 from kimi_cli.wire.file import WireFile
 
 
@@ -99,6 +100,8 @@ async def test_unrelated_sessions_share_global_wiki_and_trusted_runtime_context(
         assert runtime_a.wiki_tool_context.candidate_high_value is False
         assert runtime_a.wiki_tool_context.stable is False
         assert runtime_a.wiki_tool_context.user_confirmed is False
+        assert isinstance(runtime_a.wiki_coordinator, WikiTurnCoordinator)
+        assert runtime_a.wiki_coordinator.workspace_id == runtime_a.workspace_id
         assert runtime_a.builtin_args.KIMI_WIKI_CONTEXT.count(".\n") == 3
         assert len(runtime_a.builtin_args.KIMI_WIKI_CONTEXT.encode("utf-8")) <= 8192
     finally:
@@ -130,6 +133,7 @@ async def test_subagent_shares_wiki_workspace_and_trusted_context(
         assert subagent.wiki is runtime.wiki
         assert subagent.workspace_id == runtime.workspace_id
         assert subagent.wiki_tool_context is runtime.wiki_tool_context
+        assert subagent.wiki_coordinator is None
     finally:
         assert runtime.wiki is not None
         runtime.wiki.close()

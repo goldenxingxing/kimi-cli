@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 
     from kimi_cli.tools.wiki import WikiToolContext
     from kimi_cli.wiki.manager import WikiManager
+    from kimi_cli.wiki.triggers import WikiTurnCoordinator
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -223,6 +224,7 @@ class Runtime:
     wiki: WikiManager | None = None
     workspace_id: UUID | None = None
     wiki_tool_context: WikiToolContext | None = None
+    wiki_coordinator: WikiTurnCoordinator | None = None
 
     def __post_init__(self) -> None:
         if self.subagent_store is None:
@@ -374,6 +376,15 @@ class Runtime:
             except Exception:
                 logger.exception("Failed to publish global Wiki unavailable notification")
 
+        wiki_coordinator = None
+        if wiki is not None and wiki_tool_context is not None:
+            from kimi_cli.wiki.triggers import WikiTurnCoordinator
+
+            wiki_coordinator = WikiTurnCoordinator(
+                provenance_session_id=wiki_tool_context.provenance_session_id,
+                workspace_id=workspace_id,
+            )
+
         return Runtime(
             config=config,
             oauth=oauth,
@@ -421,6 +432,7 @@ class Runtime:
             wiki=wiki,
             workspace_id=workspace_id,
             wiki_tool_context=wiki_tool_context,
+            wiki_coordinator=wiki_coordinator,
         )
 
     def copy_for_subagent(
@@ -460,13 +472,17 @@ class Runtime:
             wiki=self.wiki,
             workspace_id=self.workspace_id,
             wiki_tool_context=self.wiki_tool_context,
+            wiki_coordinator=None,
         )
 
     async def close(self) -> None:
         """Close root-owned Wiki resources once; subagents only borrow them."""
-        if self.role != "root" or self.wiki is None:
+        if self.role != "root":
             return
-        await asyncio.to_thread(self.wiki.close)
+        if self.wiki_coordinator is not None:
+            await self.wiki_coordinator.close()
+        if self.wiki is not None:
+            await asyncio.to_thread(self.wiki.close)
 
 
 async def _initialize_global_wiki(

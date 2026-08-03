@@ -701,6 +701,7 @@ class KimiSoul:
         interrupt_reason: str | None = None
         turn_t0 = time.monotonic()
         wiki_turn_token = None
+        wiki_root_turn_id: str | None = None
         self._set_trace_id(None)
         if get_current_approval_source_or_none() is None:
             created_approval_source = ApprovalSource(kind="foreground_turn", id=uuid.uuid4().hex)
@@ -764,7 +765,34 @@ class KimiSoul:
                 trusted_user_input=not skip_user_prompt_hook,
             )
 
-            if command_call := parse_slash_command_call(text_input):
+            command_call = parse_slash_command_call(text_input)
+            if (
+                command_call is None
+                and not skip_user_prompt_hook
+                and self.is_root
+                and self._runtime.wiki is not None
+                and self._runtime.wiki_coordinator is not None
+            ):
+                from kimi_cli.wiki.retrieval import retrieve_for_turn
+
+                coordinator = self._runtime.wiki_coordinator
+                try:
+                    root_turn = await coordinator.begin_turn(raw_text_input, text_input)
+                    wiki_root_turn_id = root_turn.root_turn_id
+                    retrieval = await retrieve_for_turn(
+                        self._runtime.wiki, coordinator, raw_text_input
+                    )
+                    if retrieval is not None:
+                        user_message = Message(
+                            role="user",
+                            content=[*user_message.content, system(retrieval.block)],
+                        )
+                except Exception:
+                    logger.warning(
+                        "Wiki retrieval setup failed; continuing without injected references"
+                    )
+
+            if command_call:
                 command = self._find_slash_command(command_call.name)
                 if command is None:
                     # this should not happen actually, the shell should have filtered it out
@@ -882,6 +910,13 @@ class KimiSoul:
                 from kimi_cli.tools.wiki import reset_wiki_turn_context
 
                 reset_wiki_turn_context(wiki_turn_token)
+            if wiki_root_turn_id is not None and not turn_finished:
+                coordinator = self._runtime.wiki_coordinator
+                if coordinator is not None:
+                    try:
+                        await coordinator.cancel_turn(wiki_root_turn_id)
+                    except Exception:
+                        logger.warning("Wiki retrieval turn cancellation failed")
             self._set_trace_id(None)
 
     async def _refresh_managed_skills(self) -> None:

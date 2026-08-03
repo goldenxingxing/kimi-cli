@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from kaos.path import KaosPath
@@ -14,6 +15,8 @@ from kimi_cli.soul.agent import Agent, Runtime
 from kimi_cli.soul.context import Context
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.utils.slashcmd import SlashCommand
+from kimi_cli.wiki.search import SearchResult
+from kimi_cli.wiki.triggers import WikiTurnCoordinator
 
 
 def _make_flow() -> Flow:
@@ -124,3 +127,60 @@ async def test_flow_slash_run_does_not_auto_generate_session_title(
     await soul.run("/flow:demo-flow")
 
     assert runtime.session.state.custom_title is None
+
+
+@pytest.mark.asyncio
+async def test_accepted_root_prompt_injects_one_managed_retrieval_block(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Manager:
+        def search(self, _query: str, _limit: int) -> list[SearchResult]:
+            return [
+                SearchResult(
+                    logical_path="concepts/retrieval.md",
+                    title="Retrieval",
+                    summary="Bounded reference",
+                    snippet="Use the durable result.",
+                    score=1.0,
+                    revision=1,
+                    content_hash="sha256:" + "a" * 64,
+                )
+            ]
+
+    runtime.wiki = Manager()  # type: ignore[assignment]
+    runtime.wiki_coordinator = WikiTurnCoordinator(provenance_session_id=uuid4())
+    agent = Agent(
+        name="Test Agent",
+        system_prompt="Test system prompt.",
+        toolset=EmptyToolset(),
+        runtime=runtime,
+    )
+    soul = KimiSoul(agent, context=Context(file_backend=tmp_path / "history.jsonl"))
+    soul._turn = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    monkeypatch.setattr(kimisoul_module, "wire_send", lambda _msg: None)
+
+    await soul.run("retrieve durable knowledge")
+
+    message = soul._turn.await_args.args[0]  # type: ignore[union-attr]
+    text = message.extract_text("\n")
+    assert text.count("OPENKIMO_WIKI_RETRIEVAL_START") == 1
+    assert "retrieve durable knowledge" in text
+
+
+@pytest.mark.asyncio
+async def test_slash_command_does_not_start_wiki_retrieval(
+    runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime.wiki_coordinator = WikiTurnCoordinator(provenance_session_id=uuid4())
+    agent = Agent(
+        name="Test Agent",
+        system_prompt="Test system prompt.",
+        toolset=EmptyToolset(),
+        runtime=runtime,
+    )
+    soul = KimiSoul(agent, context=Context(file_backend=tmp_path / "history.jsonl"))
+    monkeypatch.setattr(kimisoul_module, "wire_send", lambda _msg: None)
+
+    await soul.run("/flow:demo-flow")
+
+    assert runtime.wiki_coordinator.active_turn_id is None

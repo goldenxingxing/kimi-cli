@@ -172,6 +172,8 @@ class WikiTurnCoordinator:
         self._checkpoints: dict[str, WikiCheckpoint] = {}
         self._checkpoint_by_key: dict[str, str] = {}
         self._grants: dict[str, WikiAdmissionGrant] = {}
+        self._last_retrieval_outcome: str | None = None
+        self._retrieval_refs: dict[str, tuple[tuple[str, int, str], ...]] = {}
 
     @property
     def unresolved_count(self) -> int:
@@ -184,6 +186,34 @@ class WikiTurnCoordinator:
     def active_turn_id(self) -> str | None:
         """Return the current root turn identifier without exposing mutable state."""
         return self._active_root_turn_id
+
+    @property
+    def last_retrieval_outcome(self) -> str | None:
+        """Return the last safe retrieval outcome category for this runtime."""
+        return self._last_retrieval_outcome
+
+    async def record_retrieval_outcome(
+        self,
+        outcome: str,
+        *,
+        result_refs: tuple[tuple[str, int, str], ...] = (),
+    ) -> None:
+        """Retain only bounded retrieval identifiers, never query or page content."""
+        async with self._locked():
+            self._require_open()
+            if not outcome or len(outcome.encode("utf-8")) > 64:
+                raise WikiTriggerRejected("invalid retrieval outcome")
+            for path, revision, result_hash in result_refs:
+                try:
+                    validate_relative_source_path(path)
+                except ValueError as exc:
+                    raise WikiTriggerRejected("unsafe retrieval path") from exc
+                if type(revision) is not int or revision < 0 or not _is_sha256(result_hash):
+                    raise WikiTriggerRejected("invalid retrieval result reference")
+            self._last_retrieval_outcome = outcome
+            if result_refs:
+                root_turn_id = self._require_active_turn()
+                self._retrieval_refs[root_turn_id] = result_refs
 
     async def begin_turn(self, raw_text: str, normalized_text: str) -> RootTurn:
         async with self._locked():
