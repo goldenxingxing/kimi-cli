@@ -244,26 +244,32 @@ class TaskOutput(CallableTool2[TaskOutputParams]):
             output_truncated,
             output_path,
         ) = self._render_output_preview(params.task_id)
-        consumer = view.consumer.model_copy(
+        checkpoint_block = await self._runtime.background_tasks.checkpoint_block_for_task(
+            params.task_id
+        )
+        # Re-read after delivery: it may have just recorded a dedupe key.
+        store = self._runtime.background_tasks.store
+        consumer = store.read_consumer(params.task_id).model_copy(
             update={
                 "last_seen_output_size": output_size,
                 "last_viewed_at": time.time(),
             }
         )
-        self._runtime.background_tasks.store.write_consumer(params.task_id, consumer)
+        store.write_consumer(params.task_id, consumer)
 
+        formatted = _format_task_output(
+            view,
+            retrieval_status=retrieval_status,
+            output=output,
+            output_path=output_path,
+            full_output_available=full_output_available,
+            output_size_bytes=output_size,
+            output_preview_bytes=output_preview_bytes,
+            output_truncated=output_truncated,
+        )
         return ToolReturnValue(
             is_error=False,
-            output=_format_task_output(
-                view,
-                retrieval_status=retrieval_status,
-                output=output,
-                output_path=output_path,
-                full_output_available=full_output_available,
-                output_size_bytes=output_size,
-                output_preview_bytes=output_preview_bytes,
-                output_truncated=output_truncated,
-            ),
+            output=f"{formatted}\n\n{checkpoint_block}" if checkpoint_block else formatted,
             message=(
                 "Task snapshot retrieved."
                 if not params.block and retrieval_status == "not_ready"

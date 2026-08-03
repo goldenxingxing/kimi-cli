@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from pathlib import Path
@@ -17,6 +18,7 @@ from .models import (
     TaskSpec,
     TaskStatus,
     TaskView,
+    WikiEvidenceManifest,
 )
 
 _VALID_TASK_ID = re.compile(r"^[a-z0-9][a-z0-9\-]{1,24}$")
@@ -33,6 +35,7 @@ class BackgroundTaskStore:
     CONTROL_FILE = "control.json"
     CONSUMER_FILE = "consumer.json"
     OUTPUT_FILE = "output.log"
+    WIKI_EVIDENCE_FILE = "wiki-evidence.json"
 
     def __init__(self, root: Path):
         self._root = root
@@ -141,6 +144,31 @@ class BackgroundTaskStore:
             fallback=TaskConsumerState(),
             artifact="task consumer state",
         )
+
+    def wiki_evidence_path(self, task_id: str) -> Path:
+        return self.task_path(task_id) / self.WIKI_EVIDENCE_FILE
+
+    def write_wiki_evidence_manifest(self, task_id: str, manifest: WikiEvidenceManifest) -> None:
+        atomic_json_write(manifest.model_dump(mode="json"), self.wiki_evidence_path(task_id))
+
+    def read_wiki_evidence_manifest(self, task_id: str) -> WikiEvidenceManifest | None:
+        path = self.wiki_evidence_path(task_id)
+        if not path.exists():
+            return None
+        try:
+            return WikiEvidenceManifest.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValidationError, ValueError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "Ignoring invalid Wiki evidence manifest for task {task_id}: {error}",
+                task_id=task_id,
+                error=exc,
+            )
+            return None
+
+    def delete_wiki_evidence_manifest(self, task_id: str) -> None:
+        """Drop an unsealed manifest so a non-completed run can never be admitted."""
+        with contextlib.suppress(OSError, ValueError):
+            self.wiki_evidence_path(task_id).unlink(missing_ok=True)
 
     def merged_view(self, task_id: str) -> TaskView:
         return TaskView(

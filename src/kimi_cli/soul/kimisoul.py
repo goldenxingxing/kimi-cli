@@ -1285,7 +1285,18 @@ class KimiSoul:
         if self.is_root:
 
             async def _append_notification(view: NotificationView) -> None:
-                await self._context.append_message(build_notification_message(view, self._runtime))
+                checkpoint_block = ""
+                if view.event.category == "task" and view.event.source_kind == "background_task":
+                    checkpoint_block = (
+                        await self._runtime.background_tasks.checkpoint_block_for_task(
+                            view.event.source_id
+                        )
+                    )
+                await self._context.append_message(
+                    build_notification_message(
+                        view, self._runtime, checkpoint_block=checkpoint_block
+                    )
+                )
                 # --- Notification hook ---
                 from kimi_cli.hooks import events
 

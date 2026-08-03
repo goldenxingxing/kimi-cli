@@ -112,7 +112,7 @@ async def test_unrelated_sessions_share_global_wiki_and_trusted_runtime_context(
 
 
 @pytest.mark.asyncio
-async def test_subagent_shares_wiki_workspace_and_trusted_context(
+async def test_subagent_shares_the_workspace_but_no_wiki_authority(
     config,
     tmp_path: Path,
     lightweight_runtime_create: Path,
@@ -128,12 +128,20 @@ async def test_subagent_shares_wiki_workspace_and_trusted_context(
         config, OAuthManager(config), llm=None, session=session, yolo=False
     )
     try:
-        subagent = runtime.copy_for_subagent(agent_id="worker", subagent_type="coder")
+        subagent = runtime.copy_for_subagent(
+            agent_id="worker", subagent_type="coder", run_generation=2
+        )
 
-        assert subagent.wiki is runtime.wiki
+        # The workspace identity is shared so evidence stays comparable...
         assert subagent.workspace_id == runtime.workspace_id
-        assert subagent.wiki_tool_context is runtime.wiki_tool_context
+        # ...but no Wiki read, write, or checkpoint authority crosses over.
+        assert subagent.wiki is None
+        assert subagent.wiki_tool_context is None
         assert subagent.wiki_coordinator is None
+        # Only the one-way evidence bridge back to the root remains.
+        assert subagent.wiki_evidence_reporter is not None
+        assert runtime.wiki is not None
+        assert runtime.wiki_tool_context is not None
     finally:
         assert runtime.wiki is not None
         runtime.wiki.close()

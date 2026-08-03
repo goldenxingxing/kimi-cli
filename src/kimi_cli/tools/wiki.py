@@ -189,6 +189,12 @@ class Wiki(CallableTool2[Params]):
 
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
+        if getattr(self._runtime, "role", "root") != "root":
+            # Defence in depth: a custom agent spec may still list Wiki.
+            return ToolError(
+                message="The global Wiki is available to the root agent only.",
+                brief="Wiki is root-only",
+            )
         manager = getattr(self._runtime, "wiki", None)
         if manager is None:
             return ToolError(

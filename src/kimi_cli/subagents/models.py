@@ -52,3 +52,5 @@ class AgentInstanceRecord:
     updated_at: float
     last_task_id: str | None
     launch_spec: AgentLaunchSpec
+    run_generation: int = 0
+    """Monotonic count of runs started for this instance; 0 means never run."""

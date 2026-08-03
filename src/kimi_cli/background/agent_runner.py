@@ -146,12 +146,14 @@ class BackgroundAgentRunner:
                 effective_model=self._model_override,
             )
 
+        run_generation = self._runtime.subagent_store.begin_run(self._agent_id).run_generation
         spec = SubagentRunSpec(
             agent_id=self._agent_id,
             type_def=type_def,
             launch_spec=launch_spec,
             prompt=self._prompt,
             resumed=self._resumed,
+            run_generation=run_generation,
         )
         soul, prompt = await prepare_soul(
             spec,
@@ -178,6 +180,7 @@ class BackgroundAgentRunner:
             self._manager._mark_task_failed(self._task_id, failure.message)
             self._runtime.subagent_store.update_instance(self._agent_id, status="failed")
             output.stage(f"failed: {failure.brief}")
+            self._manager.store.delete_wiki_evidence_manifest(self._task_id)
             return
         output.stage("run_soul_finished")
 
@@ -187,10 +190,49 @@ class BackgroundAgentRunner:
             )
             self._runtime.subagent_store.update_instance(self._agent_id, status="failed")
             output.stage("failed: empty output")
+            self._manager.store.delete_wiki_evidence_manifest(self._task_id)
             return
         output.summary(final_response)
         self._runtime.subagent_store.update_instance(self._agent_id, status="idle")
+        # Seal before the task turns terminal: a manifest must never be
+        # readable for a task the root can already see as completed.
+        self._seal_wiki_evidence(soul.runtime, run_generation, final_response)
         self._manager._mark_task_completed(self._task_id)
+
+    def _seal_wiki_evidence(
+        self,
+        subagent_runtime: Runtime,
+        run_generation: int,
+        final_response: str,
+    ) -> None:
+        from kimi_cli.background.models import WikiEvidenceManifest
+        from kimi_cli.subagents.core import sealed_subagent_evidence
+        from kimi_cli.wiki.schema import content_hash
+
+        normalized = final_response.strip()
+        if not normalized:
+            return
+        try:
+            evidence = sealed_subagent_evidence(subagent_runtime)
+            if not evidence:
+                return
+            self._manager.store.write_wiki_evidence_manifest(
+                self._task_id,
+                WikiEvidenceManifest(
+                    agent_id=self._agent_id,
+                    task_id=self._task_id,
+                    run_generation=run_generation,
+                    summary_hash=content_hash(normalized.encode("utf-8")),
+                    evidence=evidence,
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to seal background Wiki evidence for task {task_id}; "
+                "the result is delivered without a checkpoint",
+                task_id=self._task_id,
+            )
+            self._manager.store.delete_wiki_evidence_manifest(self._task_id)
 
     def _on_approval_runtime_event(self, event: ApprovalRuntimeEvent) -> None:
         request = event.request

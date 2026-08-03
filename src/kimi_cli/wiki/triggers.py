@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel, ConfigDict
+
 from kimi_cli.telemetry import track
 from kimi_cli.wiki.models import SourceRef, validate_relative_source_path
 from kimi_cli.wiki.schema import content_hash
@@ -33,6 +35,10 @@ _MAX_BATCH_CHECKPOINTS = 4
 _MAX_CHECKPOINT_EVIDENCE = 8
 _MAX_CHECKPOINT_SUMMARY_BYTES = 1024
 _MAX_BATCH_BYTES = 6 * 1024
+_MAX_RENDERED_SOURCES = 8
+
+OPENKIMO_WIKI_CHECKPOINT_START = "<OPENKIMO_WIKI_CHECKPOINT_START>"
+OPENKIMO_WIKI_CHECKPOINT_END = "<OPENKIMO_WIKI_CHECKPOINT_END>"
 _PRODUCER_ROLES = frozenset({"root", "subagent"})
 _CHECKPOINT_CAUSES = frozenset({"root_evidence", "subagent_result", "explicit_user_durable"})
 _CHECKPOINT_DISCARD_REASONS = frozenset({"user_declined", "not_useful", "superseded", "cancelled"})
@@ -132,6 +138,26 @@ class WikiAdmissionGrant:
 class CheckpointBatch:
     checkpoints: tuple[WikiCheckpoint, ...]
     rendered: str
+
+
+class PersistedEvidenceRef(BaseModel):
+    """One subagent observation, reduced to what a root checkpoint may re-derive.
+
+    This is the only shape that crosses a subagent boundary or a process
+    restart.  It carries identifiers, hashes, portable source references, and
+    grounding flags — never output text, prompts, or candidate Markdown.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    evidence_id: str
+    source_class: EvidenceClass
+    request_hash: str
+    result_hash: str
+    logical_paths: tuple[str, ...] = ()
+    source_refs: tuple[SourceRef, ...] = ()
+    reliable: bool
+    stable_snapshot: bool
 
 
 def canonical_digest(parts: Sequence[str]) -> str:
@@ -251,58 +277,55 @@ class WikiTurnCoordinator:
     async def record_evidence(self, observation: EvidenceObservation) -> WikiEvidence | None:
         async with self._locked():
             self._require_open()
-            logical_paths, source_refs = self._validate_observation(observation)
-            key = canonical_digest(
-                (
-                    self.provenance_session_id.hex,
-                    _uuid_component(self.workspace_id),
-                    observation.root_turn_id,
-                    observation.producer_role,
-                    observation.producer_id or "",
-                    (
-                        str(observation.run_generation)
-                        if observation.run_generation is not None
-                        else ""
-                    ),
-                    observation.tool_call_id,
-                    observation.source_class,
-                    observation.request_hash,
-                    observation.result_hash,
-                    *logical_paths,
-                    *(_source_key(source) for source in source_refs),
-                    str(observation.reliable),
-                    str(observation.stable_snapshot),
-                    str(observation.triggering),
-                )
-            )
-            existing_id = self._evidence_by_key.get(key)
-            if existing_id is not None:
-                return _evidence_snapshot(self._evidence[existing_id])
+            return self._record_evidence_locked(observation)
 
-            evidence = WikiEvidence(
-                evidence_id=uuid4().hex,
-                root_turn_id=observation.root_turn_id,
-                session_provenance_id=self.provenance_session_id,
-                workspace_id=self.workspace_id,
-                producer_role=observation.producer_role,
-                producer_id=observation.producer_id,
-                run_generation=observation.run_generation,
-                tool_call_id=observation.tool_call_id,
-                source_class=observation.source_class,
-                request_hash=observation.request_hash,
-                result_hash=observation.result_hash,
-                logical_paths=logical_paths,
-                source_refs=source_refs,
-                reliable=observation.reliable,
-                stable_snapshot=observation.stable_snapshot,
-                triggering=observation.triggering,
+    def _record_evidence_locked(self, observation: EvidenceObservation) -> WikiEvidence | None:
+        logical_paths, source_refs = self._validate_observation(observation)
+        key = canonical_digest(
+            (
+                self.provenance_session_id.hex,
+                _uuid_component(self.workspace_id),
+                observation.root_turn_id,
+                observation.producer_role,
+                observation.producer_id or "",
+                (str(observation.run_generation) if observation.run_generation is not None else ""),
+                observation.tool_call_id,
+                observation.source_class,
+                observation.request_hash,
+                observation.result_hash,
+                *logical_paths,
+                *(_source_key(source) for source in source_refs),
+                str(observation.reliable),
+                str(observation.stable_snapshot),
+                str(observation.triggering),
             )
-            self._evidence[evidence.evidence_id] = evidence
-            self._evidence_by_key[key] = evidence.evidence_id
-            self._safe_track(
-                "wiki_trigger_evidence_recorded", source_class=observation.source_class
-            )
-            return _evidence_snapshot(evidence)
+        )
+        existing_id = self._evidence_by_key.get(key)
+        if existing_id is not None:
+            return _evidence_snapshot(self._evidence[existing_id])
+
+        evidence = WikiEvidence(
+            evidence_id=uuid4().hex,
+            root_turn_id=observation.root_turn_id,
+            session_provenance_id=self.provenance_session_id,
+            workspace_id=self.workspace_id,
+            producer_role=observation.producer_role,
+            producer_id=observation.producer_id,
+            run_generation=observation.run_generation,
+            tool_call_id=observation.tool_call_id,
+            source_class=observation.source_class,
+            request_hash=observation.request_hash,
+            result_hash=observation.result_hash,
+            logical_paths=logical_paths,
+            source_refs=source_refs,
+            reliable=observation.reliable,
+            stable_snapshot=observation.stable_snapshot,
+            triggering=observation.triggering,
+        )
+        self._evidence[evidence.evidence_id] = evidence
+        self._evidence_by_key[key] = evidence.evidence_id
+        self._safe_track("wiki_trigger_evidence_recorded", source_class=observation.source_class)
+        return _evidence_snapshot(evidence)
 
     async def import_evidence(self, evidence: WikiEvidence) -> WikiEvidence:
         """Reject records from every other coordinator, including same-session ones."""
@@ -325,40 +348,129 @@ class WikiTurnCoordinator:
     ) -> WikiCheckpoint:
         async with self._locked():
             self._require_open()
-            if type(cause) is not str or cause not in _CHECKPOINT_CAUSES:
-                raise WikiTriggerRejected("unknown checkpoint cause")
-            root_turn_id = self._require_active_turn()
-            self._validate_checkpoint_inputs(root_turn_id, evidence_ids, summary_hash)
-            dedupe_key = self._checkpoint_dedupe_key(
-                root_turn_id=root_turn_id,
-                cause=cause,
+            return self._create_checkpoint_locked(
+                cause,
                 evidence_ids=evidence_ids,
                 summary_hash=summary_hash,
                 producer_id=producer_id,
                 run_generation=run_generation,
             )
-            existing_id = self._checkpoint_by_key.get(dedupe_key)
-            if existing_id is not None:
-                return self._checkpoints[existing_id]
-            if self.unresolved_count >= _MAX_UNRESOLVED_CHECKPOINTS:
-                self._safe_track("wiki_trigger_checkpoint_backpressure")
-                raise WikiCheckpointBackpressure("runtime checkpoint capacity reached")
 
-            checkpoint = WikiCheckpoint(
-                checkpoint_id=uuid4().hex,
-                root_turn_id=root_turn_id,
-                cause=cause,
-                evidence_ids=evidence_ids,
-                summary_hash=summary_hash,
-                producer_id=producer_id,
-                run_generation=run_generation,
-                dedupe_key=dedupe_key,
-                state="pending",
-                created_at=time.monotonic(),
+    def _create_checkpoint_locked(
+        self,
+        cause: CheckpointCause,
+        *,
+        evidence_ids: tuple[str, ...] = (),
+        summary_hash: str | None = None,
+        producer_id: str | None = None,
+        run_generation: int | None = None,
+    ) -> WikiCheckpoint:
+        if type(cause) is not str or cause not in _CHECKPOINT_CAUSES:
+            raise WikiTriggerRejected("unknown checkpoint cause")
+        root_turn_id = self._require_active_turn()
+        self._validate_checkpoint_inputs(root_turn_id, evidence_ids, summary_hash)
+        dedupe_key = self._checkpoint_dedupe_key(
+            root_turn_id=root_turn_id,
+            cause=cause,
+            evidence_ids=evidence_ids,
+            summary_hash=summary_hash,
+            producer_id=producer_id,
+            run_generation=run_generation,
+        )
+        existing_id = self._checkpoint_by_key.get(dedupe_key)
+        if existing_id is not None:
+            return self._checkpoints[existing_id]
+        if self.unresolved_count >= _MAX_UNRESOLVED_CHECKPOINTS:
+            self._safe_track("wiki_trigger_checkpoint_backpressure")
+            raise WikiCheckpointBackpressure("runtime checkpoint capacity reached")
+
+        checkpoint = WikiCheckpoint(
+            checkpoint_id=uuid4().hex,
+            root_turn_id=root_turn_id,
+            cause=cause,
+            evidence_ids=evidence_ids,
+            summary_hash=summary_hash,
+            producer_id=producer_id,
+            run_generation=run_generation,
+            dedupe_key=dedupe_key,
+            state="pending",
+            created_at=time.monotonic(),
+        )
+        self._checkpoints[checkpoint.checkpoint_id] = checkpoint
+        self._checkpoint_by_key[dedupe_key] = checkpoint.checkpoint_id
+        self._safe_track("wiki_trigger_checkpoint_created", cause=cause)
+        return checkpoint
+
+    async def accept_subagent_result(
+        self,
+        *,
+        agent_id: str,
+        run_generation: int,
+        summary_hash: str,
+        evidence: Sequence[PersistedEvidenceRef],
+        receiving_root_turn_id: str,
+        task_id: str | None = None,
+    ) -> WikiCheckpoint | None:
+        """Admit one subagent run's sealed evidence into the receiving root turn.
+
+        The subagent never owns coordinator state, so its observations are
+        re-derived here as root-turn-bound subagent evidence and sealed into a
+        single ``subagent_result`` checkpoint.  Anything unverifiable — a stale
+        receiving turn, a forged identity, an over-budget or empty evidence
+        set — fails closed to ``None`` and leaves the turn untouched.
+        """
+        async with self._locked():
+            try:
+                self._require_open()
+                if not agent_id or type(run_generation) is not int or run_generation < 0:
+                    raise WikiTriggerRejected("invalid subagent result identity")
+                if not _is_sha256(summary_hash):
+                    raise WikiTriggerRejected("invalid subagent summary hash")
+                root_turn_id = self._require_active_turn()
+                if receiving_root_turn_id != root_turn_id:
+                    raise WikiTriggerRejected("subagent result targets a stale root turn")
+                if not evidence or len(evidence) > _MAX_CHECKPOINT_EVIDENCE:
+                    raise WikiTriggerRejected("subagent result evidence budget violated")
+
+                evidence_ids: list[str] = []
+                for ref in evidence:
+                    recorded = self._record_evidence_locked(
+                        EvidenceObservation(
+                            root_turn_id=root_turn_id,
+                            workspace_id=self.workspace_id,
+                            producer_role="subagent",
+                            producer_id=agent_id,
+                            run_generation=run_generation,
+                            tool_call_id=ref.evidence_id,
+                            source_class=ref.source_class,
+                            request_hash=ref.request_hash,
+                            result_hash=ref.result_hash,
+                            logical_paths=tuple(ref.logical_paths),
+                            source_refs=tuple(ref.source_refs),
+                            reliable=ref.reliable,
+                            stable_snapshot=ref.stable_snapshot,
+                            triggering=True,
+                        )
+                    )
+                    if recorded is None:
+                        raise WikiTriggerRejected("subagent evidence could not be recorded")
+                    if recorded.evidence_id not in evidence_ids:
+                        evidence_ids.append(recorded.evidence_id)
+
+                checkpoint = self._create_checkpoint_locked(
+                    "subagent_result",
+                    evidence_ids=tuple(evidence_ids),
+                    summary_hash=summary_hash,
+                    producer_id=agent_id,
+                    run_generation=run_generation,
+                )
+            except WikiTriggerRejected:
+                self._safe_track("wiki_trigger_subagent_result_rejected")
+                return None
+            self._safe_track(
+                "wiki_trigger_subagent_result_accepted",
+                delivered_from_task=task_id is not None,
             )
-            self._checkpoints[checkpoint.checkpoint_id] = checkpoint
-            self._checkpoint_by_key[dedupe_key] = checkpoint.checkpoint_id
-            self._safe_track("wiki_trigger_checkpoint_created", cause=cause)
             return checkpoint
 
     async def attach_root_evidence_to_equivalent_subagent(
@@ -452,7 +564,32 @@ class WikiTurnCoordinator:
                 )
             )
             selected = tuple(pending[:_MAX_BATCH_CHECKPOINTS])
-            return CheckpointBatch(checkpoints=selected, rendered=_render_batch(selected))
+            return CheckpointBatch(
+                checkpoints=selected,
+                rendered=self._render_locked(selected),
+            )
+
+    async def render_checkpoints(self, checkpoints: Sequence[WikiCheckpoint]) -> str:
+        """Render specific checkpoints the same managed way a batch is rendered."""
+        if not checkpoints:
+            return ""
+        async with self._locked():
+            return self._render_locked(tuple(checkpoints))
+
+    def _render_locked(self, checkpoints: tuple[WikiCheckpoint, ...]) -> str:
+        if not checkpoints:
+            return _render_batch((), {})
+        sources_by_checkpoint = {
+            checkpoint.checkpoint_id: _portable_source_labels(
+                [
+                    evidence
+                    for evidence_id in checkpoint.evidence_ids
+                    if (evidence := self._evidence.get(evidence_id)) is not None
+                ]
+            )
+            for checkpoint in checkpoints
+        }
+        return _render_batch(checkpoints, sources_by_checkpoint)
 
     async def discard(self, checkpoint_id: str, reason: CheckpointDiscardReason) -> None:
         async with self._locked():
@@ -642,18 +779,56 @@ def _uuid_component(value: UUID | None) -> str:
     return value.hex if value is not None else ""
 
 
-def _render_batch(checkpoints: tuple[WikiCheckpoint, ...]) -> str:
-    lines = ["<OPENKIMO_WIKI_CHECKPOINTS>"]
+def _portable_source_labels(evidence: Sequence[WikiEvidence]) -> tuple[str, ...]:
+    """Name each source in a form that is safe to show the model.
+
+    Workspace files appear as their registry-relative POSIX path and web
+    documents as their credential-screened normalized URL.  Nothing else — no
+    absolute path, no machine name, no conversation text — is nameable here.
+    """
+    labels: list[str] = []
+    for record in evidence:
+        for source in record.source_refs:
+            if source.kind == "workspace-file" and source.path:
+                label = source.path
+            elif source.kind == "web" and source.url is not None:
+                label = str(source.url)
+            else:
+                label = "conversation"
+            if label not in labels and len(labels) < _MAX_RENDERED_SOURCES:
+                labels.append(label)
+        for path in record.logical_paths:
+            if path not in labels and len(labels) < _MAX_RENDERED_SOURCES:
+                labels.append(path)
+    return tuple(labels)
+
+
+def _render_batch(
+    checkpoints: tuple[WikiCheckpoint, ...],
+    sources_by_checkpoint: dict[str, tuple[str, ...]],
+) -> str:
+    """Render the managed block the root must resolve.
+
+    Only identifiers, the cause, counts, and portable source labels appear.
+    The conclusion itself is deliberately absent: the root already has it in
+    context, and a checkpoint record must never carry user or summary text.
+    """
+    lines = [OPENKIMO_WIKI_CHECKPOINT_START]
     for checkpoint in checkpoints:
-        evidence_ids = ",".join(checkpoint.evidence_ids)
+        sources = ",".join(sources_by_checkpoint.get(checkpoint.checkpoint_id, ()))
         lines.append(
             "- "
             f"checkpoint_id={checkpoint.checkpoint_id} "
             f"cause={checkpoint.cause} "
-            f"evidence_ids={evidence_ids} "
-            f"summary_hash={checkpoint.summary_hash or ''}"
+            f"evidence_count={len(checkpoint.evidence_ids)} "
+            f"sources={sources}"
         )
-    lines.append("</OPENKIMO_WIKI_CHECKPOINTS>")
+    lines.append(
+        'action: resolve each checkpoint exactly once — call Wiki(operation="remember" or '
+        '"ingest", checkpoint_id=...) to persist it, or Wiki(operation="discard", '
+        "checkpoint_id=..., discard_reason=...) to drop it."
+    )
+    lines.append(OPENKIMO_WIKI_CHECKPOINT_END)
     rendered = "\n".join(lines)
     if len(rendered.encode("utf-8")) > _MAX_BATCH_BYTES:
         raise WikiTriggerRejected("checkpoint batch rendering exceeded its byte budget")

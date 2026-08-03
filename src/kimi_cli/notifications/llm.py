@@ -16,7 +16,12 @@ if TYPE_CHECKING:
 _NOTIFICATION_ID_RE = re.compile(r'<notification id="([^"]+)"')
 
 
-def build_notification_message(view: NotificationView, runtime: Runtime) -> Message:
+def build_notification_message(
+    view: NotificationView,
+    runtime: Runtime,
+    *,
+    checkpoint_block: str = "",
+) -> Message:
     event = view.event
     lines = [
         (
@@ -51,6 +56,8 @@ def build_notification_message(view: NotificationView, runtime: Runtime) -> Mess
                 lines.append(f"Failure reason: {task_view.runtime.failure_reason}")
             if tail:
                 lines.extend(["Output tail:", tail])
+            if checkpoint_block:
+                lines.append(checkpoint_block)
             lines.append("</task-notification>")
 
     lines.append("</notification>")

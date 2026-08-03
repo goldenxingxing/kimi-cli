@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1609,3 +1610,132 @@ async def test_background_agent_marks_killed_when_run_cancelled(agent_tool, runt
 
     record = runtime.subagent_store.require_instance(agent_id)
     assert record.status == "killed"
+
+
+def _wiki_root_runtime(runtime, tmp_path):
+    """Give the shared runtime fixture a live Wiki manager and turn coordinator."""
+    from uuid import uuid4
+
+    from kimi_cli.wiki.evidence import WikiEvidenceReporter
+    from kimi_cli.wiki.manager import WikiManager
+    from kimi_cli.wiki.triggers import WikiTurnCoordinator
+
+    manager = WikiManager(tmp_path / "wiki", wal=False)
+    workspace = Path(str(runtime.session.work_dir)).resolve()
+    workspace_id = manager.registry.register(workspace)
+    coordinator = WikiTurnCoordinator(provenance_session_id=uuid4(), workspace_id=workspace_id)
+    runtime.wiki = manager
+    runtime.workspace_id = workspace_id
+    runtime.wiki_coordinator = coordinator
+    runtime.wiki_evidence_reporter = WikiEvidenceReporter(coordinator, runtime)
+    return manager, coordinator
+
+
+async def _run_foreground_agent_reading(runtime, agent_tool, monkeypatch, *, succeed=True):
+    """Run one foreground subagent whose single tool call reads a workspace file."""
+    from kosong.tooling import ToolOk
+
+    from kimi_cli.tools.file.read import ReadFile
+
+    runtime.labor_market.add_builtin_type(
+        AgentTypeDefinition(
+            name="coder",
+            description="Good at general software engineering tasks.",
+            agent_file=runtime.subagent_store.root / "coder.yaml",
+            tool_policy=ToolPolicy(mode="inherit"),
+        )
+    )
+    workspace = Path(str(runtime.session.work_dir))
+    (workspace / "decision.md").write_text("durable decision", encoding="utf-8")
+
+    async def fake_load_agent(agent_file, runtime, *, mcp_configs, start_mcp_loading=True):
+        return SoulAgent(
+            name=agent_file.stem,
+            system_prompt="Subagent system prompt",
+            toolset=EmptyToolset(),
+            runtime=runtime,
+        )
+
+    async def fake_run_soul(
+        soul, user_input, ui_loop_fn, cancel_event, wire_file=None, runtime=None
+    ):
+        reporter = soul.runtime.wiki_evidence_reporter
+        if reporter is not None:
+            await reporter.observe(
+                ReadFile(soul.runtime),
+                {"path": "decision.md"},
+                ToolOk(output="durable decision"),
+                tool_call_id="sub-read",
+            )
+        if not succeed:
+            raise MaxStepsReached(n_steps=3)
+        await soul.context.append_message(
+            Message(
+                role="assistant",
+                content=[TextPart(text="The retry budget is defined in decision.md.")],
+            )
+        )
+
+    monkeypatch.setattr("kimi_cli.subagents.builder.load_agent", fake_load_agent)
+    monkeypatch.setattr("kimi_cli.subagents.runner.run_soul", fake_run_soul)
+
+    return await agent_tool(
+        agent_tool.params(description="investigate", prompt="find the retry budget")
+    )
+
+
+async def test_foreground_subagent_result_carries_one_root_checkpoint(
+    agent_tool, runtime, monkeypatch, tmp_path
+):
+    manager, coordinator = _wiki_root_runtime(runtime, tmp_path)
+    try:
+        await coordinator.begin_turn("where is the retry budget", "where is the retry budget")
+
+        result = await _run_foreground_agent_reading(runtime, agent_tool, monkeypatch)
+
+        assert not result.is_error
+        assert result.output.count("<OPENKIMO_WIKI_CHECKPOINT_START>") == 1
+        agent_id = _extract_agent_id(result.output)
+        checkpoints = (await coordinator.pending_batch()).checkpoints
+        assert len(checkpoints) == 1
+        assert checkpoints[0].cause == "subagent_result"
+        assert checkpoints[0].producer_id == agent_id
+        assert checkpoints[0].run_generation == 1
+        # The subagent's raw summary is never stored, only its hash.
+        assert "retry budget" not in repr(checkpoints[0])
+    finally:
+        manager.close()
+
+
+async def test_failed_foreground_subagent_creates_no_checkpoint(
+    agent_tool, runtime, monkeypatch, tmp_path
+):
+    manager, coordinator = _wiki_root_runtime(runtime, tmp_path)
+    try:
+        await coordinator.begin_turn("where is the retry budget", "where is the retry budget")
+
+        result = await _run_foreground_agent_reading(
+            runtime, agent_tool, monkeypatch, succeed=False
+        )
+
+        assert result.is_error
+        assert "OPENKIMO_WIKI_CHECKPOINT_START" not in result.message
+        assert (await coordinator.pending_batch()).checkpoints == ()
+    finally:
+        manager.close()
+
+
+async def test_foreground_subagent_without_an_open_root_turn_adds_no_block(
+    agent_tool, runtime, monkeypatch, tmp_path
+):
+    manager, coordinator = _wiki_root_runtime(runtime, tmp_path)
+    try:
+        assert coordinator.active_turn_id is None
+
+        result = await _run_foreground_agent_reading(runtime, agent_tool, monkeypatch)
+
+        assert not result.is_error
+        assert "OPENKIMO_WIKI_CHECKPOINT_START" not in result.output
+        assert (await coordinator.pending_batch()).checkpoints == ()
+    finally:
+        manager.close()

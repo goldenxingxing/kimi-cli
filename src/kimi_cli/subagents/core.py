@@ -17,6 +17,9 @@ from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.subagents.builder import SubagentBuilder
 from kimi_cli.subagents.models import AgentLaunchSpec, AgentTypeDefinition
 from kimi_cli.subagents.store import SubagentStore
+from kimi_cli.utils.logging import logger
+from kimi_cli.wiki.schema import content_hash
+from kimi_cli.wiki.triggers import PersistedEvidenceRef
 
 if TYPE_CHECKING:
     from kimi_cli.soul.agent import Runtime
@@ -31,6 +34,7 @@ class SubagentRunSpec:
     launch_spec: AgentLaunchSpec
     prompt: str
     resumed: bool
+    run_generation: int = 0
 
 
 async def prepare_soul(
@@ -51,6 +55,7 @@ async def prepare_soul(
         agent_id=spec.agent_id,
         type_def=spec.type_def,
         launch_spec=spec.launch_spec,
+        run_generation=spec.run_generation,
     )
     if on_stage:
         on_stage("agent_built")
@@ -84,3 +89,55 @@ async def prepare_soul(
     # 6. Create soul
     soul = KimiSoul(agent, context=context)
     return soul, prompt
+
+
+def sealed_subagent_evidence(subagent_runtime: Runtime) -> tuple[PersistedEvidenceRef, ...]:
+    """Return one finished subagent run's hash-only grounding evidence."""
+    reporter = subagent_runtime.wiki_evidence_reporter
+    if reporter is None:
+        return ()
+    try:
+        return reporter.seal_subagent_run()
+    except Exception:
+        logger.warning("Failed to seal subagent Wiki evidence; continuing without it")
+        return ()
+
+
+async def deliver_subagent_checkpoint(
+    root_runtime: Runtime,
+    subagent_runtime: Runtime,
+    *,
+    agent_id: str,
+    run_generation: int,
+    summary: str,
+) -> str:
+    """Hand a finished foreground run's evidence to the root as one checkpoint.
+
+    Returns the managed block to append after the summary, or an empty string
+    when there is nothing to hand over.  Every failure is silent: a subagent
+    result must still reach the user when Wiki bookkeeping cannot.
+    """
+    coordinator = root_runtime.wiki_coordinator
+    normalized = summary.strip()
+    if coordinator is None or not normalized:
+        return ""
+    evidence = sealed_subagent_evidence(subagent_runtime)
+    if not evidence:
+        return ""
+    receiving_root_turn_id = coordinator.active_turn_id
+    if receiving_root_turn_id is None:
+        return ""
+    try:
+        checkpoint = await coordinator.accept_subagent_result(
+            agent_id=agent_id,
+            run_generation=run_generation,
+            summary_hash=content_hash(normalized.encode("utf-8")),
+            evidence=evidence,
+            receiving_root_turn_id=receiving_root_turn_id,
+        )
+    except Exception:
+        logger.warning("Failed to attach subagent Wiki checkpoint; returning the summary as-is")
+        return ""
+    if checkpoint is None:
+        return ""
+    return await coordinator.render_checkpoints((checkpoint,))

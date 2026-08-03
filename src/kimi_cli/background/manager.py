@@ -50,6 +50,7 @@ class BackgroundTaskManager:
         self._runtime: Runtime | None = None
         self._live_agent_tasks: dict[str, asyncio.Task[None]] = {}
         self._completion_event: asyncio.Event = asyncio.Event()
+        self._checkpoint_delivery_lock: asyncio.Lock = asyncio.Lock()
 
     @property
     def completion_event(self) -> asyncio.Event:
@@ -294,6 +295,82 @@ class BackgroundTaskManager:
         if limit is None:
             return tasks
         return tasks[:limit]
+
+    async def checkpoint_block_for_task(self, task_id: str) -> str:
+        """Hand a completed background run's sealed evidence to the root, once.
+
+        Every root delivery path — the notification reconciler and every
+        ``TaskOutput`` call — routes through here, so the first caller in a
+        receiving turn gets the managed block and all later callers get an
+        empty string.  The dedupe key is bound to the sealed run, not to the
+        receiving turn, so a replay in a later turn stays suppressed.
+        """
+        runtime = self._runtime
+        if runtime is None or runtime.role != "root":
+            return ""
+        coordinator = runtime.wiki_coordinator
+        if coordinator is None:
+            return ""
+        async with self._checkpoint_delivery_lock:
+            try:
+                return await self._deliver_checkpoint_block(task_id, coordinator)
+            except Exception:
+                logger.warning(
+                    "Failed to deliver the Wiki checkpoint for task {task_id}; "
+                    "returning output without it",
+                    task_id=task_id,
+                )
+                return ""
+
+    async def _deliver_checkpoint_block(self, task_id: str, coordinator: Any) -> str:
+        from kimi_cli.wiki.triggers import canonical_digest
+
+        view = self.get_task(task_id)
+        if view is None:
+            return ""
+        if view.runtime.status != "completed":
+            # Failed, killed, lost, timed-out, or still-running runs never
+            # produce grounding, and any partial manifest is dropped.
+            if is_terminal_status(view.runtime.status):
+                await asyncio.to_thread(self._store.delete_wiki_evidence_manifest, task_id)
+            return ""
+        manifest = await asyncio.to_thread(self._store.read_wiki_evidence_manifest, task_id)
+        if manifest is None or not manifest.evidence:
+            return ""
+        dedupe_key = canonical_digest(
+            (
+                task_id,
+                manifest.agent_id,
+                str(manifest.run_generation),
+                manifest.summary_hash,
+            )
+        )
+        consumer = view.consumer
+        if dedupe_key in consumer.delivered_wiki_checkpoint_keys:
+            return ""
+        receiving_root_turn_id = coordinator.active_turn_id
+        if receiving_root_turn_id is None:
+            return ""
+        checkpoint = await coordinator.accept_subagent_result(
+            agent_id=manifest.agent_id,
+            run_generation=manifest.run_generation,
+            summary_hash=manifest.summary_hash,
+            evidence=manifest.evidence,
+            receiving_root_turn_id=receiving_root_turn_id,
+            task_id=task_id,
+        )
+        if checkpoint is None:
+            return ""
+        updated = consumer.model_copy(
+            update={
+                "delivered_wiki_checkpoint_keys": [
+                    *consumer.delivered_wiki_checkpoint_keys,
+                    dedupe_key,
+                ]
+            }
+        )
+        await asyncio.to_thread(self._store.write_consumer, task_id, updated)
+        return await coordinator.render_checkpoints((checkpoint,))
 
     def get_task(self, task_id: str) -> TaskView | None:
         try:

@@ -18,7 +18,11 @@ from kimi_cli.soul import MaxStepsReached, RunCancelled, UILoopFn, get_wire_or_n
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.toolset import get_current_tool_call_or_none
 from kimi_cli.subagents.builder import SubagentBuilder
-from kimi_cli.subagents.core import SubagentRunSpec, prepare_soul
+from kimi_cli.subagents.core import (
+    SubagentRunSpec,
+    deliver_subagent_checkpoint,
+    prepare_soul,
+)
 from kimi_cli.subagents.models import AgentInstanceRecord, AgentLaunchSpec
 from kimi_cli.subagents.output import SubagentOutputWriter
 from kimi_cli.subagents.store import SubagentStore
@@ -219,12 +223,14 @@ class ForegroundSubagentRunner:
         output_writer = SubagentOutputWriter(self._store.output_path(agent_id))
         output_writer.stage("runner_started")
 
+        run_generation = self._store.begin_run(agent_id).run_generation
         spec = SubagentRunSpec(
             agent_id=agent_id,
             type_def=type_def,
             launch_spec=launch_spec,
             prompt=req.prompt,
             resumed=resumed,
+            run_generation=run_generation,
         )
         soul, prompt = await prepare_soul(
             spec,
@@ -352,6 +358,15 @@ class ForegroundSubagentRunner:
                 final_response,
             ]
         )
+        checkpoint_block = await deliver_subagent_checkpoint(
+            self._runtime,
+            soul.runtime,
+            agent_id=agent_id,
+            run_generation=run_generation,
+            summary=final_response,
+        )
+        if checkpoint_block:
+            lines.extend(["", checkpoint_block])
         return ToolOk(output="\n".join(lines))
 
     async def _prepare_instance(self, req: ForegroundRunRequest) -> PreparedInstance:

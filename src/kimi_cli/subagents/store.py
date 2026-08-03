@@ -31,6 +31,7 @@ class _AgentInstanceRecordPayload(BaseModel):
     updated_at: float
     last_task_id: str | None = None
     launch_spec: _AgentLaunchSpecPayload
+    run_generation: int = 0
 
 
 _VALID_SUBAGENT_STATUSES = cast(
@@ -51,6 +52,7 @@ def _record_from_dict(data: dict[str, Any]) -> AgentInstanceRecord:
         created_at=payload.created_at,
         updated_at=payload.updated_at,
         last_task_id=payload.last_task_id,
+        run_generation=max(payload.run_generation, 0),
         launch_spec=AgentLaunchSpec(
             agent_id=payload.launch_spec.agent_id,
             subagent_type=payload.launch_spec.subagent_type,
@@ -141,6 +143,7 @@ class SubagentStore:
         status: SubagentStatus | None = None,
         description: str | None = None,
         last_task_id: str | None | object = ...,
+        run_generation: int | None = None,
     ) -> AgentInstanceRecord:
         import time
 
@@ -156,9 +159,22 @@ class SubagentStore:
                 current.last_task_id if last_task_id is ... else cast(str | None, last_task_id)
             ),
             launch_spec=current.launch_spec,
+            run_generation=(
+                current.run_generation if run_generation is None else max(run_generation, 0)
+            ),
         )
         self.write_instance(record)
         return record
+
+    def begin_run(self, agent_id: str) -> AgentInstanceRecord:
+        """Advance this instance to its next run generation and persist it.
+
+        The generation is what separates one run's evidence from a resumed
+        run's, so it must move forward before any tool of the new run can
+        report, and it must never be reused after a restart.
+        """
+        current = self.require_instance(agent_id)
+        return self.update_instance(agent_id, run_generation=current.run_generation + 1)
 
     def list_instances(self) -> list[AgentInstanceRecord]:
         records: list[AgentInstanceRecord] = []

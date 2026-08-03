@@ -448,9 +448,18 @@ class Runtime:
         agent_id: str,
         subagent_type: str,
         llm_override: LLM | None = None,
+        run_generation: int = 0,
     ) -> Runtime:
-        """Clone runtime for a subagent."""
-        return Runtime(
+        """Clone runtime for a subagent.
+
+        A subagent gets no Wiki authority of any kind: no manager, no tool
+        context, and no coordinator.  It only gets an evidence reporter, which
+        can observe its own tool results but cannot open turns, create
+        checkpoints, or reach Wiki content.  The reporter resolves sources
+        against the root runtime because the workspace is shared, while the
+        subagent runtime it is attached to stays Wiki-free.
+        """
+        copy = Runtime(
             config=self.config,
             oauth=self.oauth,
             llm=llm_override if llm_override is not None else self.llm,
@@ -476,12 +485,23 @@ class Runtime:
             managed_skill_revision=self.managed_skill_revision,
             skills_prompt=self.skills_prompt,
             requested_skills_dirs=self.requested_skills_dirs,
-            wiki=self.wiki,
+            wiki=None,
             workspace_id=self.workspace_id,
-            wiki_tool_context=self.wiki_tool_context,
+            wiki_tool_context=None,
             wiki_coordinator=None,
             wiki_evidence_reporter=None,
         )
+        if self.role == "root" and self.wiki_coordinator is not None:
+            from kimi_cli.wiki.evidence import WikiEvidenceReporter
+
+            copy.wiki_evidence_reporter = WikiEvidenceReporter(
+                self.wiki_coordinator,
+                self,
+                producer_role="subagent",
+                producer_id=agent_id,
+                run_generation=max(run_generation, 0),
+            )
+        return copy
 
     async def close(self) -> None:
         """Close root-owned Wiki resources once; subagents only borrow them."""
@@ -716,6 +736,9 @@ def _apply_spec_to_builtin_args(
     """
     base = runtime.builtin_args
     overrides: dict[str, Any] = {}
+    if runtime.role != "root" and base.KIMI_WIKI_CONTEXT:
+        # No subagent — builtin or custom — may see Wiki index or retrieval context.
+        overrides["KIMI_WIKI_CONTEXT"] = ""
     if spec.allowed_skills is not None or spec.excluded_skills:
         filtered = filter_skills(
             list(runtime.skills.values()),

@@ -15,6 +15,7 @@ class SubagentBuilder:
         agent_id: str,
         type_def: AgentTypeDefinition,
         launch_spec: AgentLaunchSpec,
+        run_generation: int = 0,
     ) -> Agent:
         effective_model = self.resolve_effective_model(type_def=type_def, launch_spec=launch_spec)
         llm_override = clone_llm_with_model_alias(
@@ -28,6 +29,7 @@ class SubagentBuilder:
             agent_id=agent_id,
             subagent_type=type_def.name,
             llm_override=llm_override,
+            run_generation=run_generation,
         )
         return await load_agent(
             type_def.agent_file,

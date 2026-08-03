@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from kaos.local import local_kaos
 from kosong.tooling import ToolReturnValue
@@ -27,7 +28,9 @@ from kimi_cli.utils.sensitive import is_sensitive_file
 from kimi_cli.wiki.models import SourceRef, has_url_credentials
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.triggers import (
+    EvidenceClass,
     EvidenceObservation,
+    PersistedEvidenceRef,
     ProducerRole,
     WikiCheckpoint,
     WikiEvidence,
@@ -91,6 +94,10 @@ class WikiEvidenceReporter:
         self._managed_turn_lifecycle = False
         self._turn_generation = 0
         self._tool_turns: dict[str, tuple[str, int]] = {}
+        self._sealed_refs: list[PersistedEvidenceRef] = []
+        self._subagent_run_key: str | None = None
+        if producer_role == "subagent" and producer_id and run_generation is not None:
+            self._subagent_run_key = f"{producer_id}:{run_generation}"
 
     def start_root_turn(self, root_turn_id: str) -> None:
         """Bind capture to one accepted real root turn, never a synthetic follow-up."""
@@ -261,8 +268,24 @@ class WikiEvidenceReporter:
             summary_hash=summary_hash,
         )
 
+    def seal_subagent_run(self) -> tuple[PersistedEvidenceRef, ...]:
+        """Return this subagent run's grounding evidence, hash-only and bounded.
+
+        A subagent owns no coordinator state, so its observations never enter a
+        root turn directly.  They are handed back here so the root — in process
+        for a foreground run, or through a persisted manifest for a background
+        one — can admit them into whichever turn actually receives the result.
+        """
+        if self._producer_role != "subagent":
+            return ()
+        return tuple(self._sealed_refs[:_MAX_CHECKPOINT_EVIDENCE])
+
     def _current_root_turn_id(self) -> str | None:
-        if self._producer_role != "root" or self._runtime.role != "root":
+        if self._producer_role == "subagent":
+            # A subagent run is its own capture scope: it is not bound to the
+            # root turn, which may already have ended for a background task.
+            return self._subagent_run_key
+        if self._runtime.role != "root":
             return None
         if self._managed_turn_lifecycle:
             root_turn_id = self._active_root_turn_id
@@ -365,6 +388,18 @@ class WikiEvidenceReporter:
         stable_snapshot: bool,
         triggering: bool,
     ) -> WikiEvidence | None:
+        if self._producer_role == "subagent":
+            self._collect_subagent_ref(
+                source_class=source_class,
+                request_hash=request_hash,
+                result_hash=result_hash,
+                logical_paths=logical_paths,
+                source_refs=source_refs,
+                reliable=reliable,
+                stable_snapshot=stable_snapshot,
+                triggering=triggering,
+            )
+            return None
         return await self._coordinator.record_evidence(
             EvidenceObservation(
                 root_turn_id=root_turn_id,
@@ -383,6 +418,42 @@ class WikiEvidenceReporter:
                 triggering=triggering,
             )
         )
+
+    def _collect_subagent_ref(
+        self,
+        *,
+        source_class: str,
+        request_hash: str,
+        result_hash: str,
+        logical_paths: tuple[str, ...],
+        source_refs: tuple[SourceRef, ...],
+        reliable: bool,
+        stable_snapshot: bool,
+        triggering: bool,
+    ) -> None:
+        """Keep only observations that could ground a checkpoint, within budget."""
+        if not triggering or source_class not in _NON_TRANSIENT_CLASSES:
+            return
+        if len(self._sealed_refs) >= _MAX_CHECKPOINT_EVIDENCE:
+            return
+        ref = PersistedEvidenceRef(
+            evidence_id=uuid4().hex,
+            source_class=cast(EvidenceClass, source_class),
+            request_hash=request_hash,
+            result_hash=result_hash,
+            logical_paths=logical_paths,
+            source_refs=source_refs,
+            reliable=reliable,
+            stable_snapshot=stable_snapshot,
+        )
+        if any(
+            existing.source_class == ref.source_class
+            and existing.request_hash == ref.request_hash
+            and existing.result_hash == ref.result_hash
+            for existing in self._sealed_refs
+        ):
+            return
+        self._sealed_refs.append(ref)
 
 
 def _verified_workspace_source(runtime: Runtime, raw_path: str) -> SourceRef | None:
