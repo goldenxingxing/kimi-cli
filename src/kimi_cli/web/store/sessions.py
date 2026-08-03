@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import ConfigDict, Field
@@ -168,6 +169,26 @@ def _build_kimi_session(entry: SessionIndexEntry) -> KimiCLISession:
     )
 
 
+def load_session_model_override(session_dir: Path) -> str | None:
+    """Read the per-session model override from ``session_config.json``.
+
+    Returns None when the file is missing, unreadable, or has no ``model`` key.
+    """
+    cfg_file = session_dir / "session_config.json"
+    if not cfg_file.exists():
+        return None
+    try:
+        import json
+
+        cfg: Any = json.loads(cfg_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    model = cast("dict[str, Any]", cfg).get("model")
+    return model if isinstance(model, str) and model else None
+
+
 def _build_joint_session(entry: SessionIndexEntry) -> JointSession:
     kimi_session = _build_kimi_session(entry)
     return JointSession(
@@ -181,6 +202,7 @@ def _build_joint_session(entry: SessionIndexEntry) -> JointSession:
         kimi_cli_session=kimi_session,
         archived=entry.state.archived,
         owner_id=entry.state.owner_id,
+        model=load_session_model_override(entry.session_dir),
     )
 
 

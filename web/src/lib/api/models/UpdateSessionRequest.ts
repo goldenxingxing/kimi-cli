@@ -31,6 +31,12 @@ export interface UpdateSessionRequest {
      * @memberof UpdateSessionRequest
      */
     archived?: boolean | null;
+    /**
+     * Per-session model override; null = leave unchanged
+     * @type {string}
+     * @memberof UpdateSessionRequest
+     */
+    model?: string | null;
 }
 
 /**
@@ -52,6 +58,7 @@ export function UpdateSessionRequestFromJSONTyped(json: any, ignoreDiscriminator
         
         'title': json['title'] == null ? undefined : json['title'],
         'archived': json['archived'] == null ? undefined : json['archived'],
+        'model': json['model'] == null ? undefined : json['model'],
     };
 }
 
@@ -68,6 +75,7 @@ export function UpdateSessionRequestToJSONTyped(value?: UpdateSessionRequest | n
         
         'title': value['title'],
         'archived': value['archived'],
+        'model': value['model'],
     };
 }
 

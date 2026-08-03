@@ -383,13 +383,29 @@ async def create_session(
             )
         agent_spec_path = match.path.resolve()
 
+    # Validate the per-session model override (if any) against the effective
+    # model list (config.toml merged with env-provided models). Done before
+    # the session is created so a bad model name leaves nothing on disk.
+    session_model: str | None = None
+    if request is not None and request.model is not None:
+        from kimi_cli.web.api.config import get_effective_model_names
+
+        if request.model not in get_effective_model_names():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Model '{request.model}' not found in config",
+            )
+        session_model = request.model
+
     kimi_cli_session = await KimiCLISession.create(work_dir=work_dir)
     context_file = kimi_cli_session.dir / "context.jsonl"
 
-    # Persist per-session config (thinking override + agent spec path)
+    # Persist per-session config (thinking override + model override + agent spec path)
     _cfg: dict[str, Any] = {}
     if request is not None and request.thinking is not None:
         _cfg["thinking"] = request.thinking
+    if session_model is not None:
+        _cfg["model"] = session_model
     if agent_spec_path is not None:
         _cfg["agent_spec_path"] = str(agent_spec_path)
     if _cfg:
@@ -426,6 +442,7 @@ async def create_session(
         ),
         work_dir=str(work_dir),
         session_dir=str(kimi_cli_session.dir),
+        model=session_model,
     )
 
 
@@ -436,6 +453,7 @@ class CreateSessionRequest(BaseModel):
     create_dir: bool = False  # Whether to auto-create directory if it doesn't exist
     thinking: bool | None = None  # Per-session thinking override; None = use global config
     agent_name: str | None = None  # Name of a discovered agent spec
+    model: str | None = None  # Per-session model override; None = use global default model
 
 
 class ForkSessionRequest(BaseModel):
@@ -860,10 +878,36 @@ async def update_session(
     request: UpdateSessionRequest,
     runner: KimiCLIRunner = Depends(get_runner),
 ) -> Session:
-    """Update a session (e.g., rename title or archive/unarchive)."""
+    """Update a session (e.g., rename title, archive/unarchive, or switch model)."""
     from kimi_cli.session_state import load_session_state, save_session_state
 
-    session = get_editable_session(session_id, runner)
+    # A model switch requires the session to be idle: reject with 409 while
+    # the session is generating a response. Other updates (title/archive)
+    # keep the existing get_editable_session 400 behaviour.
+    session_process = runner.get_session(session_id)
+    if request.model is not None:
+        session = load_session_by_id(session_id)
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found",
+            )
+        if session_process and session_process.is_busy:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Session is busy generating a response. "
+                "Please wait for it to complete before switching model.",
+            )
+        # Validate before any writes so a bad model name aborts the whole PATCH.
+        from kimi_cli.web.api.config import get_effective_model_names
+
+        if request.model not in get_effective_model_names():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Model '{request.model}' not found in config",
+            )
+    else:
+        session = get_editable_session(session_id, runner)
     session_dir = session.kimi_cli_session.dir
     state = load_session_state(session_dir)
 
@@ -883,6 +927,25 @@ async def update_session(
             state.auto_archive_exempt = True
 
     save_session_state(state, session_dir)
+
+    # Update per-session model override if provided
+    if request.model is not None:
+        cfg_file = session_dir / "session_config.json"
+        cfg: dict[str, Any] = {}
+        if cfg_file.exists():
+            try:
+                loaded_cfg: Any = json.loads(cfg_file.read_text(encoding="utf-8"))
+                if isinstance(loaded_cfg, dict):
+                    cfg = cast("dict[str, Any]", loaded_cfg)
+            except Exception:
+                cfg = {}
+        cfg["model"] = request.model
+        cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+        # Restart only this session's worker (when running and idle) so the
+        # new model takes effect; other sessions are untouched.
+        if session_process is not None and session_process.is_running:
+            await session_process.restart_worker(reason="model_update")
 
     # Invalidate cache to force reload
     invalidate_sessions_cache()

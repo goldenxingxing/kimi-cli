@@ -121,6 +121,7 @@ function App() {
     fetchStartupDir,
     renameSession,
     generateTitle,
+    updateSessionModel,
     archiveSession,
     unarchiveSession,
     bulkArchiveSessions,
@@ -136,6 +137,10 @@ function App() {
   );
 
   const [streamStatus, setStreamStatus] = useState<ChatStatus>("ready");
+
+  // Staged model selection for the draft composer (no session yet); sent
+  // along when the session is created.
+  const [draftModel, setDraftModel] = useState<string | null>(null);
 
   useEffect(() => {
     const token = consumeAuthTokenFromUrl();
@@ -336,9 +341,10 @@ function App() {
       thinking?: boolean,
       agentName?: string | null,
     ) => {
-      await createSession(workDir, createDir, thinking, agentName);
+      await createSession(workDir, createDir, thinking, agentName, draftModel);
+      setDraftModel(null);
     },
-    [createSession],
+    [createSession, draftModel],
   );
 
   const handleCreateSessionInDir = useCallback(
@@ -605,6 +611,9 @@ function App() {
       generateTitle={generateTitle}
       onRenameSession={renameSession}
       onForkSession={handleForkSession}
+      onSelectSessionModel={updateSessionModel}
+      draftModel={draftModel}
+      onDraftModelChange={setDraftModel}
     />
   );
 

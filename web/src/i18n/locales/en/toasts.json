@@ -7,6 +7,13 @@
     "errorTitle": "Failed to update global model",
     "fallbackError": "Failed to update global model"
   },
+  "sessionModel": {
+    "successTitle": "Model switched for this session",
+    "busyTitle": "Session is generating a response",
+    "busyDesc": "You can switch models once the current response completes.",
+    "errorTitle": "Failed to switch model",
+    "fallbackError": "Failed to switch model"
+  },
   "restartBusy": {
     "successTitle": "Restarted running sessions",
     "successDesc": "Restarted {{count}} session(s).",

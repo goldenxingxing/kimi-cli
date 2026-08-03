@@ -51,6 +51,18 @@ export type GlobalConfigControlsProps = {
   onPlanModeChange?: (enabled: boolean) => void;
   yolo?: boolean;
   onYoloChange?: (enabled: boolean) => void;
+  /** Current session ID; undefined = draft composer (no session yet) */
+  sessionId?: string;
+  /** Per-session model override; null/undefined = follow global default */
+  sessionModel?: string | null;
+  /** Whether the session is currently generating a response */
+  sessionBusy?: boolean;
+  /** Persist a per-session model selection; resolves true on success */
+  onSelectSessionModel?: (sessionId: string, model: string) => Promise<boolean>;
+  /** Staged draft model shown when no session exists yet */
+  draftModel?: string | null;
+  /** Called when the draft (pre-session) model selection changes */
+  onDraftModelChange?: (model: string) => void;
 };
 
 export function GlobalConfigControls({
@@ -59,82 +71,70 @@ export function GlobalConfigControls({
   onPlanModeChange,
   yolo = false,
   onYoloChange,
+  sessionId,
+  sessionModel,
+  sessionBusy = false,
+  onSelectSessionModel,
+  draftModel,
+  onDraftModelChange,
 }: GlobalConfigControlsProps): ReactElement {
-  const { config, isLoading, isUpdating, error, refresh, update } =
-    useGlobalConfig();
+  const { config, isLoading, error, refresh } = useGlobalConfig();
   const { t } = useTranslation(["toasts", "config", "chat"]);
 
   const [isSelectorOpen, setIsSelectorOpen] = useState(false);
-  const [lastBusySkip, setLastBusySkip] = useState<string[] | null>(null);
+  const [isSwitching, setIsSwitching] = useState(false);
+  // Local fallback for the draft selection when the parent does not control it.
+  const [localDraftModel, setLocalDraftModel] = useState<string | null>(null);
+
+  const effectiveDraftModel = draftModel !== undefined ? draftModel : localDraftModel;
+
+  // The model this selector currently shows: per-session override (or staged
+  // draft) wins, otherwise the global default.
+  const effectiveModelName = sessionId
+    ? (sessionModel ?? config?.defaultModel)
+    : (effectiveDraftModel ?? config?.defaultModel);
 
   const handleSelectModel = useCallback(
     async (modelKey: string) => {
       setIsSelectorOpen(false);
-      if (!config || modelKey === config.defaultModel) {
+      if (!config || modelKey === effectiveModelName) {
         return;
       }
 
-      try {
-        const resp = await update({ defaultModel: modelKey });
-        const restarted = resp.restartedSessionIds ?? [];
-        const skippedBusy = resp.skippedBusySessionIds ?? [];
-
-        if (restarted.length > 0) {
-          toast.success(t("toasts:globalModel.successTitle"), {
-            description: t("toasts:globalModel.successDesc", {
-              count: restarted.length,
-            }),
+      if (sessionId && onSelectSessionModel) {
+        if (sessionBusy) {
+          toast.message(t("toasts:sessionModel.busyTitle"), {
+            description: t("toasts:sessionModel.busyDesc"),
           });
-        } else {
-          toast.success(t("toasts:globalModel.successTitle"));
+          return;
         }
-
-        if (skippedBusy.length > 0) {
-          setLastBusySkip(skippedBusy);
-          toast.message(t("toasts:globalModel.busyTitle"), {
-            description: t("toasts:globalModel.busyDesc", {
-              count: skippedBusy.length,
-            }),
-          });
-        } else {
-          setLastBusySkip(null);
+        setIsSwitching(true);
+        try {
+          const ok = await onSelectSessionModel(sessionId, modelKey);
+          if (ok) {
+            toast.success(t("toasts:sessionModel.successTitle"));
+          }
+        } finally {
+          setIsSwitching(false);
         }
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : t("toasts:globalModel.fallbackError");
-        toast.error(t("toasts:globalModel.errorTitle"), { description: message });
+        return;
       }
+
+      // Draft state (no session yet): stage locally; the selection is sent
+      // along when the session is created.
+      setLocalDraftModel(modelKey);
+      onDraftModelChange?.(modelKey);
     },
-    [config, update, t],
+    [
+      config,
+      effectiveModelName,
+      sessionId,
+      sessionBusy,
+      onSelectSessionModel,
+      onDraftModelChange,
+      t,
+    ],
   );
-
-  const handleForceRestartBusy = useCallback(async () => {
-    if (!lastBusySkip || lastBusySkip.length === 0) {
-      return;
-    }
-    try {
-      const resp = await update({ forceRestartBusySessions: true });
-      const restarted = resp.restartedSessionIds ?? [];
-      const skippedBusy = resp.skippedBusySessionIds ?? [];
-
-      if (skippedBusy.length === 0) {
-        setLastBusySkip(null);
-      } else {
-        setLastBusySkip(skippedBusy);
-      }
-
-      toast.success(t("toasts:restartBusy.successTitle"), {
-        description:
-          restarted.length > 0
-            ? t("toasts:restartBusy.successDesc", { count: restarted.length })
-            : t("toasts:restartBusy.successDescNone"),
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : t("toasts:restartBusy.fallbackError");
-      toast.error(t("toasts:restartBusy.errorTitle"), { description: message });
-    }
-  }, [lastBusySkip, update, t]);
 
   const attachments = usePromptInputAttachments();
 
@@ -143,9 +143,9 @@ export function GlobalConfigControls({
   // ``default_model`` is actually a provider name (the new ``LLM_PROVIDERS``
   // shape) still surface the underlying model id rather than the provider.
   const activeModel =
-    config?.models.find((m) => m.name === config?.defaultModel) ??
-    config?.models.find((m) => m.provider === config?.defaultModel);
-  const triggerLabel = activeModel?.name ?? config?.defaultModel;
+    config?.models.find((m) => m.name === effectiveModelName) ??
+    config?.models.find((m) => m.provider === effectiveModelName);
+  const triggerLabel = activeModel?.name ?? effectiveModelName;
 
   return (
     <div className={cn("flex items-center gap-1", className)}>
@@ -170,13 +170,13 @@ export function GlobalConfigControls({
             className="h-9 max-w-[160px] justify-start gap-2 border-0"
             aria-label={t("config:model.changeAria")}
             type="button"
-            disabled={isLoading || isUpdating || !config}
+            disabled={isLoading || isSwitching || !config}
           >
             <Cpu className="size-4 shrink-0" />
             <span className="truncate">
               {config ? triggerLabel : t("config:model.fallback")}
             </span>
-            {(isLoading || isUpdating) && (
+            {(isLoading || isSwitching) && (
               <Loader className="ml-auto shrink-0" size={14} />
             )}
           </Button>
@@ -187,7 +187,7 @@ export function GlobalConfigControls({
             <ModelSelectorEmpty>{t("config:model.empty")}</ModelSelectorEmpty>
             <ModelSelectorGroup heading={t("config:model.heading")}>
               {(config?.models ?? []).map((m) => {
-                const isSelected = m.name === config?.defaultModel;
+                const isSelected = m.name === effectiveModelName;
                 const label = `${m.name} (${m.model})`;
                 return (
                   <ModelSelectorItem
@@ -282,39 +282,23 @@ export function GlobalConfigControls({
         </>
       )}
 
-      {(lastBusySkip && lastBusySkip.length > 0) || error ? (
-        <div className="mx-1.5 h-4 w-px bg-border/70" />
-      ) : null}
-
-      {lastBusySkip && lastBusySkip.length > 0 ? (
-        <Button
-          variant="outline"
-          size="icon"
-          className="size-9"
-          aria-label={t("config:model.forceRestart")}
-          title={t("config:model.forceRestart")}
-          type="button"
-          onClick={handleForceRestartBusy}
-          disabled={isUpdating}
-        >
-          <RefreshCcw className="size-4" />
-        </Button>
-      ) : null}
-
       {error ? (
-        <Button
-          variant="outline"
-          size="icon"
-          className="size-9"
-          aria-label={t("config:model.reload")}
-          title={t("config:model.reload")}
-          type="button"
-          onClick={() => {
-            refresh();
-          }}
-        >
-          <RefreshCcw className="size-4" />
-        </Button>
+        <>
+          <div className="mx-1.5 h-4 w-px bg-border/70" />
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9"
+            aria-label={t("config:model.reload")}
+            title={t("config:model.reload")}
+            type="button"
+            onClick={() => {
+              refresh();
+            }}
+          >
+            <RefreshCcw className="size-4" />
+          </Button>
+        </>
       ) : null}
     </div>
   );

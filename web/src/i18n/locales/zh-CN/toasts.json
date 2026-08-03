@@ -7,6 +7,13 @@
     "errorTitle": "全局模型更新失败",
     "fallbackError": "全局模型更新失败"
   },
+  "sessionModel": {
+    "successTitle": "已切换本会话模型",
+    "busyTitle": "正在生成回答",
+    "busyDesc": "正在生成回答，完成后才能切换模型。",
+    "errorTitle": "切换模型失败",
+    "fallbackError": "切换模型失败"
+  },
   "restartBusy": {
     "successTitle": "已重启运行中的会话",
     "successDesc": "已重启 {{count}} 个会话。",

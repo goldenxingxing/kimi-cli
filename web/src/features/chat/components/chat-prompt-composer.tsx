@@ -67,6 +67,12 @@ type ChatPromptComposerProps = {
   onPlanModeChange?: (enabled: boolean) => void;
   yolo?: boolean;
   onYoloChange?: (enabled: boolean) => void;
+  /** Persist a per-session model selection; resolves true on success */
+  onSelectSessionModel?: (sessionId: string, model: string) => Promise<boolean>;
+  /** Staged draft model shown when no session exists yet */
+  draftModel?: string | null;
+  /** Called when the draft (pre-session) model selection changes */
+  onDraftModelChange?: (model: string) => void;
   activityStatus?: ActivityDetail;
   usagePercent?: number;
   usedTokens?: number;
@@ -92,6 +98,9 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
   onPlanModeChange,
   yolo = false,
   onYoloChange,
+  onSelectSessionModel,
+  draftModel,
+  onDraftModelChange,
   activityStatus,
   usagePercent,
   usedTokens,
@@ -315,6 +324,12 @@ export const ChatPromptComposer = memo(function ChatPromptComposerComponent({
               onPlanModeChange={onPlanModeChange}
               yolo={yolo}
               onYoloChange={onYoloChange}
+              sessionId={currentSession?.sessionId}
+              sessionModel={currentSession?.model}
+              sessionBusy={isStreaming || isAwaitingIdle}
+              onSelectSessionModel={onSelectSessionModel}
+              draftModel={draftModel}
+              onDraftModelChange={onDraftModelChange}
             />
           </PromptInputTools>
           {isStreaming ? (

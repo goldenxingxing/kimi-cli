@@ -607,11 +607,13 @@ class SessionProcess:
             ".ini",
         }
 
-        # Check model capabilities
+        # Check model capabilities of the session's effective model
+        # (per-session override, falling back to the global default).
         config = load_config()
         capabilities: set[ModelCapability] = set()
-        if config.default_model and config.default_model in config.models:
-            model_config = config.models[config.default_model]
+        effective_model_name = session.model or config.default_model
+        if effective_model_name and effective_model_name in config.models:
+            model_config = config.models[effective_model_name]
             capabilities = derive_model_capabilities(model_config)
         else:
             # Fallback: derive from env var when config file has no model entry
@@ -963,12 +965,16 @@ class KimiCLIRunner:
         *,
         reason: str,
         force: bool,
+        skip_model_override: bool = False,
     ) -> RestartWorkersSummary:
         """Restart all running workers to apply global config updates.
 
         Args:
             reason: Reason for the restart (e.g., "config_update")
             force: If True, also restart busy sessions (may interrupt prompts)
+            skip_model_override: If True, sessions that have a per-session
+                model override are not restarted (their model does not depend
+                on the global default model).
 
         Returns:
             Summary of restarted and skipped sessions
@@ -981,6 +987,10 @@ class KimiCLIRunner:
         tasks: list[asyncio.Task[None]] = []
 
         for session_id, proc in running:
+            if skip_model_override:
+                joint = load_session_by_id(session_id)
+                if joint is not None and joint.model:
+                    continue
             if proc.is_busy and not force:
                 skipped_busy.append(session_id)
                 continue

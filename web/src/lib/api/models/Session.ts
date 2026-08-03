@@ -75,6 +75,12 @@ export interface Session {
      * @memberof Session
      */
     archived?: boolean;
+    /**
+     * Per-session model override; null = follow the global default model
+     * @type {string}
+     * @memberof Session
+     */
+    model?: string | null;
 }
 
 /**
@@ -105,6 +111,7 @@ export function SessionFromJSONTyped(json: any, ignoreDiscriminator: boolean): S
         'workDir': json['work_dir'] == null ? undefined : json['work_dir'],
         'sessionDir': json['session_dir'] == null ? undefined : json['session_dir'],
         'archived': json['archived'] == null ? undefined : json['archived'],
+        'model': json['model'] == null ? undefined : json['model'],
     };
 }
 
@@ -127,6 +134,7 @@ export function SessionToJSONTyped(value?: Session | null, ignoreDiscriminator: 
         'work_dir': value['workDir'],
         'session_dir': value['sessionDir'],
         'archived': value['archived'],
+        'model': value['model'],
     };
 }
 

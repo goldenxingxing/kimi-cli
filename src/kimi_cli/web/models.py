@@ -73,6 +73,10 @@ class Session(BaseModel):
     session_dir: str | None = Field(default=None, description="Session directory path")
     archived: bool = Field(default=False, description="Whether the session is archived")
     owner_id: str | None = Field(default=None, description="User ID of the session owner")
+    model: str | None = Field(
+        default=None,
+        description="Per-session model override; None = follow the global default model",
+    )
 
 
 class UpdateSessionRequest(BaseModel):
@@ -80,6 +84,10 @@ class UpdateSessionRequest(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=200)
     archived: bool | None = Field(default=None, description="Archive or unarchive the session")
+    model: str | None = Field(
+        default=None,
+        description="Per-session model override; None = leave unchanged",
+    )
 
 
 class GenerateTitleRequest(BaseModel):

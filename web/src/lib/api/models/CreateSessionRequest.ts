@@ -43,6 +43,12 @@ export interface CreateSessionRequest {
      * @memberof CreateSessionRequest
      */
     agentName?: string | null;
+    /**
+     * Per-session model override; null/undefined = use global default model
+     * @type {string}
+     * @memberof CreateSessionRequest
+     */
+    model?: string | null;
 }
 
 /**
@@ -66,6 +72,7 @@ export function CreateSessionRequestFromJSONTyped(json: any, ignoreDiscriminator
         'createDir': json['create_dir'] == null ? undefined : json['create_dir'],
         'thinking': json['thinking'] == null ? undefined : json['thinking'],
         'agentName': json['agent_name'] == null ? undefined : json['agent_name'],
+        'model': json['model'] == null ? undefined : json['model'],
     };
 }
 
@@ -84,6 +91,7 @@ export function CreateSessionRequestToJSONTyped(value?: CreateSessionRequest | n
         'create_dir': value['createDir'],
         'thinking': value['thinking'],
         'agent_name': value['agentName'],
+        'model': value['model'],
     };
 }
 

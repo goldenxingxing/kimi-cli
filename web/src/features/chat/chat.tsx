@@ -90,6 +90,12 @@ type ChatWorkspaceProps = {
   onYoloChange?: (enabled: boolean) => void;
   /** Callback to set plan mode */
   onPlanModeChange?: (enabled: boolean) => void;
+  /** Persist a per-session model selection; resolves true on success */
+  onSelectSessionModel?: (sessionId: string, model: string) => Promise<boolean>;
+  /** Staged draft model shown when no session exists yet */
+  draftModel?: string | null;
+  /** Called when the draft (pre-session) model selection changes */
+  onDraftModelChange?: (model: string) => void;
   /** Maximum context size for the current model (tokens) */
   maxContextSize?: number;
   /** Fork session at a specific turn */
@@ -128,6 +134,9 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
   yolo = false,
   onYoloChange,
   onPlanModeChange,
+  onSelectSessionModel,
+  draftModel,
+  onDraftModelChange,
   onForkSession,
   errorMessage,
 }: ChatWorkspaceProps): ReactElement {
@@ -357,6 +366,9 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
                       yolo={yolo}
                       onYoloChange={onYoloChange}
                       onPlanModeChange={onPlanModeChange}
+                      onSelectSessionModel={onSelectSessionModel}
+                      draftModel={draftModel}
+                      onDraftModelChange={onDraftModelChange}
                       activityStatus={activityStatus}
                       usagePercent={usagePercent}
                       usedTokens={usedTokens}

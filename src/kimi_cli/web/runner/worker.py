@@ -16,7 +16,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from kimi_cli import logger
@@ -32,6 +32,24 @@ def configure_session_environment(session: Any) -> None:
     output_dir = Path(str(session.work_dir)) / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     os.environ["KIMI_OUTPUT_DIR"] = str(output_dir)
+
+
+def read_session_overrides(session_dir: Path) -> dict[str, Any]:
+    """Read per-session overrides from ``session_config.json``.
+
+    Returns an empty dict when the file is missing, unreadable, or not a
+    JSON object. Recognized keys: ``thinking``, ``model``, ``agent_spec_path``.
+    """
+    cfg_file = session_dir / "session_config.json"
+    if not cfg_file.exists():
+        return {}
+    try:
+        cfg: Any = json.loads(cfg_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    return cast("dict[str, Any]", cfg)
 
 
 async def run_worker(session_id: UUID) -> None:
@@ -62,19 +80,16 @@ async def run_worker(session_id: UUID) -> None:
     # vs a brand-new session that should honor config.default_plan_mode.
     resumed = (session.dir / "state.json").exists()
 
-    # Read per-session config (thinking override, agent spec path);
-    # None → falls back to global config / default agent.
-    session_thinking: bool | None = None
+    # Read per-session config (thinking override, model override, agent spec
+    # path); None → falls back to global config / default agent.
+    _cfg = read_session_overrides(session.dir)
+    session_thinking: bool | None = _cfg.get("thinking")
+    session_model: str | None = None
+    _model = _cfg.get("model")
+    if isinstance(_model, str) and _model:
+        session_model = _model
     agent_file: Path | None = None
-    _agent_spec_path: str | None = None
-    _cfg_file = session.dir / "session_config.json"
-    if _cfg_file.exists():
-        try:
-            _cfg = json.loads(_cfg_file.read_text(encoding="utf-8"))
-            session_thinking = _cfg.get("thinking")
-            _agent_spec_path = _cfg.get("agent_spec_path")
-        except Exception:
-            pass
+    _agent_spec_path: str | None = _cfg.get("agent_spec_path")
     if _agent_spec_path:
         _path = Path(_agent_spec_path)
         if not _path.is_file():
@@ -90,6 +105,7 @@ async def run_worker(session_id: UUID) -> None:
             mcp_configs=mcp_configs or None,
             resumed=resumed,
             ui_mode="wire",
+            model_name=session_model,
             thinking=session_thinking,
             agent_file=agent_file,
         )
@@ -104,6 +120,7 @@ async def run_worker(session_id: UUID) -> None:
             mcp_configs=None,
             resumed=resumed,
             ui_mode="wire",
+            model_name=session_model,
             thinking=session_thinking,
             agent_file=agent_file,
         )

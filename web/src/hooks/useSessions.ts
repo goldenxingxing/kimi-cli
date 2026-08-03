@@ -67,7 +67,10 @@ type UseSessionsReturn = {
     createDir?: boolean,
     thinking?: boolean,
     agentName?: string | null,
+    model?: string | null,
   ) => Promise<Session>;
+  /** Update a session's per-session model override */
+  updateSessionModel: (sessionId: string, model: string) => Promise<boolean>;
   /** Delete a session by ID */
   deleteSession: (sessionId: string) => Promise<boolean>;
   /** Select a session */
@@ -266,6 +269,7 @@ export function useSessions(): UseSessionsReturn {
           workDir: item.work_dir,
           sessionDir: item.session_dir,
           archived: item.archived,
+          model: item.model,
         }),
       );
       setArchivedSessions(archivedList);
@@ -308,6 +312,7 @@ export function useSessions(): UseSessionsReturn {
           workDir: item.work_dir,
           sessionDir: item.session_dir,
           archived: item.archived,
+          model: item.model,
         }),
       );
       setArchivedSessions((current) => [...current, ...moreArchived]);
@@ -436,6 +441,7 @@ export function useSessions(): UseSessionsReturn {
       createDir?: boolean,
       thinking?: boolean,
       agentName?: string | null,
+      model?: string | null,
     ): Promise<Session> => {
       setIsLoading(true);
       setError(null);
@@ -447,6 +453,7 @@ export function useSessions(): UseSessionsReturn {
           create_dir?: boolean;
           thinking?: boolean;
           agent_name?: string;
+          model?: string;
         } = {};
         if (workDir) {
           body.work_dir = workDir;
@@ -459,6 +466,9 @@ export function useSessions(): UseSessionsReturn {
         }
         if (agentName) {
           body.agent_name = agentName;
+        }
+        if (model) {
+          body.model = model;
         }
         const response = await fetch(`${basePath}/api/sessions/`, {
           method: "POST",
@@ -707,6 +717,52 @@ export function useSessions(): UseSessionsReturn {
 
     return response.json();
   }, []);
+
+  /**
+   * Update a session's per-session model override.
+   * Returns true on success; false when the backend rejects the change
+   * (e.g. 409 while the session is busy generating a response).
+   */
+  const updateSessionModel = useCallback(
+    async (sessionId: string, model: string): Promise<boolean> => {
+      try {
+        const basePath = getApiBaseUrl();
+        const response = await fetch(
+          `${basePath}/api/sessions/${encodeURIComponent(sessionId)}`,
+          {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              ...getAuthHeader(),
+            },
+            body: JSON.stringify({ model }),
+          },
+        );
+
+        if (!response.ok) {
+          const data = await response.json();
+          if (response.status === 409) {
+            toast.error(i18n.t("toasts:sessionModel.busyTitle"), {
+              description: i18n.t("toasts:sessionModel.busyDesc"),
+            });
+            return false;
+          }
+          throw new Error(data.detail || "Failed to update session model");
+        }
+
+        // Refresh the session so list state picks up the new model override
+        await refreshSession(sessionId);
+        return true;
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to update session model";
+        console.error("Failed to update session model:", err);
+        toast.error(message);
+        return false;
+      }
+    },
+    [refreshSession],
+  );
 
   /**
    * Rename a session
@@ -1115,6 +1171,7 @@ export function useSessions(): UseSessionsReturn {
     setSearchQuery,
     refreshSession,
     createSession,
+    updateSessionModel,
     deleteSession,
     selectSession,
     applySessionStatus,

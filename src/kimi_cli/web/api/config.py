@@ -290,6 +290,11 @@ def _build_global_config() -> GlobalConfig:
     )
 
 
+def get_effective_model_names() -> set[str]:
+    """Names of all selectable models (config.toml merged with env-provided models)."""
+    return {m.name for m in _build_global_config().models}
+
+
 def _get_runner(req: Request) -> KimiCLIRunner:
     """Get KimiCLIRunner from FastAPI app state."""
     return req.app.state.runner
@@ -321,8 +326,7 @@ async def update_global_config(
     config = load_config()
 
     # Build effective model list (includes env-var fallback models)
-    global_config = _build_global_config()
-    effective_model_names = {m.name for m in global_config.models}
+    effective_model_names = get_effective_model_names()
 
     # Validate and update default_model
     if request.default_model is not None:
@@ -381,6 +385,9 @@ async def update_global_config(
         summary = await runner.restart_running_workers(
             reason="config_update",
             force=request.force_restart_busy_sessions or False,
+            # Sessions with a per-session model override do not depend on the
+            # global default model; skip them when only the default changed.
+            skip_model_override=request.default_model is not None,
         )
         restarted = [str(sid) for sid in summary.restarted_session_ids]
         skipped_busy = [str(sid) for sid in summary.skipped_busy_session_ids]

@@ -59,6 +59,11 @@ type ChatWorkspaceContainerProps = {
   generateTitle?: (sessionId: string) => Promise<string | null>;
   onRenameSession?: (sessionId: string, newTitle: string) => Promise<boolean>;
   onForkSession?: (sessionId: string, turnIndex: number) => Promise<void>;
+  onSelectSessionModel?: (sessionId: string, model: string) => Promise<boolean>;
+  /** Staged draft model shown when no session exists yet */
+  draftModel?: string | null;
+  /** Called when the draft (pre-session) model selection changes */
+  onDraftModelChange?: (model: string) => void;
 };
 
 export function ChatWorkspaceContainer({
@@ -76,6 +81,9 @@ export function ChatWorkspaceContainer({
   generateTitle,
   onRenameSession,
   onForkSession,
+  onSelectSessionModel,
+  draftModel,
+  onDraftModelChange,
 }: ChatWorkspaceContainerProps): ReactElement {
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   // Pending message state for when we need to create a session first
@@ -88,13 +96,16 @@ export function ChatWorkspaceContainer({
   const { config } = useGlobalConfig();
   const maxContextSize = useMemo(() => {
     if (!config) return undefined;
-    // ``defaultModel`` is the model-key under legacy configs but a provider
-    // name under the new LLM_PROVIDERS scheme; check both to find the entry.
+    // The session's per-session model override wins; otherwise the global
+    // default. ``defaultModel`` is the model-key under legacy configs but a
+    // provider name under the new LLM_PROVIDERS scheme; check both to find
+    // the entry.
+    const effectiveModelName = currentSession?.model ?? config.defaultModel;
     const model =
-      config.models.find((m) => m.name === config.defaultModel) ??
-      config.models.find((m) => m.provider === config.defaultModel);
+      config.models.find((m) => m.name === effectiveModelName) ??
+      config.models.find((m) => m.provider === effectiveModelName);
     return model?.maxContextSize;
-  }, [config]);
+  }, [config, currentSession?.model]);
 
   // Plugin system: event emitter + registration
   const { translateWireEvent } = usePluginEventEmitter();
@@ -437,6 +448,9 @@ export function ChatWorkspaceContainer({
       onPlanModeChange={handlePlanModeChange}
       yolo={yolo}
       onYoloChange={handleYoloChange}
+      onSelectSessionModel={onSelectSessionModel}
+      draftModel={draftModel}
+      onDraftModelChange={onDraftModelChange}
       errorMessage={streamError?.message}
       onForkSession={onForkSession ? handleForkSession : undefined}
     />
