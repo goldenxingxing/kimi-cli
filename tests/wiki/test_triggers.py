@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 
 from kimi_cli.wiki.models import SourceRef
 from kimi_cli.wiki.triggers import (
+    CheckpointCause,
+    CheckpointDiscardReason,
     EvidenceClass,
     EvidenceObservation,
+    ProducerRole,
     WikiCheckpointBackpressure,
     WikiTriggerRejected,
     WikiTurnCoordinator,
@@ -278,3 +282,69 @@ async def test_discard_and_close_clear_active_turn_and_pending_checkpoints(
     assert coordinator.active_turn_id is None
     with pytest.raises(WikiTriggerRejected, match="closed"):
         await coordinator.begin_turn("closed", "closed")
+
+
+@pytest.mark.parametrize("role", ("worker", "", "ROOT"))
+async def test_record_evidence_rejects_unknown_producer_roles_at_runtime(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+    role: str,
+) -> None:
+    turn = await coordinator.begin_turn("roles", "roles")
+
+    with pytest.raises(WikiTriggerRejected, match="producer role"):
+        await coordinator.record_evidence(
+            replace(
+                make_observation(turn.root_turn_id, workspace_source),
+                producer_role=cast(ProducerRole, role),
+            )
+        )
+
+
+@pytest.mark.parametrize("run_generation", (True, False, 1.0, "1", -1))
+async def test_record_evidence_rejects_non_integer_or_negative_run_generations(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+    run_generation: object,
+) -> None:
+    turn = await coordinator.begin_turn("generations", "generations")
+    observation = replace(
+        make_observation(turn.root_turn_id, workspace_source),
+        producer_role="subagent",
+        producer_id="subagent-1",
+        run_generation=cast(int | None, run_generation),
+    )
+
+    with pytest.raises(WikiTriggerRejected, match="run generation"):
+        await coordinator.record_evidence(observation)
+
+
+async def test_checkpoint_rejects_unknown_cause_at_runtime(
+    coordinator: WikiTurnCoordinator,
+) -> None:
+    await coordinator.begin_turn("cause", "cause")
+
+    with pytest.raises(WikiTriggerRejected, match="checkpoint cause"):
+        await coordinator.create_checkpoint(cast(CheckpointCause, "background"))
+
+    assert (await coordinator.pending_batch()).checkpoints == ()
+
+
+async def test_discard_rejects_unknown_reason_before_telemetry() -> None:
+    events: list[str] = []
+    coordinator = WikiTurnCoordinator(
+        provenance_session_id=uuid4(),
+        telemetry_track=lambda event, **_properties: events.append(event),
+    )
+    await coordinator.begin_turn("discard", "discard")
+    checkpoint = await coordinator.create_checkpoint("root_evidence")
+    event_count_before = len(events)
+
+    with pytest.raises(WikiTriggerRejected, match="discard reason"):
+        await coordinator.discard(
+            checkpoint.checkpoint_id,
+            cast(CheckpointDiscardReason, "model-supplied"),
+        )
+
+    assert len(events) == event_count_before
+    assert (await coordinator.pending_batch()).checkpoints == (checkpoint,)

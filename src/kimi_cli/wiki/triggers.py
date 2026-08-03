@@ -33,6 +33,9 @@ _MAX_BATCH_CHECKPOINTS = 4
 _MAX_CHECKPOINT_EVIDENCE = 8
 _MAX_CHECKPOINT_SUMMARY_BYTES = 1024
 _MAX_BATCH_BYTES = 6 * 1024
+_PRODUCER_ROLES = frozenset({"root", "subagent"})
+_CHECKPOINT_CAUSES = frozenset({"root_evidence", "subagent_result", "explicit_user_durable"})
+_CHECKPOINT_DISCARD_REASONS = frozenset({"user_declined", "not_useful", "superseded", "cancelled"})
 _EXPECTED_SOURCE_KIND: dict[EvidenceClass, Literal["workspace-file", "conversation", "web"]] = {
     "workspace-file": "workspace-file",
     "workspace-search": "workspace-file",
@@ -273,6 +276,8 @@ class WikiTurnCoordinator:
     ) -> WikiCheckpoint:
         async with self._locked():
             self._require_open()
+            if type(cause) is not str or cause not in _CHECKPOINT_CAUSES:
+                raise WikiTriggerRejected("unknown checkpoint cause")
             root_turn_id = self._require_active_turn()
             self._validate_checkpoint_inputs(root_turn_id, evidence_ids, summary_hash)
             dedupe_key = canonical_digest(
@@ -329,6 +334,8 @@ class WikiTurnCoordinator:
 
     async def discard(self, checkpoint_id: str, reason: CheckpointDiscardReason) -> None:
         async with self._locked():
+            if type(reason) is not str or reason not in _CHECKPOINT_DISCARD_REASONS:
+                raise WikiTriggerRejected("unknown checkpoint discard reason")
             checkpoint = self._checkpoint(checkpoint_id)
             if checkpoint.state in {"discarded", "consumed", "cancelled"}:
                 return
@@ -391,14 +398,21 @@ class WikiTurnCoordinator:
             raise WikiTriggerRejected("evidence hashes must be canonical SHA-256 values")
         if not observation.tool_call_id:
             raise WikiTriggerRejected("evidence requires a tool call identifier")
+        if (
+            type(observation.producer_role) is not str
+            or observation.producer_role not in _PRODUCER_ROLES
+        ):
+            raise WikiTriggerRejected("unknown evidence producer role")
+        if observation.run_generation is not None and (
+            type(observation.run_generation) is not int or observation.run_generation < 0
+        ):
+            raise WikiTriggerRejected("invalid evidence run generation")
         if observation.producer_role == "root" and (
             observation.producer_id is not None or observation.run_generation is not None
         ):
             raise WikiTriggerRejected("root evidence cannot claim subagent identity")
         if observation.producer_role == "subagent" and (
-            not observation.producer_id
-            or observation.run_generation is None
-            or observation.run_generation < 0
+            not observation.producer_id or observation.run_generation is None
         ):
             raise WikiTriggerRejected("subagent evidence requires a producer and run generation")
 
