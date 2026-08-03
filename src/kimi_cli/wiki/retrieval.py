@@ -56,6 +56,11 @@ async def retrieve_for_turn(
     slash_command: bool = False,
 ) -> WikiRetrievalResult | None:
     """Search and render safe references, leaving conversation flow unaffected on failure."""
+    # Screen the full accepted text first.  A credential that falls beyond the
+    # bounded query must never be hidden by normalization or UTF-8 truncation.
+    if contains_sensitive_text(raw_text):
+        await _record_outcome(coordinator, "sensitive")
+        return None
     query = build_retrieval_query(raw_text)
     skip_reason = _skip_reason(query, synthetic=synthetic, slash_command=slash_command)
     if skip_reason is not None:

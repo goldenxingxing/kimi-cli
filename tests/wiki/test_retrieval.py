@@ -103,6 +103,23 @@ async def test_empty_wiki_and_zero_hits_inject_nothing(coordinator: WikiTurnCoor
     assert coordinator.last_retrieval_outcome == "empty"
 
 
+@pytest.mark.asyncio
+async def test_sensitive_credential_after_utf8_query_cap_skips_before_normalization_or_search(
+    coordinator: WikiTurnCoordinator,
+) -> None:
+    from kimi_cli.wiki.retrieval import RETRIEVAL_MAX_QUERY_BYTES, retrieve_for_turn
+
+    # The leading CJK text consumes 510 bytes.  Normalization/truncation first
+    # would remove the credential, so the raw prompt must be screened first.
+    raw_text = "检" * (RETRIEVAL_MAX_QUERY_BYTES // len("检".encode()))
+    raw_text += " api_key=secret-value"
+    manager = _Manager([_result(1)])
+
+    assert await retrieve_for_turn(manager, coordinator, raw_text) is None
+    assert manager.queries == []
+    assert coordinator.last_retrieval_outcome == "sensitive"
+
+
 def test_query_normalization_truncates_only_complete_utf8_code_points() -> None:
     from kimi_cli.wiki.retrieval import build_retrieval_query
 
