@@ -779,6 +779,8 @@ class KimiSoul:
                 try:
                     root_turn = await coordinator.begin_turn(raw_text_input, text_input)
                     wiki_root_turn_id = root_turn.root_turn_id
+                    if self._runtime.wiki_evidence_reporter is not None:
+                        self._runtime.wiki_evidence_reporter.start_root_turn(root_turn.root_turn_id)
                     retrieval = await retrieve_for_turn(
                         self._runtime.wiki, coordinator, raw_text_input
                     )
@@ -917,6 +919,8 @@ class KimiSoul:
                         await coordinator.cancel_turn(wiki_root_turn_id)
                     except Exception:
                         logger.warning("Wiki retrieval turn cancellation failed")
+            if wiki_root_turn_id is not None and self._runtime.wiki_evidence_reporter is not None:
+                self._runtime.wiki_evidence_reporter.finish_root_turn(wiki_root_turn_id)
             self._set_trace_id(None)
 
     async def _refresh_managed_skills(self) -> None:
@@ -1223,6 +1227,19 @@ class KimiSoul:
                     if step_outcome.stop_reason == "no_tool_calls"
                     else None
                 )
+                if (
+                    final_message is not None
+                    and self.is_root
+                    and self._runtime.wiki_evidence_reporter is not None
+                ):
+                    try:
+                        await self._runtime.wiki_evidence_reporter.seal_root_completion(
+                            final_message.extract_text("\n")
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Wiki root completion sealing failed; continuing the conversation"
+                        )
                 return TurnOutcome(
                     stop_reason=step_outcome.stop_reason,
                     final_message=final_message,

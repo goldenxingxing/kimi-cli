@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
@@ -47,6 +48,14 @@ def _make_toolset() -> KimiToolset:
     ts.add(DummyToolA())
     ts.add(DummyToolB())
     return ts
+
+
+def _make_runtime_toolset(runtime) -> tuple[KimiToolset, AsyncMock]:
+    reporter = AsyncMock()
+    runtime.wiki_evidence_reporter = reporter
+    toolset = KimiToolset(runtime)
+    toolset.add(DummyToolA())
+    return toolset, reporter
 
 
 def _tool_names(ts: KimiToolset) -> set[str]:
@@ -234,6 +243,46 @@ async def test_same_step_dedup():
     assert tr_2.tool_call_id == "tc-dedup-2"
 
     assert ts.end_step() == [("ToolA", '{"value":"x"}'), ("ToolA", '{"value":"x"}')]
+
+
+async def test_successful_tool_result_is_observed_once_after_real_execution(runtime):
+    ts, reporter = _make_runtime_toolset(runtime)
+    ts.begin_step([])
+    args = json.dumps({"value": "x"})
+
+    first = ts.handle(
+        ToolCall(id="evidence-1", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    duplicate = ts.handle(
+        ToolCall(id="evidence-2", function=ToolCall.FunctionBody(name="ToolA", arguments=args))
+    )
+    assert isinstance(first, asyncio.Task)
+    assert isinstance(duplicate, asyncio.Task)
+
+    first_result, duplicate_result = await asyncio.gather(first, duplicate)
+
+    assert first_result.return_value.output == duplicate_result.return_value.output == "a"
+    reporter.observe.assert_awaited_once()
+    assert reporter.observe.await_args.kwargs["tool_call_id"] == "evidence-1"
+
+
+async def test_evidence_failure_does_not_change_tool_result(runtime):
+    ts, reporter = _make_runtime_toolset(runtime)
+    reporter.observe.side_effect = RuntimeError("private reporter failure")
+    ts.begin_step([])
+
+    task = ts.handle(
+        ToolCall(
+            id="evidence-failure",
+            function=ToolCall.FunctionBody(name="ToolA", arguments='{"value":"x"}'),
+        )
+    )
+    assert isinstance(task, asyncio.Task)
+
+    result = await task
+
+    assert result.return_value.output == "a"
+    assert not result.return_value.is_error
 
 
 async def test_same_step_dedup_canonicalizes_argument_key_order():

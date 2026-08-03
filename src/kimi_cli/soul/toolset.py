@@ -227,7 +227,8 @@ def _append_reminder_to_return_value(
 
 
 class KimiToolset:
-    def __init__(self) -> None:
+    def __init__(self, runtime: Runtime | None = None) -> None:
+        self._runtime = runtime
         self._tool_dict: dict[str, ToolType] = {}
         self._hidden_tools: set[str] = set()
         self._mcp_servers: dict[str, MCPServerInfo] = {}
@@ -484,10 +485,27 @@ class KimiToolset:
                         )
 
                 # --- Execute tool ---
+                reporter = (
+                    self._runtime.wiki_evidence_reporter if self._runtime is not None else None
+                )
+                begin_evidence = (
+                    getattr(reporter, "begin_tool_call", None) if reporter is not None else None
+                )
+                if callable(begin_evidence) and not inspect.iscoroutinefunction(begin_evidence):
+                    begin_evidence(tool_call.id)
                 t0 = time.monotonic()
                 try:
                     ret = await tool.call(arguments)
                 except asyncio.CancelledError:
+                    abandon_evidence = (
+                        getattr(reporter, "abandon_tool_call", None)
+                        if reporter is not None
+                        else None
+                    )
+                    if callable(abandon_evidence) and not inspect.iscoroutinefunction(
+                        abandon_evidence
+                    ):
+                        abandon_evidence(tool_call.id)
                     from kimi_cli.telemetry import track
 
                     track(
@@ -502,6 +520,15 @@ class KimiToolset:
                     )
                     raise
                 except Exception as e:
+                    abandon_evidence = (
+                        getattr(reporter, "abandon_tool_call", None)
+                        if reporter is not None
+                        else None
+                    )
+                    if callable(abandon_evidence) and not inspect.iscoroutinefunction(
+                        abandon_evidence
+                    ):
+                        abandon_evidence(tool_call.id)
                     tool_elapsed = time.monotonic() - t0
                     logger.exception(
                         "Tool execution failed: {tool_name} (call_id={call_id})",
@@ -575,6 +602,19 @@ class KimiToolset:
                         dup_type="cross_step" if is_cross_step_dup else "normal",
                         **_trace_id_kwargs(),
                     )
+
+                if reporter is not None:
+                    try:
+                        await reporter.observe(
+                            tool,
+                            arguments,
+                            ret,
+                            tool_call_id=tool_call.id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Wiki evidence capture failed; continuing with the original tool result"
+                        )
 
                 # --- PostToolUse (fire-and-forget) ---
                 _hook_task = asyncio.create_task(

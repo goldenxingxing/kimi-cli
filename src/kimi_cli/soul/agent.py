@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from fastmcp.mcp_config import MCPConfig
 
     from kimi_cli.tools.wiki import WikiToolContext
+    from kimi_cli.wiki.evidence import WikiEvidenceReporter
     from kimi_cli.wiki.manager import WikiManager
     from kimi_cli.wiki.triggers import WikiTurnCoordinator
 
@@ -225,6 +226,7 @@ class Runtime:
     workspace_id: UUID | None = None
     wiki_tool_context: WikiToolContext | None = None
     wiki_coordinator: WikiTurnCoordinator | None = None
+    wiki_evidence_reporter: WikiEvidenceReporter | None = None
 
     def __post_init__(self) -> None:
         if self.subagent_store is None:
@@ -385,7 +387,7 @@ class Runtime:
                 workspace_id=workspace_id,
             )
 
-        return Runtime(
+        runtime = Runtime(
             config=config,
             oauth=oauth,
             llm=llm,
@@ -434,6 +436,11 @@ class Runtime:
             wiki_tool_context=wiki_tool_context,
             wiki_coordinator=wiki_coordinator,
         )
+        if wiki_coordinator is not None:
+            from kimi_cli.wiki.evidence import WikiEvidenceReporter
+
+            runtime.wiki_evidence_reporter = WikiEvidenceReporter(wiki_coordinator, runtime)
+        return runtime
 
     def copy_for_subagent(
         self,
@@ -473,6 +480,7 @@ class Runtime:
             workspace_id=self.workspace_id,
             wiki_tool_context=self.wiki_tool_context,
             wiki_coordinator=None,
+            wiki_evidence_reporter=None,
         )
 
     async def close(self) -> None:
@@ -627,7 +635,7 @@ async def load_agent(
             )
         )
 
-    toolset = KimiToolset()
+    toolset = KimiToolset(runtime)
     tool_deps = {
         KimiToolset: toolset,
         Runtime: runtime,
