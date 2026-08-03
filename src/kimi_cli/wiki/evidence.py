@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Literal, cast
@@ -43,11 +44,14 @@ _MAX_TRACKED_EVIDENCE_PER_TURN = 64
 _MAX_IN_FLIGHT_TOOL_CALLS = 128
 _MAX_CHECKPOINT_EVIDENCE = 8
 _NON_TRANSIENT_CLASSES = frozenset(
-    {"workspace-file", "shell-result", "web-document", "workspace-mutation"}
-)
-_TRANSIENT_COMMAND = re.compile(
-    r"^(?:date|pwd|ps(?:\s+.*)?|top(?:\s+.*)?|git\s+status(?:\s+.*)?)$",
-    re.IGNORECASE,
+    {
+        "workspace-file",
+        "workspace-search",
+        "shell-result",
+        "web-search",
+        "web-document",
+        "workspace-mutation",
+    }
 )
 _TEST_COUNT_ONLY = re.compile(
     r"^\s*(?:=+\s*)?(?:\d+\s+)?(?:passed|failed|skipped|errors?)"
@@ -152,7 +156,7 @@ class WikiEvidenceReporter:
                 result_hash=_result_hash(result),
                 reliable=False,
                 stable_snapshot=False,
-                triggering=False,
+                triggering=True,
             )
         elif tool_type is Shell:
             command = _string_argument(arguments, "command")
@@ -176,7 +180,7 @@ class WikiEvidenceReporter:
                 stable_snapshot=False,
                 triggering=(
                     not _bool_argument(arguments, "run_in_background")
-                    and not _is_transient_shell(command, output)
+                    and not _is_transient_shell(command, output, result)
                 ),
             )
         elif tool_type is SearchWeb:
@@ -188,7 +192,7 @@ class WikiEvidenceReporter:
                 result_hash=_result_hash(result),
                 reliable=False,
                 stable_snapshot=False,
-                triggering=False,
+                triggering=True,
             )
         elif tool_type is FetchURL:
             evidence = await self._web_document(
@@ -232,12 +236,13 @@ class WikiEvidenceReporter:
             return None
 
         summary_hash = content_hash(normalized.encode("utf-8"))
-        batch = await self._coordinator.pending_batch()
-        for checkpoint in batch.checkpoints:
-            if checkpoint.cause == "subagent_result" and checkpoint.summary_hash == summary_hash:
-                return checkpoint
-
         evidence_ids = tuple(record.evidence_id for record in triggering[:_MAX_CHECKPOINT_EVIDENCE])
+        merged = await self._coordinator.attach_root_evidence_to_equivalent_subagent(
+            summary_hash=summary_hash,
+            evidence_ids=evidence_ids,
+        )
+        if merged is not None:
+            return merged
         return await self._coordinator.create_checkpoint(
             "root_evidence",
             evidence_ids=evidence_ids,
@@ -502,13 +507,126 @@ def _normalize_web_url(raw_url: str) -> str | None:
     return normalized if not has_url_credentials(normalized) else None
 
 
-def _is_transient_shell(command: str, output: str) -> bool:
-    normalized_command = " ".join(command.split())
+def _is_transient_shell(command: str, output: str, result: ToolReturnValue) -> bool:
+    if not command.strip() or _TEST_COUNT_ONLY.fullmatch(output):
+        return True
+    if any(_transient_brief(block) for block in result.display):
+        return True
+    tokens = _shell_tokens(command)
+    if tokens is None:
+        return False
+    tokens = _strip_shell_prefixes(tokens)
+    if not tokens:
+        return False
+    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    arguments = tokens[1:]
+    if executable == "date":
+        return all(_readonly_date_argument(argument) for argument in arguments)
+    if executable == "pwd":
+        return all(
+            argument in {"-L", "-P", "--logical", "--physical", "--help", "--version"}
+            for argument in arguments
+        )
+    if executable in {"ps", "pgrep", "top", "jobs", "uptime"}:
+        return True
+    if executable == "git":
+        return _is_git_status(arguments)
+    return False
+
+
+def _shell_tokens(command: str) -> list[str] | None:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    if any(token and set(token) <= set(";&|<>") for token in tokens):
+        return None
+    return tokens
+
+
+def _strip_shell_prefixes(tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    while remaining:
+        token = remaining[0]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+            remaining.pop(0)
+            continue
+        if token in {"command", "builtin", "exec", "nohup", "time"}:
+            prefix = remaining.pop(0)
+            while remaining and remaining[0] == "--":
+                remaining.pop(0)
+            if prefix in {"command", "time"} and remaining and remaining[0] == "-p":
+                remaining.pop(0)
+            continue
+        if token != "env":
+            break
+        remaining.pop(0)
+        if remaining and remaining[0] == "--":
+            remaining.pop(0)
+        while remaining:
+            option = remaining[0]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", option) or option in {
+                "-i",
+                "--ignore-environment",
+                "-0",
+                "--null",
+            }:
+                remaining.pop(0)
+            elif option in {"-u", "--unset", "-C", "--chdir"}:
+                if len(remaining) < 2:
+                    return []
+                del remaining[:2]
+            elif option.startswith(("--unset=", "--chdir=")):
+                remaining.pop(0)
+            else:
+                break
+    return remaining
+
+
+def _readonly_date_argument(argument: str) -> bool:
     return bool(
-        not normalized_command
-        or _TRANSIENT_COMMAND.fullmatch(normalized_command)
-        or _TEST_COUNT_ONLY.fullmatch(output)
+        argument.startswith("+")
+        or argument
+        in {
+            "-u",
+            "--utc",
+            "-R",
+            "--rfc-email",
+            "--resolution",
+            "--help",
+            "--version",
+        }
+        or argument == "-I"
+        or argument.startswith(("-I", "--iso-8601=", "--rfc-3339="))
     )
+
+
+def _is_git_status(arguments: list[str]) -> bool:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}:
+            index += 2
+        elif argument.startswith(("--git-dir=", "--work-tree=", "--namespace=")) or argument in {
+            "--no-pager",
+            "--literal-pathspecs",
+            "--no-optional-locks",
+        }:
+            index += 1
+        else:
+            break
+    return index < len(arguments) and arguments[index] == "status"
+
+
+def _transient_brief(block: object) -> bool:
+    text = getattr(block, "text", None)
+    if not isinstance(text, str):
+        return False
+    normalized = "-".join(text.casefold().replace("_", "-").split())
+    return normalized in {"clock", "current-status", "progress"}
 
 
 def _is_reusable_conclusion(conclusion: str) -> bool:

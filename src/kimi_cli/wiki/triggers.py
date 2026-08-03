@@ -310,17 +310,13 @@ class WikiTurnCoordinator:
                 raise WikiTriggerRejected("unknown checkpoint cause")
             root_turn_id = self._require_active_turn()
             self._validate_checkpoint_inputs(root_turn_id, evidence_ids, summary_hash)
-            dedupe_key = canonical_digest(
-                (
-                    self.provenance_session_id.hex,
-                    _uuid_component(self.workspace_id),
-                    root_turn_id,
-                    cause,
-                    *evidence_ids,
-                    summary_hash or "",
-                    producer_id or "",
-                    str(run_generation) if run_generation is not None else "",
-                )
+            dedupe_key = self._checkpoint_dedupe_key(
+                root_turn_id=root_turn_id,
+                cause=cause,
+                evidence_ids=evidence_ids,
+                summary_hash=summary_hash,
+                producer_id=producer_id,
+                run_generation=run_generation,
             )
             existing_id = self._checkpoint_by_key.get(dedupe_key)
             if existing_id is not None:
@@ -345,6 +341,67 @@ class WikiTurnCoordinator:
             self._checkpoint_by_key[dedupe_key] = checkpoint.checkpoint_id
             self._safe_track("wiki_trigger_checkpoint_created", cause=cause)
             return checkpoint
+
+    async def attach_root_evidence_to_equivalent_subagent(
+        self,
+        *,
+        summary_hash: str,
+        evidence_ids: tuple[str, ...],
+    ) -> WikiCheckpoint | None:
+        """Atomically merge root evidence into one unambiguous subagent checkpoint."""
+        async with self._locked():
+            self._require_open()
+            root_turn_id = self._require_active_turn()
+            self._validate_checkpoint_inputs(root_turn_id, evidence_ids, summary_hash)
+            matches = [
+                checkpoint
+                for checkpoint in self._checkpoints.values()
+                if checkpoint.root_turn_id == root_turn_id
+                and checkpoint.cause == "subagent_result"
+                and checkpoint.summary_hash == summary_hash
+                and checkpoint.state in {"pending", "persisting"}
+                and checkpoint.producer_id
+                and type(checkpoint.run_generation) is int
+                and checkpoint.run_generation >= 0
+            ]
+            semantic_keys = {
+                (
+                    self.provenance_session_id,
+                    self.workspace_id,
+                    checkpoint.root_turn_id,
+                    checkpoint.cause,
+                    checkpoint.summary_hash,
+                    checkpoint.producer_id,
+                    checkpoint.run_generation,
+                )
+                for checkpoint in matches
+            }
+            if len(matches) != 1 or len(semantic_keys) != 1:
+                return None
+            checkpoint = matches[0]
+            combined = tuple(dict.fromkeys((*checkpoint.evidence_ids, *evidence_ids)))
+            if len(combined) > _MAX_CHECKPOINT_EVIDENCE:
+                return None
+            if combined == checkpoint.evidence_ids:
+                return checkpoint
+            dedupe_key = self._checkpoint_dedupe_key(
+                root_turn_id=checkpoint.root_turn_id,
+                cause=checkpoint.cause,
+                evidence_ids=combined,
+                summary_hash=checkpoint.summary_hash,
+                producer_id=checkpoint.producer_id,
+                run_generation=checkpoint.run_generation,
+            )
+            collision = self._checkpoint_by_key.get(dedupe_key)
+            if collision is not None and collision != checkpoint.checkpoint_id:
+                return None
+            updated = replace(checkpoint, evidence_ids=combined, dedupe_key=dedupe_key)
+            # Keep the old key as an alias so a replay of the pre-merge checkpoint
+            # returns the immutable replacement instead of creating a duplicate.
+            self._checkpoint_by_key[dedupe_key] = checkpoint.checkpoint_id
+            self._checkpoints[checkpoint.checkpoint_id] = updated
+            self._safe_track("wiki_trigger_checkpoint_evidence_attached")
+            return updated
 
     async def pending_batch(self) -> CheckpointBatch:
         async with self._locked():
@@ -487,6 +544,29 @@ class WikiTurnCoordinator:
                 raise WikiTriggerRejected(
                     "checkpoint evidence is not owned by the active root turn"
                 )
+
+    def _checkpoint_dedupe_key(
+        self,
+        *,
+        root_turn_id: str,
+        cause: CheckpointCause,
+        evidence_ids: tuple[str, ...],
+        summary_hash: str | None,
+        producer_id: str | None,
+        run_generation: int | None,
+    ) -> str:
+        return canonical_digest(
+            (
+                self.provenance_session_id.hex,
+                _uuid_component(self.workspace_id),
+                root_turn_id,
+                cause,
+                *evidence_ids,
+                summary_hash or "",
+                producer_id or "",
+                str(run_generation) if run_generation is not None else "",
+            )
+        )
 
     def _checkpoint(self, checkpoint_id: str) -> WikiCheckpoint:
         checkpoint = self._checkpoints.get(checkpoint_id)

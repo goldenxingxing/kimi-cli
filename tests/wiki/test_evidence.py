@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from kosong.tooling import CallableTool2, ToolError, ToolOk, ToolReturnValue
+from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolOk, ToolReturnValue
 from pydantic import BaseModel
 
 from kimi_cli.tools.file.glob import Glob
+from kimi_cli.tools.file.grep_local import Grep
 from kimi_cli.tools.file.read import Params as ReadParams
 from kimi_cli.tools.shell import Shell
 from kimi_cli.tools.web.fetch import FetchURL
+from kimi_cli.tools.web.search import SearchWeb
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.triggers import WikiTurnCoordinator
@@ -304,6 +307,175 @@ async def test_discovery_and_web_document_evidence_use_bounded_safe_metadata(
 
 
 @pytest.mark.asyncio
+async def test_successful_discovery_evidence_is_triggering_and_can_seal_evaluation(
+    evidence_runtime,
+    glob_tool: Glob,
+    grep_tool: Grep,
+    search_web_tool: SearchWeb,
+) -> None:
+    coordinator = evidence_runtime.wiki_coordinator
+    reporter = evidence_runtime.wiki_evidence_reporter
+    await coordinator.begin_turn("evaluate sources", "evaluate sources")
+
+    evidence = [
+        await reporter.observe(
+            glob_tool,
+            {"pattern": "*.md"},
+            ToolOk(output="decision.md"),
+            tool_call_id="discover-glob",
+        ),
+        await reporter.observe(
+            grep_tool,
+            {"pattern": "durable", "path": "."},
+            ToolOk(output="decision.md:1:durable"),
+            tool_call_id="discover-grep",
+        ),
+        await reporter.observe(
+            search_web_tool,
+            {"query": "durable design"},
+            ToolOk(output="Title: Durable design"),
+            tool_call_id="discover-web",
+        ),
+    ]
+
+    assert all(item is not None for item in evidence)
+    assert all(item.triggering for item in evidence if item is not None)
+    assert all(not item.reliable for item in evidence if item is not None)
+    assert all(not item.stable_snapshot for item in evidence if item is not None)
+    checkpoint = await reporter.seal_root_completion("Evaluate these sources before reuse.")
+    assert checkpoint is not None
+    assert checkpoint.evidence_ids == tuple(item.evidence_id for item in evidence if item)
+
+    assert (
+        await reporter.observe(
+            glob_tool,
+            {"pattern": "empty"},
+            ToolOk(output=""),
+            tool_call_id="discover-empty",
+        )
+        is None
+    )
+    assert (
+        await reporter.observe(
+            grep_tool,
+            {"pattern": "failed", "path": "."},
+            ToolError(message="failed", brief="failed"),
+            tool_call_id="discover-failed",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"command": "date +%s"},
+        {"command": "command pwd -P"},
+        {"command": "command -- pwd --physical"},
+        {"command": "git -C /tmp/project status --short"},
+        {"command": "env TZ=UTC date --utc +%FT%TZ"},
+        {"command": "env -- TZ=UTC date +%s"},
+        {"command": "TZ=UTC /usr/bin/date +%s"},
+    ],
+)
+async def test_tokenized_shell_status_command_families_are_non_triggering(
+    evidence_runtime,
+    shell_tool: Shell,
+    arguments: dict[str, str],
+) -> None:
+    await evidence_runtime.wiki_coordinator.begin_turn("status", "status")
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        shell_tool,
+        arguments,
+        ToolOk(output="current snapshot"),
+        tool_call_id="shell-status",
+    )
+
+    assert evidence is not None
+    assert not evidence.triggering
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /tmp/project log -1 --format=%H",
+        "python -c 'print(\"date +%s\")'",
+        "date +%s > durable.timestamp",
+        "git status && git diff --cached",
+    ],
+)
+async def test_tokenized_shell_classifier_preserves_durable_commands(
+    evidence_runtime,
+    shell_tool: Shell,
+    command: str,
+) -> None:
+    await evidence_runtime.wiki_coordinator.begin_turn("durable", "durable")
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        shell_tool,
+        {"command": command},
+        ToolOk(output="durable result"),
+        tool_call_id="shell-durable",
+    )
+
+    assert evidence is not None
+    assert evidence.triggering
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("brief", ["clock", "current-status", "progress"])
+async def test_exact_transient_shell_brief_categories_are_non_triggering(
+    evidence_runtime,
+    shell_tool: Shell,
+    brief: str,
+) -> None:
+    await evidence_runtime.wiki_coordinator.begin_turn("inspect", "inspect")
+    result = ToolReturnValue(
+        is_error=False,
+        output="snapshot",
+        message="",
+        display=[BriefDisplayBlock(text=brief)],
+    )
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        shell_tool,
+        {"command": "custom-inspector"},
+        result,
+        tool_call_id="shell-brief",
+    )
+
+    assert evidence is not None
+    assert not evidence.triggering
+
+
+@pytest.mark.asyncio
+async def test_durable_words_containing_transient_terms_are_not_misclassified(
+    evidence_runtime,
+    shell_tool: Shell,
+) -> None:
+    await evidence_runtime.wiki_coordinator.begin_turn("policy", "policy")
+    result = ToolReturnValue(
+        is_error=False,
+        output="durable progress retention policy",
+        message="",
+        display=[BriefDisplayBlock(text="durable current-status policy")],
+    )
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        shell_tool,
+        {"command": "generate-policy"},
+        result,
+        tool_call_id="shell-policy",
+    )
+
+    assert evidence is not None
+    assert evidence.triggering
+
+
+@pytest.mark.asyncio
 async def test_root_completion_requires_triggering_non_transient_evidence_and_deduplicates(
     evidence_runtime,
     read_file_tool,
@@ -347,3 +519,146 @@ async def test_short_chinese_reusable_conclusion_creates_checkpoint(
 
     assert checkpoint is not None
     assert checkpoint.summary_hash == content_hash("这是稳定结论".encode())
+
+
+@pytest.mark.asyncio
+async def test_equivalent_subagent_checkpoint_atomically_attaches_root_evidence_beyond_batch(
+    evidence_runtime,
+    read_file_tool,
+) -> None:
+    workspace = Path(str(evidence_runtime.session.work_dir))
+    path = workspace / "docs" / "merge.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("merge evidence", encoding="utf-8")
+    coordinator = evidence_runtime.wiki_coordinator
+    reporter = evidence_runtime.wiki_evidence_reporter
+    await coordinator.begin_turn("merge", "merge")
+    for index in range(5):
+        await coordinator.create_checkpoint(
+            "root_evidence",
+            summary_hash=content_hash(f"unrelated-{index}".encode()),
+        )
+    conclusion = "Equivalent subagent conclusion"
+    original = await coordinator.create_checkpoint(
+        "subagent_result",
+        summary_hash=content_hash(conclusion.encode()),
+        producer_id="worker",
+        run_generation=7,
+    )
+    result = await read_file_tool(ReadParams(path=str(path)))
+    root_evidence = await reporter.observe(
+        read_file_tool,
+        {"path": str(path)},
+        result,
+        tool_call_id="merge-read",
+    )
+    assert root_evidence is not None
+
+    merged = await reporter.seal_root_completion(conclusion)
+
+    assert merged is not None
+    assert merged.checkpoint_id == original.checkpoint_id
+    assert original.evidence_ids == ()
+    assert merged.evidence_ids == (root_evidence.evidence_id,)
+    replay = await coordinator.create_checkpoint(
+        "subagent_result",
+        summary_hash=content_hash(conclusion.encode()),
+        producer_id="worker",
+        run_generation=7,
+    )
+    assert replay == merged
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_subagent_generations_do_not_merge_wrong_checkpoint(
+    evidence_runtime,
+    read_file_tool,
+) -> None:
+    workspace = Path(str(evidence_runtime.session.work_dir))
+    path = workspace / "docs" / "ambiguous.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("root evidence", encoding="utf-8")
+    coordinator = evidence_runtime.wiki_coordinator
+    reporter = evidence_runtime.wiki_evidence_reporter
+    await coordinator.begin_turn("ambiguous", "ambiguous")
+    conclusion = "Same summary across agent generations"
+    summary_hash = content_hash(conclusion.encode())
+    older = await coordinator.create_checkpoint(
+        "subagent_result",
+        summary_hash=summary_hash,
+        producer_id="worker",
+        run_generation=1,
+    )
+    newer = await coordinator.create_checkpoint(
+        "subagent_result",
+        summary_hash=summary_hash,
+        producer_id="worker",
+        run_generation=2,
+    )
+    result = await read_file_tool(ReadParams(path=str(path)))
+    await reporter.observe(
+        read_file_tool,
+        {"path": str(path)},
+        result,
+        tool_call_id="ambiguous-read",
+    )
+
+    sealed = await reporter.seal_root_completion(conclusion)
+
+    assert sealed is not None
+    assert sealed.cause == "root_evidence"
+    assert sealed.checkpoint_id not in {older.checkpoint_id, newer.checkpoint_id}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_root_evidence_attachments_preserve_both_updates(
+    evidence_runtime,
+    read_file_tool,
+) -> None:
+    workspace = Path(str(evidence_runtime.session.work_dir))
+    path = workspace / "docs" / "concurrent.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("concurrent evidence", encoding="utf-8")
+    coordinator = evidence_runtime.wiki_coordinator
+    reporter = evidence_runtime.wiki_evidence_reporter
+    await coordinator.begin_turn("concurrent", "concurrent")
+    summary_hash = content_hash(b"Concurrent subagent conclusion")
+    original = await coordinator.create_checkpoint(
+        "subagent_result",
+        summary_hash=summary_hash,
+        producer_id="worker",
+        run_generation=4,
+    )
+    result = await read_file_tool(ReadParams(path=str(path)))
+    left = await reporter.observe(
+        read_file_tool,
+        {"path": str(path)},
+        result,
+        tool_call_id="concurrent-left",
+    )
+    right = await reporter.observe(
+        read_file_tool,
+        {"path": str(path)},
+        result,
+        tool_call_id="concurrent-right",
+    )
+    assert left is not None and right is not None
+
+    await asyncio.gather(
+        coordinator.attach_root_evidence_to_equivalent_subagent(
+            summary_hash=summary_hash,
+            evidence_ids=(left.evidence_id,),
+        ),
+        coordinator.attach_root_evidence_to_equivalent_subagent(
+            summary_hash=summary_hash,
+            evidence_ids=(right.evidence_id,),
+        ),
+    )
+    final = await coordinator.attach_root_evidence_to_equivalent_subagent(
+        summary_hash=summary_hash,
+        evidence_ids=(),
+    )
+
+    assert final is not None
+    assert final.checkpoint_id == original.checkpoint_id
+    assert final.evidence_ids == (left.evidence_id, right.evidence_id)
