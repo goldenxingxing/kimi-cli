@@ -144,6 +144,16 @@ def canonical_digest(parts: Sequence[str]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def canonical_evidence_source_digest(evidence: WikiEvidence) -> str:
+    """Hash one observation's source identity independently of its producer/request."""
+    return canonical_digest(
+        (
+            evidence.result_hash,
+            *(sorted(_source_key(source) for source in evidence.source_refs)),
+        )
+    )
+
+
 class WikiTurnCoordinator:
     """Own one root runtime's trusted turn/evidence/checkpoint state.
 
@@ -353,6 +363,14 @@ class WikiTurnCoordinator:
             self._require_open()
             root_turn_id = self._require_active_turn()
             self._validate_checkpoint_inputs(root_turn_id, evidence_ids, summary_hash)
+            root_evidence = tuple(self._evidence[evidence_id] for evidence_id in evidence_ids)
+            if not root_evidence or any(
+                evidence.producer_role != "root" for evidence in root_evidence
+            ):
+                return None
+            root_source_digests = {
+                canonical_evidence_source_digest(evidence) for evidence in root_evidence
+            }
             matches = [
                 checkpoint
                 for checkpoint in self._checkpoints.values()
@@ -363,6 +381,14 @@ class WikiTurnCoordinator:
                 and checkpoint.producer_id
                 and type(checkpoint.run_generation) is int
                 and checkpoint.run_generation >= 0
+                and root_source_digests
+                & {
+                    canonical_evidence_source_digest(evidence)
+                    for evidence_id in checkpoint.evidence_ids
+                    if (evidence := self._evidence[evidence_id]).producer_role == "subagent"
+                    and evidence.producer_id == checkpoint.producer_id
+                    and evidence.run_generation == checkpoint.run_generation
+                }
             ]
             semantic_keys = {
                 (

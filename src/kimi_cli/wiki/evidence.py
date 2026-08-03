@@ -43,6 +43,7 @@ _MAX_TRACKED_TURNS = 32
 _MAX_TRACKED_EVIDENCE_PER_TURN = 64
 _MAX_IN_FLIGHT_TOOL_CALLS = 128
 _MAX_CHECKPOINT_EVIDENCE = 8
+_MAX_DISCOVERY_MATCHES = 64
 _NON_TRANSIENT_CLASSES = frozenset(
     {
         "workspace-file",
@@ -148,12 +149,23 @@ class WikiEvidenceReporter:
                 mutation=mutation,
             )
         elif tool_type in {Glob, Grep}:
+            verified_search = _verified_workspace_search(
+                self._runtime,
+                tool_type,
+                arguments,
+                result,
+            )
+            if verified_search is None:
+                return None
+            logical_paths, source_refs = verified_search
             evidence = await self._record(
                 root_turn_id=root_turn_id,
                 tool_call_id=tool_call_id,
                 source_class="workspace-search",
                 request_hash=request_hash,
                 result_hash=_result_hash(result),
+                logical_paths=logical_paths,
+                source_refs=source_refs,
                 reliable=False,
                 stable_snapshot=False,
                 triggering=True,
@@ -401,6 +413,132 @@ def _verified_workspace_source(runtime: Runtime, raw_path: str) -> SourceRef | N
         return None
 
 
+def _verified_workspace_search(
+    runtime: Runtime,
+    tool_type: type[object],
+    arguments: JsonType,
+    result: ToolReturnValue,
+) -> tuple[tuple[str, ...], tuple[SourceRef, ...]] | None:
+    if (
+        runtime.session.work_dir_meta.kaos != local_kaos.name
+        or runtime.wiki is None
+        or runtime.workspace_id is None
+        or not isinstance(arguments, dict)
+    ):
+        return None
+    try:
+        workspace = Path(str(runtime.session.work_dir)).expanduser().resolve(strict=True)
+    except OSError:
+        return None
+
+    if tool_type is Glob:
+        raw_target = arguments.get("directory")
+        if raw_target is None:
+            raw_target = str(workspace)
+        if not isinstance(raw_target, str) or not raw_target:
+            return None
+        search_target = _verified_contained_path(workspace, raw_target)
+        if search_target is None or not search_target.is_dir():
+            return None
+        search_base = search_target
+        raw_matches = tuple(line for line in _output_text(result).splitlines() if line)
+        require_file = False
+    elif tool_type is Grep:
+        raw_target = arguments.get("path", ".")
+        if not isinstance(raw_target, str) or not raw_target:
+            return None
+        search_target = _verified_contained_path(workspace, raw_target)
+        if search_target is None or not (search_target.is_file() or search_target.is_dir()):
+            return None
+        search_base = search_target.parent if search_target.is_file() else search_target
+        raw_matches = _grep_match_paths(
+            _output_text(result),
+            arguments.get("output_mode", "files_with_matches"),
+        )
+        if raw_matches is None:
+            return None
+        require_file = True
+    else:
+        return None
+
+    if not raw_matches or len(raw_matches) > _MAX_DISCOVERY_MATCHES:
+        return None
+    logical_paths: list[str] = []
+    source_refs: list[SourceRef] = []
+    for raw_match in raw_matches:
+        match = _verified_contained_path(workspace, raw_match, relative_to=search_base)
+        if match is None or (require_file and not match.is_file()):
+            return None
+        try:
+            relative = match.relative_to(workspace).as_posix()
+        except ValueError:
+            return None
+        if is_sensitive_file(relative):
+            return None
+        if relative not in logical_paths:
+            logical_paths.append(relative)
+        if match.is_file():
+            try:
+                source = runtime.wiki.registry.relative_source(runtime.workspace_id, match)
+            except (OSError, ValueError):
+                return None
+            if all(existing.path != source.path for existing in source_refs):
+                source_refs.append(source)
+    return tuple(logical_paths), tuple(source_refs)
+
+
+def _verified_contained_path(
+    workspace: Path,
+    raw_path: str,
+    *,
+    relative_to: Path | None = None,
+) -> Path | None:
+    unresolved = Path(raw_path).expanduser()
+    if not unresolved.is_absolute():
+        if ".." in PurePath(raw_path).parts:
+            return None
+        unresolved = (relative_to or workspace) / unresolved
+    try:
+        lexical_relative = unresolved.relative_to(workspace)
+        candidate = unresolved.resolve(strict=True)
+        candidate.relative_to(workspace)
+    except (OSError, ValueError):
+        return None
+    current = workspace
+    for component in lexical_relative.parts:
+        current = current / component
+        if current.is_symlink():
+            return None
+    return candidate
+
+
+def _grep_match_paths(output: str, output_mode: object) -> tuple[str, ...] | None:
+    if output_mode not in {"content", "count_matches", "files_with_matches"}:
+        return None
+    paths: list[str] = []
+    content_line = re.compile(r"^(.*?)([:\-])(\d+)\2")
+    for line in output.splitlines():
+        if not line:
+            continue
+        if output_mode == "content":
+            if line == "--":
+                continue
+            matched = content_line.match(line)
+            if matched is None:
+                return None
+            path = matched.group(1)
+        elif output_mode == "count_matches":
+            path, separator, count = line.rpartition(":")
+            if not separator or not count.isdigit():
+                return None
+        else:
+            path = line
+        if not path:
+            return None
+        paths.append(path)
+    return tuple(paths)
+
+
 def _arguments_hash(arguments: JsonType) -> str:
     try:
         encoded = json.dumps(
@@ -512,14 +650,16 @@ def _is_transient_shell(command: str, output: str, result: ToolReturnValue) -> b
         return True
     if any(_transient_brief(block) for block in result.display):
         return True
-    tokens = _shell_tokens(command)
-    if tokens is None:
+    pipeline = _shell_pipeline_tokens(command)
+    return pipeline is not None and all(_is_transient_command(segment) for segment in pipeline)
+
+
+def _is_transient_command(tokens: list[str]) -> bool:
+    unwrapped = _strip_shell_prefixes(tokens)
+    if not unwrapped:
         return False
-    tokens = _strip_shell_prefixes(tokens)
-    if not tokens:
-        return False
-    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
-    arguments = tokens[1:]
+    executable = unwrapped[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    arguments = unwrapped[1:]
     if executable == "date":
         return all(_readonly_date_argument(argument) for argument in arguments)
     if executable == "pwd":
@@ -534,7 +674,9 @@ def _is_transient_shell(command: str, output: str, result: ToolReturnValue) -> b
     return False
 
 
-def _shell_tokens(command: str) -> list[str] | None:
+def _shell_pipeline_tokens(command: str) -> tuple[list[str], ...] | None:
+    if "\n" in command or "\r" in command:
+        return None
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
@@ -542,48 +684,194 @@ def _shell_tokens(command: str) -> list[str] | None:
         tokens = list(lexer)
     except ValueError:
         return None
-    if any(token and set(token) <= set(";&|<>") for token in tokens):
+    if not tokens or any("`" in token or "$" in token for token in tokens):
         return None
-    return tokens
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "|":
+            if not segments[-1]:
+                return None
+            segments.append([])
+        elif token and set(token) <= set(";&|<>()"):
+            return None
+        else:
+            segments[-1].append(token)
+    if not segments[-1]:
+        return None
+    return tuple(segments)
 
 
-def _strip_shell_prefixes(tokens: list[str]) -> list[str]:
+def _strip_shell_prefixes(tokens: list[str]) -> list[str] | None:
     remaining = list(tokens)
     while remaining:
         token = remaining[0]
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
             remaining.pop(0)
             continue
-        if token in {"command", "builtin", "exec", "nohup", "time"}:
-            prefix = remaining.pop(0)
-            while remaining and remaining[0] == "--":
-                remaining.pop(0)
-            if prefix in {"command", "time"} and remaining and remaining[0] == "-p":
+        executable = token.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if executable in {"builtin", "exec"}:
+            remaining.pop(0)
+            if remaining and remaining[0] == "--":
                 remaining.pop(0)
             continue
-        if token != "env":
-            break
-        remaining.pop(0)
-        if remaining and remaining[0] == "--":
+        if executable == "command":
             remaining.pop(0)
-        while remaining:
-            option = remaining[0]
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", option) or option in {
-                "-i",
-                "--ignore-environment",
-                "-0",
-                "--null",
-            }:
+            while remaining and remaining[0] in {"-p", "--"}:
                 remaining.pop(0)
-            elif option in {"-u", "--unset", "-C", "--chdir"}:
-                if len(remaining) < 2:
-                    return []
-                del remaining[:2]
-            elif option.startswith(("--unset=", "--chdir=")):
+            continue
+        if executable == "time":
+            remaining.pop(0)
+            if remaining and remaining[0] in {"-p", "--portability"}:
                 remaining.pop(0)
-            else:
-                break
+            continue
+        if executable == "env":
+            remaining = _strip_env_prefix(remaining)
+        elif executable == "sudo":
+            remaining = _strip_sudo_prefix(remaining)
+        elif executable == "nice":
+            remaining = _strip_nice_prefix(remaining)
+        elif executable == "timeout":
+            remaining = _strip_timeout_prefix(remaining)
+        else:
+            break
+        if remaining is None:
+            return None
     return remaining
+
+
+def _strip_env_prefix(tokens: list[str]) -> list[str] | None:
+    remaining = tokens[1:]
+    if remaining and remaining[0] == "--":
+        remaining.pop(0)
+    while remaining:
+        option = remaining[0]
+        if option == "--":
+            remaining.pop(0)
+            break
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", option) or option in {
+            "-i",
+            "--ignore-environment",
+            "-0",
+            "--null",
+        }:
+            remaining.pop(0)
+        elif option in {"-u", "--unset", "-C", "--chdir"}:
+            if len(remaining) < 2:
+                return None
+            del remaining[:2]
+        elif option.startswith(("--unset=", "--chdir=")):
+            remaining.pop(0)
+        elif option.startswith("-"):
+            return None
+        else:
+            break
+    return remaining
+
+
+def _strip_sudo_prefix(tokens: list[str]) -> list[str] | None:
+    remaining = tokens[1:]
+    flags = {
+        "-A",
+        "-b",
+        "-E",
+        "-H",
+        "-K",
+        "-k",
+        "-n",
+        "-S",
+        "--askpass",
+        "--background",
+        "--non-interactive",
+        "--preserve-env",
+        "--remove-timestamp",
+        "--reset-timestamp",
+        "--set-home",
+        "--stdin",
+    }
+    with_value = {
+        "-C",
+        "-D",
+        "-g",
+        "-h",
+        "-p",
+        "-R",
+        "-r",
+        "-T",
+        "-t",
+        "-u",
+        "--chdir",
+        "--close-from",
+        "--command-timeout",
+        "--group",
+        "--host",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user",
+    }
+    while remaining and remaining[0].startswith("-"):
+        option = remaining[0]
+        if option == "--":
+            remaining.pop(0)
+            break
+        if option in flags or option.startswith("--preserve-env="):
+            remaining.pop(0)
+        elif option in with_value:
+            if len(remaining) < 2:
+                return None
+            del remaining[:2]
+        elif (
+            any(option.startswith(f"{name}=") for name in with_value if name.startswith("--"))
+            or re.fullmatch(r"-[AbEHKnSk]+", option)
+            or re.fullmatch(r"-(?:C|D|g|h|p|R|r|T|t|u).+", option)
+        ):
+            remaining.pop(0)
+        else:
+            return None
+    return remaining
+
+
+def _strip_nice_prefix(tokens: list[str]) -> list[str] | None:
+    remaining = tokens[1:]
+    if remaining and remaining[0] == "--":
+        remaining.pop(0)
+    elif remaining and remaining[0] in {"-n", "--adjustment"}:
+        if len(remaining) < 2 or not re.fullmatch(r"[+-]?\d+", remaining[1]):
+            return None
+        del remaining[:2]
+    elif remaining and (
+        re.fullmatch(r"-\d+", remaining[0]) or re.fullmatch(r"--adjustment=[+-]?\d+", remaining[0])
+    ):
+        remaining.pop(0)
+    elif remaining and remaining[0].startswith("-"):
+        return None
+    return remaining
+
+
+def _strip_timeout_prefix(tokens: list[str]) -> list[str] | None:
+    remaining = tokens[1:]
+    flags = {"--foreground", "--preserve-status", "-v", "--verbose"}
+    with_value = {"-k", "--kill-after", "-s", "--signal"}
+    while remaining and remaining[0].startswith("-"):
+        option = remaining[0]
+        if option == "--":
+            remaining.pop(0)
+            break
+        if option in flags:
+            remaining.pop(0)
+        elif option in with_value:
+            if len(remaining) < 2:
+                return None
+            del remaining[:2]
+        elif option.startswith(("--kill-after=", "--signal=")):
+            remaining.pop(0)
+        else:
+            return None
+    if not remaining or not re.fullmatch(
+        r"(?:\d+(?:\.\d+)?(?:[smhd])?|infinity)", remaining[0], re.IGNORECASE
+    ):
+        return None
+    return remaining[1:]
 
 
 def _readonly_date_argument(argument: str) -> bool:
