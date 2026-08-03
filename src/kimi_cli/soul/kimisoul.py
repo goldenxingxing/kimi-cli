@@ -918,13 +918,20 @@ class KimiSoul:
                 from kimi_cli.tools.wiki import reset_wiki_turn_context
 
                 reset_wiki_turn_context(wiki_turn_token)
-            if wiki_root_turn_id is not None and not turn_finished:
+            if wiki_root_turn_id is not None:
                 coordinator = self._runtime.wiki_coordinator
                 if coordinator is not None:
                     try:
-                        await coordinator.cancel_turn(wiki_root_turn_id)
+                        # Every real turn is retired here, on any stop reason.
+                        # The resolution loop only runs on a no-tool completion,
+                        # so a rejected or step-capped turn would otherwise leave
+                        # its checkpoints pending until they wedge the coordinator.
+                        if turn_finished:
+                            await coordinator.finish_turn(wiki_root_turn_id)
+                        else:
+                            await coordinator.cancel_turn(wiki_root_turn_id)
                     except Exception:
-                        logger.warning("Wiki retrieval turn cancellation failed")
+                        logger.warning("Wiki turn retirement failed")
             if wiki_root_turn_id is not None and self._runtime.wiki_evidence_reporter is not None:
                 self._runtime.wiki_evidence_reporter.finish_root_turn(wiki_root_turn_id)
             self._set_trace_id(None)

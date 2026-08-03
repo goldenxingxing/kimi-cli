@@ -497,11 +497,25 @@ class Wiki(CallableTool2[Params]):
             return await self._prepare_and_commit(
                 manager, params, context, resolvable=resolvable, grant=grant
             )
+        except (WikiBusyError, WikiConflictError, WikiRecoveryRequired):
+            # The Wiki moved under us. Hand the checkpoint back so the identical
+            # candidate may retry after a fresh read; changed content must earn
+            # a new grant.
+            await self._release_or_finish(grant)
+            raise
         except BaseException:
             # No path may leave write authority outstanding, including a
             # cancellation or an unexpected failure inside Approval.
             await self._finish_grant(grant, "failed")
             raise
+
+    async def _release_or_finish(self, grant: WikiAdmissionGrant | None) -> None:
+        """Release a grant for one retry, or spend it if it cannot be released."""
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None or grant is None:
+            return
+        if not await coordinator.release_retry(grant.checkpoint_id, grant.candidate_hash):
+            await self._finish_grant(grant, "failed")
 
     async def _prepare_and_commit(
         self,

@@ -661,3 +661,77 @@ async def test_grant_records_no_raw_text_or_absolute_path(admission_runtime) -> 
     assert "durable decision" not in rendered
     assert "Signed tags only" not in rendered
     assert isinstance(grant.workspace_id, UUID)
+
+
+@pytest.mark.asyncio
+async def test_a_revision_conflict_returns_the_checkpoint_for_one_retry(
+    admission_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retryable conflict is not a spent opportunity."""
+    from kimi_cli.wiki.transaction import WikiConflictError
+
+    checkpoint, source, _ = await _file_checkpoint(admission_runtime)
+    coordinator = admission_runtime.wiki_coordinator
+    tool = Wiki(admission_runtime)
+    params = Params(
+        operation="remember",
+        checkpoint_id=checkpoint.checkpoint_id,
+        candidate=_candidate(source),
+    )
+    calls: list[int] = []
+
+    real_commit = admission_runtime.wiki.commit
+
+    def _conflict_once(prepared):
+        calls.append(1)
+        if len(calls) == 1:
+            raise WikiConflictError("the Wiki moved")
+        return real_commit(prepared)
+
+    monkeypatch.setattr(admission_runtime.wiki, "commit", _conflict_once)
+
+    first = await tool(params)
+
+    assert first.is_error
+    # The grant was released, not spent: the checkpoint is open again.
+    assert coordinator.unconsumed_grant_count == 0
+    assert len((await coordinator.pending_batch()).checkpoints) == 1
+
+    second = await tool(params)
+
+    assert not second.is_error
+    assert coordinator.unconsumed_grant_count == 0
+    assert (await coordinator.pending_batch()).checkpoints == ()
+
+
+@pytest.mark.asyncio
+async def test_a_grant_cannot_be_spent_after_its_turn_moved_on(admission_runtime) -> None:
+    """An in-flight write must not commit into a turn that already ended."""
+    from kimi_cli.tools.wiki import _candidate_hash, _candidate_source_keys, _verified_source_keys
+
+    coordinator = admission_runtime.wiki_coordinator
+    checkpoint, source, _ = await _file_checkpoint(admission_runtime)
+    candidate = _candidate(source)
+    candidate_hash = _candidate_hash(candidate)
+    grant = await coordinator.reserve_grant(
+        checkpoint.checkpoint_id,
+        candidate_hash=candidate_hash,
+        source_keys=_candidate_source_keys(candidate),
+        verified_source_keys=_verified_source_keys(
+            admission_runtime.wiki,
+            candidate,
+            frozenset[str](),
+            coordinator.provenance_session_id,
+        ),
+    )
+    assert grant is not None
+
+    await coordinator.begin_turn("a later prompt", "a later prompt")
+    await coordinator.finish_grant(
+        checkpoint.checkpoint_id, outcome="persisted", candidate_hash=candidate_hash
+    )
+
+    # The authority is gone and the checkpoint is retired, not left in limbo.
+    assert coordinator.unconsumed_grant_count == 0
+    assert coordinator.unresolved_count == 0

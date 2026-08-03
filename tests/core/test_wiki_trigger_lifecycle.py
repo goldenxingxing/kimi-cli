@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -338,3 +339,78 @@ async def test_a_rendered_batch_stays_within_its_budgets(wiki_runtime) -> None:
 
     assert len(batch.checkpoints) <= 4
     assert len(batch.rendered.encode("utf-8")) <= 6 * 1024
+
+
+# ---------------------------------------------------------------------------
+# Turn retirement (review finding)
+# ---------------------------------------------------------------------------
+
+
+def _bare_soul(runtime: Runtime, tmp_path: Path):
+    from kosong.tooling.empty import EmptyToolset
+
+    from kimi_cli.soul.agent import Agent
+    from kimi_cli.soul.context import Context
+    from kimi_cli.soul.kimisoul import KimiSoul
+
+    agent = Agent(
+        name="Lifecycle Agent",
+        system_prompt="Test prompt.",
+        toolset=EmptyToolset(),
+        runtime=runtime,
+    )
+    return KimiSoul(agent, context=Context(file_backend=tmp_path / "history.jsonl"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["tool_rejected", "max_steps"])
+async def test_a_turn_that_ends_without_completing_still_retires_its_checkpoints(
+    wiki_runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str,
+) -> None:
+    """The resolution loop only runs on a no-tool completion.
+
+    Every other stop reason used to leave its checkpoints pending forever, and
+    16 of those permanently wedge the coordinator behind backpressure.
+    """
+    import kimi_cli.soul.kimisoul as kimisoul_module
+    from kimi_cli.soul.kimisoul import TurnOutcome
+
+    coordinator = wiki_runtime.wiki_coordinator
+    soul = _bare_soul(wiki_runtime, tmp_path)
+    monkeypatch.setattr(kimisoul_module, "wire_send", lambda _message: None)
+    monkeypatch.setattr(soul, "_checkpoint", AsyncMock())
+    monkeypatch.setattr(soul._denwa_renji, "set_n_checkpoints", lambda _n: None)
+
+    async def _loop() -> TurnOutcome:
+        # A checkpoint opens mid-turn, then the turn stops without completing.
+        await coordinator.create_checkpoint(
+            "root_evidence", summary_hash=content_hash(b"a durable conclusion")
+        )
+        return TurnOutcome(stop_reason=stop_reason, final_message=None, step_count=1)
+
+    monkeypatch.setattr(soul, "_agent_loop", _loop)
+
+    await soul.run("remember this rule")
+
+    assert coordinator.unresolved_count == 0
+    assert (await coordinator.pending_batch()).checkpoints == ()
+
+
+@pytest.mark.asyncio
+async def test_finish_turn_retires_more_than_one_delivery_batch(wiki_runtime) -> None:
+    """Delivery is capped at one batch; retirement must not be."""
+    coordinator = wiki_runtime.wiki_coordinator
+    turn = await coordinator.begin_turn("many", "many")
+    for index in range(10):
+        await coordinator.create_checkpoint(
+            "root_evidence", summary_hash=content_hash(f"conclusion {index}".encode())
+        )
+    assert len(await coordinator.undelivered_pending()) == 4  # one batch
+
+    retired = await coordinator.finish_turn(turn.root_turn_id)
+
+    assert len(retired) == 10
+    assert coordinator.unresolved_count == 0

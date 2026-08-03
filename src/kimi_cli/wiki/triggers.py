@@ -729,6 +729,13 @@ class WikiTurnCoordinator:
             checkpoint = self._checkpoints.get(checkpoint_id)
             if checkpoint is None or checkpoint.state != "persisting":
                 return
+            if checkpoint.root_turn_id != self._active_root_turn_id:
+                # The turn moved on while this write was in flight. The grant is
+                # already dropped; retire the checkpoint too rather than leaving
+                # it stranded in `persisting`, where nothing could resolve it.
+                self._checkpoints[checkpoint_id] = replace(checkpoint, state="discarded")
+                self._track_resolved(checkpoint, "unresolved")
+                return
             state: CheckpointState = "consumed" if outcome == "persisted" else "discarded"
             self._checkpoints[checkpoint_id] = replace(checkpoint, state=state)
             self._safe_track("wiki_trigger_grant_finished", outcome=outcome)
@@ -820,12 +827,37 @@ class WikiTurnCoordinator:
                 )
 
     async def undelivered_pending(self) -> tuple[WikiCheckpoint, ...]:
-        """Pending checkpoints the root has never been shown."""
+        """Pending checkpoints the root has never been shown, within one batch."""
         return await self._pending_where(lambda checkpoint: checkpoint.delivery_count == 0)
 
     async def awaiting_reminder(self) -> tuple[WikiCheckpoint, ...]:
-        """Pending checkpoints shown exactly once and still unresolved."""
+        """Pending checkpoints shown exactly once and still unresolved, within one batch."""
         return await self._pending_where(lambda checkpoint: checkpoint.delivery_count == 1)
+
+    async def finish_turn(self, root_turn_id: str) -> tuple[str, ...]:
+        """Retire a completed real turn, abandoning anything it never resolved.
+
+        A turn can end on any stop reason, not just a no-tool completion, and
+        the resolution loop only runs on the latter.  Without this, a rejected
+        or step-capped turn would leave its checkpoints pending forever; enough
+        of them would reach the unresolved cap and wedge the coordinator for the
+        rest of the session.
+        """
+        async with self._locked():
+            # Uncapped on purpose: retiring a turn must leave nothing behind,
+            # unlike delivery, which is limited to one batch.
+            stale = tuple(
+                checkpoint
+                for checkpoint in self._checkpoints.values()
+                if checkpoint.state in {"pending", "persisting"}
+                and checkpoint.root_turn_id == root_turn_id
+            )
+        for checkpoint in stale:
+            await self.discard(checkpoint.checkpoint_id, "unresolved")
+        async with self._locked():
+            if self._active_root_turn_id == root_turn_id:
+                self._active_root_turn_id = None
+        return tuple(checkpoint.checkpoint_id for checkpoint in stale)
 
     async def abandon_unresolved(
         self,
@@ -847,13 +879,20 @@ class WikiTurnCoordinator:
     ) -> tuple[WikiCheckpoint, ...]:
         async with self._locked():
             root_turn_id = self._active_root_turn_id
-            return tuple(
+            matching = [
                 checkpoint
                 for checkpoint in self._checkpoints.values()
                 if checkpoint.state == "pending"
                 and checkpoint.root_turn_id == root_turn_id
                 and predicate(checkpoint)
+            ]
+            matching.sort(
+                key=lambda checkpoint: (
+                    checkpoint.cause != "explicit_user_durable",
+                    checkpoint.created_at,
+                )
             )
+            return tuple(matching[:_MAX_BATCH_CHECKPOINTS])
 
     async def render_checkpoints(self, checkpoints: Sequence[WikiCheckpoint]) -> str:
         """Render specific checkpoints the same managed way a batch is rendered."""
