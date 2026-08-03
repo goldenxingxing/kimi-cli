@@ -1294,6 +1294,14 @@ export function useSessionStream(
           clearStepRetryStatus();
           resetStepState();
 
+          // The Tasks panel describes the turn in progress, so a new turn
+          // starts it empty. Without this a finished breakdown stays pinned
+          // and reads as live progress for whatever was asked next; the agent
+          // repopulates it the moment it calls SetTodoList for the new work.
+          // Replay resets here too, so reopening a session shows the last
+          // turn's breakdown rather than the oldest one on the wire.
+          useToolEventsStore.getState().clearTodoItems();
+
           const parsedUserInput = parseUserInput(event.payload.user_input);
 
           // Track turn index for fork feature
