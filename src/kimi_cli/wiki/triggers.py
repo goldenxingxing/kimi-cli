@@ -14,12 +14,20 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict
 
 from kimi_cli.telemetry import track
+from kimi_cli.wiki.intent import DurableIntent, DurableIntentFamily
 from kimi_cli.wiki.models import SourceRef, validate_relative_source_path
 from kimi_cli.wiki.schema import content_hash
 
 CheckpointCause = Literal["root_evidence", "subagent_result", "explicit_user_durable"]
 CheckpointState = Literal["pending", "persisting", "discarded", "consumed", "cancelled"]
-CheckpointDiscardReason = Literal["user_declined", "not_useful", "superseded", "cancelled"]
+CheckpointDiscardReason = Literal[
+    "user_declined",
+    "not_useful",
+    "superseded",
+    "cancelled",
+    "unresolved",
+    "unavailable",
+]
 EvidenceClass = Literal[
     "workspace-file",
     "workspace-search",
@@ -41,7 +49,9 @@ OPENKIMO_WIKI_CHECKPOINT_START = "<OPENKIMO_WIKI_CHECKPOINT_START>"
 OPENKIMO_WIKI_CHECKPOINT_END = "<OPENKIMO_WIKI_CHECKPOINT_END>"
 _PRODUCER_ROLES = frozenset({"root", "subagent"})
 _CHECKPOINT_CAUSES = frozenset({"root_evidence", "subagent_result", "explicit_user_durable"})
-_CHECKPOINT_DISCARD_REASONS = frozenset({"user_declined", "not_useful", "superseded", "cancelled"})
+_CHECKPOINT_DISCARD_REASONS = frozenset(
+    {"user_declined", "not_useful", "superseded", "cancelled", "unresolved", "unavailable"}
+)
 _EXPECTED_SOURCE_KIND: dict[EvidenceClass, Literal["workspace-file", "conversation", "web"]] = {
     "workspace-file": "workspace-file",
     "workspace-search": "workspace-file",
@@ -118,6 +128,10 @@ class WikiCheckpoint:
     dedupe_key: str
     state: CheckpointState
     created_at: float
+    delivery_count: int = 0
+    """How many times this checkpoint has been put in front of the root."""
+    intent_family: DurableIntentFamily | None = None
+    """Set only for `explicit_user_durable`: which durable phrasing the user used."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -567,6 +581,114 @@ class WikiTurnCoordinator:
             return CheckpointBatch(
                 checkpoints=selected,
                 rendered=self._render_locked(selected),
+            )
+
+    async def record_durable_intent(self, intent: DurableIntent) -> WikiCheckpoint | None:
+        """Open one checkpoint for knowledge the user explicitly asked to keep.
+
+        The intent must restate the turn the coordinator is actually on: the
+        raw or normalized hash has to match what the user accepted, so a
+        synthetic prompt or a replayed reminder cannot manufacture one.
+        """
+        async with self._locked():
+            try:
+                self._require_open()
+                root_turn_id = self._require_active_turn()
+                turn = self._turns[root_turn_id]
+                if intent.raw_hash != turn.raw_hash and intent.normalized_hash != (
+                    turn.normalized_hash
+                ):
+                    raise WikiTriggerRejected("durable intent does not match the accepted turn")
+                checkpoint = self._create_checkpoint_locked(
+                    "explicit_user_durable",
+                    summary_hash=intent.normalized_hash,
+                )
+            except WikiTriggerRejected:
+                return None
+            if checkpoint.intent_family is None:
+                checkpoint = replace(checkpoint, intent_family=intent.family)
+                self._checkpoints[checkpoint.checkpoint_id] = checkpoint
+            self._safe_track("wiki_trigger_durable_intent", family=intent.family)
+            return checkpoint
+
+    async def resolvable_checkpoint(self, checkpoint_id: str) -> WikiCheckpoint | None:
+        """Return the checkpoint a root resolution may act on, or nothing.
+
+        A checkpoint ID is a claim, not a capability: it only resolves while it
+        is still pending on this runtime's currently active root turn.
+        """
+        async with self._locked():
+            if self._closed or not checkpoint_id:
+                return None
+            checkpoint = self._checkpoints.get(checkpoint_id)
+            if (
+                checkpoint is None
+                or checkpoint.state != "pending"
+                or checkpoint.root_turn_id != self._active_root_turn_id
+            ):
+                return None
+            return checkpoint
+
+    async def consume_checkpoint(self, checkpoint_id: str) -> bool:
+        """Retire a checkpoint the root actually persisted. Single use."""
+        async with self._locked():
+            checkpoint = self._checkpoints.get(checkpoint_id)
+            if (
+                checkpoint is None
+                or checkpoint.state not in {"pending", "persisting"}
+                or checkpoint.root_turn_id != self._active_root_turn_id
+            ):
+                return False
+            self._checkpoints[checkpoint_id] = replace(checkpoint, state="consumed")
+            self._grants.pop(checkpoint_id, None)
+            self._safe_track("wiki_trigger_checkpoint_consumed", cause=checkpoint.cause)
+            return True
+
+    async def mark_delivered(self, checkpoint_ids: Sequence[str]) -> None:
+        """Count one delivery of each checkpoint that is still awaiting the root."""
+        async with self._locked():
+            for checkpoint_id in checkpoint_ids:
+                checkpoint = self._checkpoints.get(checkpoint_id)
+                if checkpoint is None or checkpoint.state != "pending":
+                    continue
+                self._checkpoints[checkpoint_id] = replace(
+                    checkpoint, delivery_count=checkpoint.delivery_count + 1
+                )
+
+    async def undelivered_pending(self) -> tuple[WikiCheckpoint, ...]:
+        """Pending checkpoints the root has never been shown."""
+        return await self._pending_where(lambda checkpoint: checkpoint.delivery_count == 0)
+
+    async def awaiting_reminder(self) -> tuple[WikiCheckpoint, ...]:
+        """Pending checkpoints shown exactly once and still unresolved."""
+        return await self._pending_where(lambda checkpoint: checkpoint.delivery_count == 1)
+
+    async def abandon_unresolved(
+        self,
+        reason: CheckpointDiscardReason = "unresolved",
+    ) -> tuple[str, ...]:
+        """Discard every checkpoint the root has ignored past its reminder.
+
+        The loop must terminate, so an uncooperative model costs at most one
+        extra completion and then the opportunity is dropped — never a write.
+        """
+        stale = await self._pending_where(lambda checkpoint: checkpoint.delivery_count >= 2)
+        for checkpoint in stale:
+            await self.discard(checkpoint.checkpoint_id, reason)
+        return tuple(checkpoint.checkpoint_id for checkpoint in stale)
+
+    async def _pending_where(
+        self,
+        predicate: Callable[[WikiCheckpoint], bool],
+    ) -> tuple[WikiCheckpoint, ...]:
+        async with self._locked():
+            root_turn_id = self._active_root_turn_id
+            return tuple(
+                checkpoint
+                for checkpoint in self._checkpoints.values()
+                if checkpoint.state == "pending"
+                and checkpoint.root_turn_id == root_turn_id
+                and predicate(checkpoint)
             )
 
     async def render_checkpoints(self, checkpoints: Sequence[WikiCheckpoint]) -> str:

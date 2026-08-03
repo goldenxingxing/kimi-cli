@@ -773,6 +773,7 @@ class KimiSoul:
                 and self._runtime.wiki is not None
                 and self._runtime.wiki_coordinator is not None
             ):
+                from kimi_cli.wiki.intent import detect_durable_intent
                 from kimi_cli.wiki.retrieval import retrieve_for_turn
 
                 coordinator = self._runtime.wiki_coordinator
@@ -781,6 +782,11 @@ class KimiSoul:
                     wiki_root_turn_id = root_turn.root_turn_id
                     if self._runtime.wiki_evidence_reporter is not None:
                         self._runtime.wiki_evidence_reporter.start_root_turn(root_turn.root_turn_id)
+                    # Explicit intent is opened before retrieval and before the
+                    # first model step, so it cannot be shaped by either.
+                    intent = detect_durable_intent(raw_text_input)
+                    if intent is not None:
+                        await coordinator.record_durable_intent(intent)
                     retrieval = await retrieve_for_turn(
                         self._runtime.wiki, coordinator, raw_text_input
                     )
@@ -1240,6 +1246,11 @@ class KimiSoul:
                         logger.warning(
                             "Wiki root completion sealing failed; continuing the conversation"
                         )
+                if final_message is not None and self.is_root:
+                    checkpoint_message = await self._pending_checkpoint_message()
+                    if checkpoint_message is not None:
+                        await self._context.append_message(checkpoint_message)
+                        continue
                 return TurnOutcome(
                     stop_reason=step_outcome.stop_reason,
                     final_message=final_message,
@@ -1257,6 +1268,44 @@ class KimiSoul:
 
             # Consume any pending steers between steps before next iteration.
             await self._consume_pending_steers()
+
+    async def _pending_checkpoint_message(self) -> Message | None:
+        """Return the managed message that must precede finishing this turn.
+
+        The root gets each open checkpoint once, then exactly one reminder.  If
+        it still will not resolve them, they are abandoned as `unresolved` and
+        the turn finishes: an uncooperative model costs one extra completion,
+        never an unbounded loop and never a write.
+        """
+        coordinator = self._runtime.wiki_coordinator
+        if coordinator is None:
+            return None
+        try:
+            fresh = await coordinator.undelivered_pending()
+            if fresh:
+                block = await coordinator.render_checkpoints(fresh)
+                await coordinator.mark_delivered([checkpoint.checkpoint_id for checkpoint in fresh])
+                return Message(role="user", content=[system(block)])
+            reminder = await coordinator.awaiting_reminder()
+            if reminder:
+                block = await coordinator.render_checkpoints(reminder)
+                await coordinator.mark_delivered(
+                    [checkpoint.checkpoint_id for checkpoint in reminder]
+                )
+                return Message(
+                    role="user",
+                    content=[
+                        system(
+                            "The checkpoints below are still unresolved. Resolve each one now "
+                            "with a single Wiki persist or discard call, then finish.\n"
+                            f"{block}"
+                        )
+                    ],
+                )
+            await coordinator.abandon_unresolved()
+        except Exception:
+            logger.warning("Wiki checkpoint delivery failed; finishing the turn without it")
+        return None
 
     async def _step(self) -> StepOutcome | None:
         """Run a single step and return a stop outcome, or None to continue.

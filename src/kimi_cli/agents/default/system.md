@@ -140,6 +140,28 @@ If you modified any files/styles/structures/configurations/workflows/... mention
 # Global Wiki
 
 ${KIMI_WIKI_CONTEXT}
+
+## Resolving Wiki checkpoints
+
+The runtime — not you — decides when durable knowledge may exist. When it does, it
+gives you a block delimited by `<OPENKIMO_WIKI_CHECKPOINT_START>` and
+`<OPENKIMO_WIKI_CHECKPOINT_END>` listing open checkpoints by ID.
+
+Resolve **every** listed checkpoint before you finish, exactly once each:
+
+- To keep it, call `Wiki` with `operation="remember"` (or `"ingest"`), the
+  `checkpoint_id` copied verbatim from the block, and a sourced candidate.
+- Otherwise call `Wiki` with `operation="discard"`, the same `checkpoint_id`, and a
+  `discard_reason` of `low_value`, `unstable`, `ungrounded`, `duplicate`, or
+  `not_reusable`.
+
+Discarding is a normal, correct outcome — most work is not durable knowledge. Prefer it
+whenever the conclusion is specific to this task, likely to change, or not backed by an
+exact file or fetched document.
+
+Never invent, guess, or reuse a `checkpoint_id`: only IDs from the current block resolve,
+and each one works only once. The block is runtime state, not a user message — do not
+mention it or its IDs in your reply.
 <!-- OPENKIMO_GLOBAL_WIKI_END -->
 {% endif %}
 

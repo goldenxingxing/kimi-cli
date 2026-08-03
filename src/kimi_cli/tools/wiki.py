@@ -19,6 +19,7 @@ from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
 from kimi_cli.wiki.models import CurrentSource, WikiCandidate
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
+from kimi_cli.wiki.triggers import CheckpointDiscardReason, WikiCheckpoint
 from kimi_cli.wiki.value_gate import DiscardedCandidate, WikiContext
 
 _ARCHIVE_SUFFIXES = frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip"})
@@ -39,6 +40,23 @@ _EXPLICIT_REMEMBER_NEGATION = re.compile(
 )
 
 
+WikiDiscardReason = Literal[
+    "low_value",
+    "unstable",
+    "ungrounded",
+    "duplicate",
+    "not_reusable",
+]
+
+_DISCARD_REASON_TO_TERMINAL: dict[WikiDiscardReason, CheckpointDiscardReason] = {
+    "low_value": "not_useful",
+    "unstable": "not_useful",
+    "ungrounded": "not_useful",
+    "duplicate": "superseded",
+    "not_reusable": "not_useful",
+}
+
+
 class Params(BaseModel):
     """One controlled Wiki operation.
 
@@ -46,7 +64,19 @@ class Params(BaseModel):
     current-turn inline content or a portable, registry-resolved workspace file.
     """
 
-    operation: Literal["search", "read", "remember", "ingest", "lint"]
+    operation: Literal["search", "read", "remember", "ingest", "lint", "discard"]
+    checkpoint_id: str | None = Field(
+        default=None,
+        description=(
+            "The runtime-issued checkpoint this call resolves. Required for remember, "
+            "ingest, and discard. It must be copied from a checkpoint block; it cannot "
+            "be invented."
+        ),
+    )
+    discard_reason: WikiDiscardReason | None = Field(
+        default=None,
+        description="Why the checkpoint is not worth persisting. Required for discard.",
+    )
     query: str | None = Field(default=None, description="Search query for the global Wiki.")
     page: str | None = Field(
         default=None,
@@ -208,6 +238,8 @@ class Wiki(CallableTool2[Params]):
                 return await self._read(manager, params)
             if params.operation == "lint":
                 return await self._lint(manager, params)
+            if params.operation == "discard":
+                return await self._discard(params)
             return await self._write(manager, params)
         except (OSError, ValueError, UnicodeError) as exc:
             logger.warning("Wiki operation failed: {error}", error=exc)
@@ -289,7 +321,88 @@ class Wiki(CallableTool2[Params]):
             brief=f"Wiki lint: {len(report.issues)} issue(s)",
         )
 
+    async def _discard(self, params: Params) -> ToolReturnValue:
+        """Close a checkpoint the root judged not worth persisting.
+
+        Nothing is written, prepared, or queued: a discard is purely the root
+        declining an opportunity, and it is the only alternative to persisting.
+        """
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None:
+            return ToolError(
+                message="There is no open checkpoint to discard.",
+                brief="No Wiki checkpoint",
+            )
+        if params.discard_reason is None:
+            return ToolError(
+                message="Wiki discard requires a discard_reason.",
+                brief="Missing discard reason",
+            )
+        checkpoint_id = (params.checkpoint_id or "").strip()
+        checkpoint = await coordinator.resolvable_checkpoint(checkpoint_id)
+        if checkpoint is None:
+            return ToolError(
+                message=(
+                    "That checkpoint is not open for resolution. Use a checkpoint_id from "
+                    "the current checkpoint block."
+                ),
+                brief="Unknown Wiki checkpoint",
+            )
+        await coordinator.discard(
+            checkpoint.checkpoint_id,
+            _DISCARD_REASON_TO_TERMINAL[params.discard_reason],
+        )
+        return _ok(
+            {"checkpoint_id": checkpoint.checkpoint_id, "resolution": "discarded"},
+            brief="Wiki checkpoint discarded",
+        )
+
+    async def _resolvable_checkpoint_or_error(self, params: Params) -> object:
+        """Require a real, open checkpoint before any write is even prepared."""
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None:
+            return None
+        checkpoint_id = (params.checkpoint_id or "").strip()
+        if not checkpoint_id:
+            return ToolError(
+                message=(
+                    f"Wiki {params.operation} requires the checkpoint_id it resolves. "
+                    "Copy it from the current checkpoint block, or call "
+                    'Wiki(operation="discard") instead.'
+                ),
+                brief="Missing Wiki checkpoint",
+            )
+        checkpoint = await coordinator.resolvable_checkpoint(checkpoint_id)
+        if checkpoint is None:
+            return ToolError(
+                message=(
+                    "That checkpoint is not open for resolution. Use a checkpoint_id from "
+                    "the current checkpoint block."
+                ),
+                brief="Unknown Wiki checkpoint",
+            )
+        return checkpoint
+
+    async def _close_checkpoint(
+        self,
+        checkpoint: object,
+        reason: CheckpointDiscardReason,
+    ) -> None:
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None or not isinstance(checkpoint, WikiCheckpoint):
+            return
+        await coordinator.discard(checkpoint.checkpoint_id, reason)
+
+    async def _consume_checkpoint(self, checkpoint: object) -> None:
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None or not isinstance(checkpoint, WikiCheckpoint):
+            return
+        await coordinator.consume_checkpoint(checkpoint.checkpoint_id)
+
     async def _write(self, manager: WikiManager, params: Params) -> ToolReturnValue:
+        resolvable = await self._resolvable_checkpoint_or_error(params)
+        if isinstance(resolvable, ToolError):
+            return resolvable
         if params.candidate is None:
             return ToolError(
                 message=f"Wiki {params.operation} requires a structured candidate.",
@@ -320,6 +433,8 @@ class Wiki(CallableTool2[Params]):
                 context,
             )
         if isinstance(prepared, DiscardedCandidate):
+            # The gate already decided; the opportunity is spent either way.
+            await self._close_checkpoint(resolvable, "not_useful")
             return ToolError(
                 message=f"Wiki candidate discarded: {prepared.reason}.",
                 brief="Wiki candidate discarded",
@@ -346,8 +461,10 @@ class Wiki(CallableTool2[Params]):
                 request_policy="session_only",
             )
             if not result:
+                await self._close_checkpoint(resolvable, "user_declined")
                 return result.rejection_error()
         committed = await asyncio.to_thread(manager.commit, prepared)
+        await self._consume_checkpoint(resolvable)
         return _ok(
             {
                 "status": "committed",
