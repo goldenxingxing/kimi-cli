@@ -441,7 +441,7 @@ def _verified_workspace_search(
         if search_target is None or not search_target.is_dir():
             return None
         search_base = search_target
-        raw_matches = tuple(line for line in _output_text(result).splitlines() if line)
+        raw_matches = tuple((line,) for line in _output_text(result).splitlines() if line)
         require_file = False
     elif tool_type is Grep:
         raw_target = arguments.get("path", ".")
@@ -451,7 +451,7 @@ def _verified_workspace_search(
         if search_target is None or not (search_target.is_file() or search_target.is_dir()):
             return None
         search_base = search_target.parent if search_target.is_file() else search_target
-        raw_matches = _grep_match_paths(
+        raw_matches = _grep_match_path_candidates(
             _output_text(result),
             arguments.get("output_mode", "files_with_matches"),
         )
@@ -465,9 +465,14 @@ def _verified_workspace_search(
         return None
     logical_paths: list[str] = []
     source_refs: list[SourceRef] = []
-    for raw_match in raw_matches:
-        match = _verified_contained_path(workspace, raw_match, relative_to=search_base)
-        if match is None or (require_file and not match.is_file()):
+    for candidates in raw_matches:
+        match = _unambiguous_contained_match(
+            workspace,
+            candidates,
+            relative_to=search_base,
+            require_file=require_file,
+        )
+        if match is None:
             return None
         try:
             relative = match.relative_to(workspace).as_posix()
@@ -512,31 +517,81 @@ def _verified_contained_path(
     return candidate
 
 
-def _grep_match_paths(output: str, output_mode: object) -> tuple[str, ...] | None:
+def _unambiguous_contained_match(
+    workspace: Path,
+    candidates: tuple[str, ...],
+    *,
+    relative_to: Path,
+    require_file: bool,
+) -> Path | None:
+    """Resolve the single contained path a match line can mean, else fail closed."""
+    resolved: Path | None = None
+    for raw_path in candidates:
+        candidate = _verified_contained_path(workspace, raw_path, relative_to=relative_to)
+        if candidate is None or (require_file and not candidate.is_file()):
+            continue
+        if resolved is not None and candidate != resolved:
+            return None
+        resolved = candidate
+    return resolved
+
+
+def _grep_match_path_candidates(
+    output: str,
+    output_mode: object,
+) -> tuple[tuple[str, ...], ...] | None:
+    """Return every path a Grep output line can syntactically denote, per line.
+
+    A file name may itself contain `:<digits>:` or `-<digits>-`, so a match line
+    has no unambiguous lexical split.  Each line therefore yields all plausible
+    path prefixes and the caller keeps only the one that resolves inside the
+    current workspace.
+    """
     if output_mode not in {"content", "count_matches", "files_with_matches"}:
         return None
-    paths: list[str] = []
-    content_line = re.compile(r"^(.*?)([:\-])(\d+)\2")
+    lines: list[tuple[str, ...]] = []
     for line in output.splitlines():
         if not line:
             continue
         if output_mode == "content":
             if line == "--":
                 continue
-            matched = content_line.match(line)
-            if matched is None:
-                return None
-            path = matched.group(1)
+            candidates = _separated_path_candidates(line, separators=":-", trailing=True)
         elif output_mode == "count_matches":
-            path, separator, count = line.rpartition(":")
-            if not separator or not count.isdigit():
-                return None
+            candidates = _separated_path_candidates(line, separators=":", trailing=False)
         else:
-            path = line
-        if not path:
+            candidates = (line,)
+        if not candidates:
             return None
-        paths.append(path)
-    return tuple(paths)
+        lines.append(candidates)
+    return tuple(lines)
+
+
+def _separated_path_candidates(
+    line: str,
+    *,
+    separators: str,
+    trailing: bool,
+) -> tuple[str, ...]:
+    """Split `path<sep><digits>[<sep>...]` at every position that can be the split."""
+    candidates: list[str] = []
+    for index in range(1, len(line)):
+        separator = line[index]
+        if separator not in separators:
+            continue
+        rest = line[index + 1 :]
+        digits = 0
+        while digits < len(rest) and "0" <= rest[digits] <= "9":
+            digits += 1
+        if digits == 0:
+            continue
+        if trailing:
+            if digits >= len(rest) or rest[digits] != separator:
+                continue
+        elif digits != len(rest):
+            continue
+        candidates.append(line[:index])
+    return tuple(candidates)
 
 
 def _arguments_hash(arguments: JsonType) -> str:
@@ -732,6 +787,8 @@ def _strip_shell_prefixes(tokens: list[str]) -> list[str] | None:
             remaining = _strip_nice_prefix(remaining)
         elif executable == "timeout":
             remaining = _strip_timeout_prefix(remaining)
+        elif executable == "nohup":
+            remaining = _strip_nohup_prefix(remaining)
         else:
             break
         if remaining is None:
@@ -842,6 +899,16 @@ def _strip_nice_prefix(tokens: list[str]) -> list[str] | None:
     elif remaining and (
         re.fullmatch(r"-\d+", remaining[0]) or re.fullmatch(r"--adjustment=[+-]?\d+", remaining[0])
     ):
+        remaining.pop(0)
+    elif remaining and remaining[0].startswith("-"):
+        return None
+    return remaining
+
+
+def _strip_nohup_prefix(tokens: list[str]) -> list[str] | None:
+    """`nohup` only accepts `--`; `--help`/`--version` run no command at all."""
+    remaining = tokens[1:]
+    if remaining and remaining[0] == "--":
         remaining.pop(0)
     elif remaining and remaining[0].startswith("-"):
         return None

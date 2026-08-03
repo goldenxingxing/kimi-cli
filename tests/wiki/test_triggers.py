@@ -18,7 +18,9 @@ from kimi_cli.wiki.triggers import (
     WikiCheckpointBackpressure,
     WikiTriggerRejected,
     WikiTurnCoordinator,
+    _source_key,
     canonical_digest,
+    canonical_evidence_source_digest,
 )
 
 
@@ -164,6 +166,49 @@ def test_canonical_digest_is_length_prefixed_and_ordered() -> None:
     assert canonical_digest(("ab", "c")) != canonical_digest(("a", "bc"))
     assert canonical_digest(("first", "second")) != canonical_digest(("second", "first"))
     assert canonical_digest(("same",)) == canonical_digest(("same",))
+
+
+async def test_evidence_source_digest_separates_class_paths_and_source_groups(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+) -> None:
+    turn = await coordinator.begin_turn("digest identity", "digest identity")
+    shared = {"root_turn_id": turn.root_turn_id, "workspace_source": workspace_source}
+    baseline = await coordinator.record_evidence(
+        make_observation(**shared, tool_call_id="call-baseline")
+    )
+    other_class = await coordinator.record_evidence(
+        make_observation(**shared, tool_call_id="call-class", source_class="workspace-search")
+    )
+    other_path = await coordinator.record_evidence(
+        make_observation(**shared, tool_call_id="call-path", logical_paths=("docs/other.md",))
+    )
+    group_shift = await coordinator.record_evidence(
+        make_observation(
+            **shared,
+            tool_call_id="call-group",
+            logical_paths=(_source_key(workspace_source),),
+            source_refs=(),
+        )
+    )
+    empty_paths = await coordinator.record_evidence(
+        make_observation(**shared, tool_call_id="call-empty", logical_paths=())
+    )
+    assert baseline is not None
+    assert other_class is not None
+    assert other_path is not None
+    assert group_shift is not None
+    assert empty_paths is not None
+
+    digests = {
+        canonical_evidence_source_digest(evidence)
+        for evidence in (baseline, other_class, other_path, group_shift, empty_paths)
+    }
+
+    assert len(digests) == 5
+    assert canonical_evidence_source_digest(baseline) == canonical_evidence_source_digest(
+        replace(baseline, source_class=cast(EvidenceClass, "workspace_file"))
+    )
 
 
 async def test_record_evidence_snapshots_mutable_source_refs_at_every_boundary(

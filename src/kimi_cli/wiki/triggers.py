@@ -146,10 +146,19 @@ def canonical_digest(parts: Sequence[str]) -> str:
 
 def canonical_evidence_source_digest(evidence: WikiEvidence) -> str:
     """Hash one observation's source identity independently of its producer/request."""
+    source_class = evidence.source_class.strip().casefold().replace("_", "-")
+    logical_paths = sorted(evidence.logical_paths)
+    source_keys = sorted(_source_key(source) for source in evidence.source_refs)
     return canonical_digest(
         (
+            evidence.session_provenance_id.hex,
+            _uuid_component(evidence.workspace_id),
+            source_class,
             evidence.result_hash,
-            *(sorted(_source_key(source) for source in evidence.source_refs)),
+            str(len(logical_paths)),
+            *logical_paths,
+            str(len(source_keys)),
+            *source_keys,
         )
     )
 

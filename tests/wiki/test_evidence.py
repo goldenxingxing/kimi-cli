@@ -439,6 +439,68 @@ async def test_glob_and_grep_only_record_verified_current_workspace_matches(
 
 
 @pytest.mark.asyncio
+async def test_grep_content_paths_keep_separator_shaped_file_names(
+    evidence_runtime,
+    grep_tool: Grep,
+) -> None:
+    workspace = Path(str(evidence_runtime.session.work_dir))
+    tricky = workspace / "foo-1-bar.md"
+    tricky.write_text("first\ndurable decision\n", encoding="utf-8")
+    await evidence_runtime.wiki_coordinator.begin_turn("tricky grep", "tricky grep")
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        grep_tool,
+        {"pattern": "durable", "path": str(workspace), "output_mode": "content"},
+        ToolOk(output="foo-1-bar.md:2:durable decision"),
+        tool_call_id="tricky-grep",
+    )
+
+    assert evidence is not None
+    assert evidence.logical_paths == ("foo-1-bar.md",)
+    assert evidence.source_refs[0].path == "foo-1-bar.md"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_grep_content_path_split_records_no_evidence(
+    evidence_runtime,
+    grep_tool: Grep,
+) -> None:
+    workspace = Path(str(evidence_runtime.session.work_dir))
+    (workspace / "foo-1-bar.md").write_text("first\ndurable decision\n", encoding="utf-8")
+    (workspace / "foo").write_text("also a real file", encoding="utf-8")
+    await evidence_runtime.wiki_coordinator.begin_turn("ambiguous grep", "ambiguous grep")
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        grep_tool,
+        {"pattern": "durable", "path": str(workspace), "output_mode": "content"},
+        ToolOk(output="foo-1-bar.md:2:durable decision"),
+        tool_call_id="ambiguous-grep",
+    )
+
+    assert evidence is None
+
+
+@pytest.mark.asyncio
+async def test_grep_count_matches_paths_keep_separator_shaped_file_names(
+    evidence_runtime,
+    grep_tool: Grep,
+) -> None:
+    workspace = Path(str(evidence_runtime.session.work_dir))
+    (workspace / "report-2-notes.md").write_text("durable decision\n", encoding="utf-8")
+    await evidence_runtime.wiki_coordinator.begin_turn("count grep", "count grep")
+
+    evidence = await evidence_runtime.wiki_evidence_reporter.observe(
+        grep_tool,
+        {"pattern": "durable", "path": str(workspace), "output_mode": "count_matches"},
+        ToolOk(output="report-2-notes.md:1"),
+        tool_call_id="count-grep",
+    )
+
+    assert evidence is not None
+    assert evidence.logical_paths == ("report-2-notes.md",)
+
+
+@pytest.mark.asyncio
 async def test_successful_discovery_evidence_is_triggering_and_can_seal_evaluation(
     evidence_runtime,
     glob_tool: Glob,
@@ -538,6 +600,10 @@ async def test_tokenized_shell_status_command_families_are_non_triggering(
     [
         "sudo -n env TZ=UTC command date +%s",
         "nice -n 5 timeout 2s command pwd -P",
+        "nohup date +%s",
+        "nohup -- pwd -P",
+        "sudo -n nohup nice -n 5 git -C /tmp status --short",
+        "nohup date +%s | nohup uptime",
         "date +%s | command pwd -P",
         "sudo --non-interactive git -C /tmp status --short | nice -n 3 uptime",
         "env -i -- TZ=UTC date +%s | timeout --signal=TERM 2s pwd --physical",
@@ -576,6 +642,9 @@ async def test_wrapped_all_status_shell_pipelines_are_non_triggering(
         "sudo sh -c 'date +%s'",
         "date $(touch marker)",
         "timeout --signal date +%s",
+        "nohup ./build.sh",
+        "nohup --help",
+        "nohup date +%s | ./build.sh",
     ],
 )
 async def test_tokenized_shell_classifier_preserves_durable_commands(
@@ -813,6 +882,57 @@ async def test_unique_same_summary_subagent_checkpoint_with_different_source_doe
     assert sealed.cause == "root_evidence"
     assert sealed.checkpoint_id != subagent_checkpoint.checkpoint_id
     assert subagent_checkpoint.evidence_ids == (subagent_evidence.evidence_id,)
+
+
+@pytest.mark.asyncio
+async def test_same_result_hash_across_source_classes_does_not_merge(
+    evidence_runtime,
+    search_web_tool: SearchWeb,
+) -> None:
+    coordinator = evidence_runtime.wiki_coordinator
+    reporter = evidence_runtime.wiki_evidence_reporter
+    turn = await coordinator.begin_turn("cross class", "cross class")
+    result = ToolOk(output="identical discovery output")
+    root_evidence = await reporter.observe(
+        search_web_tool,
+        {"query": "identity fields"},
+        result,
+        tool_call_id="root-web-search",
+    )
+    assert root_evidence is not None
+    subagent_evidence = await coordinator.record_evidence(
+        EvidenceObservation(
+            root_turn_id=turn.root_turn_id,
+            workspace_id=evidence_runtime.workspace_id,
+            producer_role="subagent",
+            producer_id="worker",
+            run_generation=5,
+            tool_call_id="subagent-workspace-search",
+            source_class="workspace-search",
+            request_hash=content_hash(b"workspace search"),
+            result_hash=root_evidence.result_hash,
+            logical_paths=(),
+            source_refs=(),
+            reliable=False,
+            stable_snapshot=False,
+            triggering=True,
+        )
+    )
+    assert subagent_evidence is not None
+    conclusion = "Same bytes do not mean the same source class"
+    subagent_checkpoint = await coordinator.create_checkpoint(
+        "subagent_result",
+        evidence_ids=(subagent_evidence.evidence_id,),
+        summary_hash=content_hash(conclusion.encode()),
+        producer_id="worker",
+        run_generation=5,
+    )
+
+    sealed = await reporter.seal_root_completion(conclusion)
+
+    assert sealed is not None
+    assert sealed.cause == "root_evidence"
+    assert sealed.checkpoint_id != subagent_checkpoint.checkpoint_id
 
 
 @pytest.mark.asyncio
