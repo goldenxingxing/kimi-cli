@@ -12,7 +12,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from kimi_cli.telemetry import track
-from kimi_cli.wiki.models import SourceRef
+from kimi_cli.wiki.models import SourceRef, validate_relative_source_path
 from kimi_cli.wiki.schema import content_hash
 
 CheckpointCause = Literal["root_evidence", "subagent_result", "explicit_user_durable"]
@@ -33,6 +33,14 @@ _MAX_BATCH_CHECKPOINTS = 4
 _MAX_CHECKPOINT_EVIDENCE = 8
 _MAX_CHECKPOINT_SUMMARY_BYTES = 1024
 _MAX_BATCH_BYTES = 6 * 1024
+_EXPECTED_SOURCE_KIND: dict[EvidenceClass, Literal["workspace-file", "conversation", "web"]] = {
+    "workspace-file": "workspace-file",
+    "workspace-search": "workspace-file",
+    "shell-result": "conversation",
+    "web-search": "web",
+    "web-document": "web",
+    "workspace-mutation": "workspace-file",
+}
 
 
 class WikiTriggerRejected(RuntimeError):
@@ -169,6 +177,11 @@ class WikiTurnCoordinator:
             for checkpoint in self._checkpoints.values()
         )
 
+    @property
+    def active_turn_id(self) -> str | None:
+        """Return the current root turn identifier without exposing mutable state."""
+        return self._active_root_turn_id
+
     async def begin_turn(self, raw_text: str, normalized_text: str) -> RootTurn:
         async with self._locked():
             self._require_open()
@@ -186,7 +199,7 @@ class WikiTurnCoordinator:
     async def record_evidence(self, observation: EvidenceObservation) -> WikiEvidence | None:
         async with self._locked():
             self._require_open()
-            self._validate_observation(observation)
+            logical_paths, source_refs = self._validate_observation(observation)
             key = canonical_digest(
                 (
                     self.provenance_session_id.hex,
@@ -203,8 +216,8 @@ class WikiTurnCoordinator:
                     observation.source_class,
                     observation.request_hash,
                     observation.result_hash,
-                    *observation.logical_paths,
-                    *(_source_key(source) for source in observation.source_refs),
+                    *logical_paths,
+                    *(_source_key(source) for source in source_refs),
                     str(observation.reliable),
                     str(observation.stable_snapshot),
                     str(observation.triggering),
@@ -212,7 +225,7 @@ class WikiTurnCoordinator:
             )
             existing_id = self._evidence_by_key.get(key)
             if existing_id is not None:
-                return self._evidence[existing_id]
+                return _evidence_snapshot(self._evidence[existing_id])
 
             evidence = WikiEvidence(
                 evidence_id=uuid4().hex,
@@ -226,8 +239,8 @@ class WikiTurnCoordinator:
                 source_class=observation.source_class,
                 request_hash=observation.request_hash,
                 result_hash=observation.result_hash,
-                logical_paths=observation.logical_paths,
-                source_refs=observation.source_refs,
+                logical_paths=logical_paths,
+                source_refs=source_refs,
                 reliable=observation.reliable,
                 stable_snapshot=observation.stable_snapshot,
                 triggering=observation.triggering,
@@ -237,7 +250,7 @@ class WikiTurnCoordinator:
             self._safe_track(
                 "wiki_trigger_evidence_recorded", source_class=observation.source_class
             )
-            return evidence
+            return _evidence_snapshot(evidence)
 
     async def import_evidence(self, evidence: WikiEvidence) -> WikiEvidence:
         """Reject records from every other coordinator, including same-session ones."""
@@ -247,7 +260,7 @@ class WikiTurnCoordinator:
             if local != evidence or evidence.session_provenance_id != self.provenance_session_id:
                 raise WikiTriggerRejected("evidence belongs to a different runtime")
             assert local is not None
-            return local
+            return _evidence_snapshot(local)
 
     async def create_checkpoint(
         self,
@@ -367,7 +380,9 @@ class WikiTurnCoordinator:
             raise WikiTriggerRejected("no active root turn in this runtime")
         return self._active_root_turn_id
 
-    def _validate_observation(self, observation: EvidenceObservation) -> None:
+    def _validate_observation(
+        self, observation: EvidenceObservation
+    ) -> tuple[tuple[str, ...], tuple[SourceRef, ...]]:
         if observation.root_turn_id not in self._turns:
             raise WikiTriggerRejected("evidence root turn is not owned by this runtime")
         if observation.workspace_id is not None and observation.workspace_id != self.workspace_id:
@@ -376,9 +391,36 @@ class WikiTurnCoordinator:
             raise WikiTriggerRejected("evidence hashes must be canonical SHA-256 values")
         if not observation.tool_call_id:
             raise WikiTriggerRejected("evidence requires a tool call identifier")
-        for source in observation.source_refs:
+        if observation.producer_role == "root" and (
+            observation.producer_id is not None or observation.run_generation is not None
+        ):
+            raise WikiTriggerRejected("root evidence cannot claim subagent identity")
+        if observation.producer_role == "subagent" and (
+            not observation.producer_id
+            or observation.run_generation is None
+            or observation.run_generation < 0
+        ):
+            raise WikiTriggerRejected("subagent evidence requires a producer and run generation")
+
+        try:
+            logical_paths = tuple(
+                validate_relative_source_path(path) for path in observation.logical_paths
+            )
+        except ValueError as exc:
+            raise WikiTriggerRejected("unsafe logical path in evidence") from exc
+
+        source_refs = tuple(_source_snapshot(source) for source in observation.source_refs)
+        expected_kind = _EXPECTED_SOURCE_KIND.get(observation.source_class)
+        if expected_kind is None:
+            raise WikiTriggerRejected("unknown evidence source class")
+        for source in source_refs:
+            if source.kind != expected_kind:
+                raise WikiTriggerRejected("source kind does not match evidence class")
             if source.kind == "workspace-file" and source.workspace_id != self.workspace_id:
                 raise WikiTriggerRejected("source workspace does not match this runtime")
+            if source.kind == "conversation" and source.session_id != self.provenance_session_id:
+                raise WikiTriggerRejected("conversation source does not match this runtime session")
+        return logical_paths, source_refs
 
     def _validate_checkpoint_inputs(
         self,
@@ -423,6 +465,18 @@ def _is_sha256(value: str) -> bool:
 
 def _source_key(source: SourceRef) -> str:
     return source.model_dump_json(exclude_none=True)
+
+
+def _source_snapshot(source: SourceRef) -> SourceRef:
+    """Validate and copy caller-owned Pydantic source models before retaining them."""
+    return SourceRef.model_validate(source.model_dump(mode="python"))
+
+
+def _evidence_snapshot(evidence: WikiEvidence) -> WikiEvidence:
+    """Return a record whose nested source models cannot mutate coordinator state."""
+    return replace(
+        evidence, source_refs=tuple(_source_snapshot(source) for source in evidence.source_refs)
+    )
 
 
 def _uuid_component(value: UUID | None) -> str:

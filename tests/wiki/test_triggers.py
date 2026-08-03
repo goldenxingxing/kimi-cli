@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from uuid import UUID, uuid4
 
 import pytest
 
 from kimi_cli.wiki.models import SourceRef
 from kimi_cli.wiki.triggers import (
+    EvidenceClass,
     EvidenceObservation,
     WikiCheckpointBackpressure,
     WikiTriggerRejected,
@@ -50,6 +51,9 @@ def make_observation(
     workspace_source: SourceRef,
     *,
     tool_call_id: str = "call-1",
+    logical_paths: tuple[str, ...] = ("docs/decision.md",),
+    source_class: EvidenceClass = "workspace-file",
+    source_refs: tuple[SourceRef, ...] | None = None,
 ) -> EvidenceObservation:
     return EvidenceObservation(
         root_turn_id=root_turn_id,
@@ -57,11 +61,11 @@ def make_observation(
         producer_id=None,
         run_generation=None,
         tool_call_id=tool_call_id,
-        source_class="workspace-file",
+        source_class=source_class,
         request_hash="sha256:" + "1" * 64,
         result_hash="sha256:" + "2" * 64,
-        logical_paths=("docs/decision.md",),
-        source_refs=(workspace_source,),
+        logical_paths=logical_paths,
+        source_refs=source_refs if source_refs is not None else (workspace_source,),
         reliable=True,
         stable_snapshot=True,
         triggering=True,
@@ -117,6 +121,7 @@ async def test_coordinator_rejects_cross_runtime_evidence_and_cancellation_hides
 
     await coordinator.create_checkpoint("root_evidence", evidence_ids=(evidence.evidence_id,))
     await coordinator.cancel_turn(turn.root_turn_id)
+    assert coordinator.active_turn_id is None
     assert (await coordinator.pending_batch()).checkpoints == ()
 
 
@@ -155,3 +160,121 @@ def test_canonical_digest_is_length_prefixed_and_ordered() -> None:
     assert canonical_digest(("ab", "c")) != canonical_digest(("a", "bc"))
     assert canonical_digest(("first", "second")) != canonical_digest(("second", "first"))
     assert canonical_digest(("same",)) == canonical_digest(("same",))
+
+
+async def test_record_evidence_snapshots_mutable_source_refs_at_every_boundary(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+) -> None:
+    turn = await coordinator.begin_turn("snapshot", "snapshot")
+    evidence = await coordinator.record_evidence(
+        make_observation(turn.root_turn_id, workspace_source)
+    )
+    assert evidence is not None
+
+    workspace_source.path = "docs/caller-mutated.md"
+    evidence.source_refs[0].path = "docs/output-mutated.md"
+    duplicate = await coordinator.record_evidence(
+        make_observation(
+            turn.root_turn_id,
+            SourceRef(
+                kind="workspace-file",
+                workspace_id=coordinator.workspace_id,
+                path="docs/decision.md",
+                content_hash="sha256:" + "4" * 64,
+            ),
+        )
+    )
+
+    assert duplicate is not None
+    assert duplicate.source_refs[0].path == "docs/decision.md"
+
+
+async def test_record_evidence_rejects_cross_session_conversation_source(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+) -> None:
+    turn = await coordinator.begin_turn("session", "session")
+    foreign = SourceRef(
+        kind="conversation",
+        session_id=uuid4(),
+        content_hash="sha256:" + "5" * 64,
+    )
+
+    with pytest.raises(WikiTriggerRejected, match="session"):
+        await coordinator.record_evidence(
+            make_observation(
+                turn.root_turn_id,
+                workspace_source,
+                logical_paths=(),
+                source_class="shell-result",
+                source_refs=(foreign,),
+            )
+        )
+
+
+async def test_record_evidence_rejects_mismatched_workspace_source_kind_and_producer_role(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+) -> None:
+    turn = await coordinator.begin_turn("bindings", "bindings")
+    foreign_workspace = SourceRef(
+        kind="workspace-file",
+        workspace_id=uuid4(),
+        path="docs/decision.md",
+        content_hash="sha256:" + "6" * 64,
+    )
+    web_source = SourceRef(
+        kind="web",
+        url="https://example.test/decision",
+        content_hash="sha256:" + "7" * 64,
+    )
+
+    with pytest.raises(WikiTriggerRejected, match="workspace"):
+        await coordinator.record_evidence(make_observation(turn.root_turn_id, foreign_workspace))
+    with pytest.raises(WikiTriggerRejected, match="source kind"):
+        await coordinator.record_evidence(
+            make_observation(turn.root_turn_id, workspace_source, source_refs=(web_source,))
+        )
+    with pytest.raises(WikiTriggerRejected, match="subagent identity"):
+        await coordinator.record_evidence(
+            replace(
+                make_observation(turn.root_turn_id, workspace_source),
+                producer_id="untrusted-subagent",
+                run_generation=0,
+            )
+        )
+
+
+@pytest.mark.parametrize("logical_path", ("/private/decision.md", "config/.env"))
+async def test_record_evidence_rejects_absolute_or_sensitive_logical_paths(
+    coordinator: WikiTurnCoordinator,
+    workspace_source: SourceRef,
+    logical_path: str,
+) -> None:
+    turn = await coordinator.begin_turn("paths", "paths")
+
+    with pytest.raises(WikiTriggerRejected, match="logical path"):
+        await coordinator.record_evidence(
+            make_observation(
+                turn.root_turn_id,
+                workspace_source,
+                logical_paths=(logical_path,),
+            )
+        )
+
+
+async def test_discard_and_close_clear_active_turn_and_pending_checkpoints(
+    coordinator: WikiTurnCoordinator,
+) -> None:
+    turn = await coordinator.begin_turn("discard", "discard")
+    checkpoint = await coordinator.create_checkpoint("root_evidence")
+    assert coordinator.active_turn_id == turn.root_turn_id
+
+    await coordinator.discard(checkpoint.checkpoint_id, "not_useful")
+    assert (await coordinator.pending_batch()).checkpoints == ()
+
+    await coordinator.close()
+    assert coordinator.active_turn_id is None
+    with pytest.raises(WikiTriggerRejected, match="closed"):
+        await coordinator.begin_turn("closed", "closed")
