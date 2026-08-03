@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -17,6 +17,9 @@ from kimi_cli.wiki.models import (
     has_url_credentials,
 )
 from kimi_cli.wiki.schema import render_page, validate_logical_page
+
+if TYPE_CHECKING:
+    from kimi_cli.wiki.triggers import WikiAdmissionGrant
 
 DiscardReason = Literal["low_value", "unstable", "ungrounded", "sensitive", "duplicate"]
 Operation = Literal["remember", "ingest"]
@@ -53,6 +56,22 @@ class WikiContext(BaseModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("conflicting pages must be unique")
         return normalized
+
+    @classmethod
+    def from_grant(cls, grant: WikiAdmissionGrant, operation: Operation) -> WikiContext:
+        """Build the gate's view of a write from the runtime grant alone.
+
+        Every field here is derived from what the runtime observed. Nothing the
+        model asserted about value, stability, or sources reaches this object.
+        """
+        return cls(
+            session_id=grant.session_provenance_id,
+            cross_turn_utility=grant.high_value,
+            stable=grant.stable,
+            user_confirmed=grant.grounded,
+            reliable_source=grant.reliable_source,
+            operation=operation,
+        )
 
 
 @dataclass(frozen=True, slots=True)

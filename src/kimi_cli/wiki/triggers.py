@@ -611,6 +611,144 @@ class WikiTurnCoordinator:
             self._safe_track("wiki_trigger_durable_intent", family=intent.family)
             return checkpoint
 
+    async def reserve_grant(
+        self,
+        checkpoint_id: str,
+        *,
+        candidate_hash: str,
+        source_keys: frozenset[str],
+        verified_source_keys: frozenset[str],
+    ) -> WikiAdmissionGrant | None:
+        """Atomically convert one open checkpoint into a single-use write grant.
+
+        This is the only place write authority is created.  Nothing the model
+        supplied participates: the caller has already re-read every source and
+        says which ones still match their captured bytes, and the grant's flags
+        are derived from the checkpoint's cause and its own recorded evidence.
+
+        Returns ``None`` — never a partial grant — if the checkpoint is not
+        open on this turn, if any claimed source is unverified or unbacked, or
+        if a grant is already outstanding for it.
+        """
+        async with self._locked():
+            if self._closed or not _is_sha256(candidate_hash) or not source_keys:
+                return None
+            checkpoint = self._checkpoints.get(checkpoint_id)
+            if (
+                checkpoint is None
+                or checkpoint.state != "pending"
+                or checkpoint.root_turn_id != self._active_root_turn_id
+                or checkpoint_id in self._grants
+            ):
+                return None
+            if not source_keys <= verified_source_keys:
+                return None
+
+            evidence = tuple(
+                record
+                for evidence_id in checkpoint.evidence_ids
+                if (record := self._evidence.get(evidence_id)) is not None
+            )
+            admitted_keys = {
+                _source_key(source) for record in evidence for source in record.source_refs
+            }
+            turn = self._turns.get(checkpoint.root_turn_id)
+            if checkpoint.cause == "explicit_user_durable":
+                # The user's own statement is the grounding, so a conversation
+                # source may stand for it — but only this turn's exact text.
+                if turn is None:
+                    return None
+                admitted_keys |= self._conversation_source_keys(turn)
+                high_value = True
+                stable = True
+                reliable_source = source_keys <= admitted_keys
+            else:
+                high_value = True
+                stable = any(record.stable_snapshot for record in evidence)
+                reliable_source = bool(evidence) and all(record.reliable for record in evidence)
+            grounded = bool(source_keys) and source_keys <= admitted_keys
+            if not grounded:
+                return None
+
+            grant = WikiAdmissionGrant(
+                checkpoint_id=checkpoint_id,
+                root_turn_id=checkpoint.root_turn_id,
+                session_provenance_id=self.provenance_session_id,
+                workspace_id=self.workspace_id,
+                allowed_source_keys=frozenset(source_keys),
+                candidate_hash=candidate_hash,
+                high_value=high_value,
+                stable=stable,
+                grounded=grounded,
+                reliable_source=reliable_source,
+            )
+            self._grants[checkpoint_id] = grant
+            self._checkpoints[checkpoint_id] = replace(checkpoint, state="persisting")
+            self._safe_track("wiki_trigger_grant_reserved", cause=checkpoint.cause)
+            return grant
+
+    async def finish_grant(
+        self,
+        checkpoint_id: str,
+        *,
+        outcome: Literal["persisted", "declined", "discarded", "failed"],
+        candidate_hash: str,
+    ) -> None:
+        """Spend a reserved grant exactly once, whatever the outcome was.
+
+        Every terminal path — commit, decline, gate discard, error — lands
+        here, so a reserved grant can never survive to authorize a second write.
+        """
+        async with self._locked():
+            grant = self._grants.get(checkpoint_id)
+            if grant is None or grant.candidate_hash != candidate_hash:
+                return
+            del self._grants[checkpoint_id]
+            checkpoint = self._checkpoints.get(checkpoint_id)
+            if checkpoint is None or checkpoint.state != "persisting":
+                return
+            state: CheckpointState = "consumed" if outcome == "persisted" else "discarded"
+            self._checkpoints[checkpoint_id] = replace(checkpoint, state=state)
+            self._safe_track("wiki_trigger_grant_finished", outcome=outcome)
+
+    async def release_retry(self, checkpoint_id: str, candidate_hash: str) -> bool:
+        """Return a checkpoint to pending after a retryable revision conflict.
+
+        Only the identical candidate may retry: the grant is released, not
+        re-issued, so changed content has to earn a fresh grant.
+        """
+        async with self._locked():
+            grant = self._grants.get(checkpoint_id)
+            checkpoint = self._checkpoints.get(checkpoint_id)
+            if (
+                grant is None
+                or checkpoint is None
+                or grant.candidate_hash != candidate_hash
+                or checkpoint.state != "persisting"
+                or checkpoint.root_turn_id != self._active_root_turn_id
+            ):
+                return False
+            del self._grants[checkpoint_id]
+            self._checkpoints[checkpoint_id] = replace(checkpoint, state="pending")
+            self._safe_track("wiki_trigger_grant_released")
+            return True
+
+    @property
+    def unconsumed_grant_count(self) -> int:
+        return len(self._grants)
+
+    def _conversation_source_keys(self, turn: RootTurn) -> set[str]:
+        return {
+            _source_key(
+                SourceRef(
+                    kind="conversation",
+                    session_id=self.provenance_session_id,
+                    content_hash=text_hash,
+                )
+            )
+            for text_hash in (turn.raw_hash, turn.normalized_hash)
+        }
+
     async def resolvable_checkpoint(self, checkpoint_id: str) -> WikiCheckpoint | None:
         """Return the checkpoint a root resolution may act on, or nothing.
 

@@ -16,10 +16,14 @@ from kimi_cli.tools.display import WikiApprovalBlock
 from kimi_cli.utils.logging import logger
 from kimi_cli.wiki.locking import WikiBusyError
 from kimi_cli.wiki.manager import PreparedWikiChange, WikiManager
-from kimi_cli.wiki.models import CurrentSource, WikiCandidate
+from kimi_cli.wiki.models import CurrentSource, SourceRef, WikiCandidate, has_url_credentials
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
-from kimi_cli.wiki.triggers import CheckpointDiscardReason, WikiCheckpoint
+from kimi_cli.wiki.triggers import (
+    CheckpointDiscardReason,
+    WikiAdmissionGrant,
+    WikiCheckpoint,
+)
 from kimi_cli.wiki.value_gate import DiscardedCandidate, WikiContext
 
 _ARCHIVE_SUFFIXES = frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip"})
@@ -399,6 +403,60 @@ class Wiki(CallableTool2[Params]):
             return
         await coordinator.consume_checkpoint(checkpoint.checkpoint_id)
 
+    async def _reserve_grant(
+        self,
+        manager: WikiManager,
+        checkpoint: WikiCheckpoint,
+        params: Params,
+        candidate_hash: str,
+    ) -> WikiAdmissionGrant | None:
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        assert params.candidate is not None
+        if coordinator is None:
+            return None
+        if (
+            params.source is not None
+            and params.source.kind == "workspace-file"
+            and params.source.workspace_id != self._runtime.workspace_id
+        ):
+            return None
+        trusted = self.current_context(self._runtime)
+        conversation_hashes: frozenset[str] = (
+            trusted.conversation_hashes if trusted is not None else frozenset[str]()
+        )
+        session_id = (
+            trusted.provenance_session_id
+            if trusted is not None
+            else coordinator.provenance_session_id
+        )
+        verified = await asyncio.to_thread(
+            _verified_source_keys,
+            manager,
+            params.candidate,
+            conversation_hashes,
+            session_id,
+        )
+        return await coordinator.reserve_grant(
+            checkpoint.checkpoint_id,
+            candidate_hash=candidate_hash,
+            source_keys=_candidate_source_keys(params.candidate),
+            verified_source_keys=verified,
+        )
+
+    async def _finish_grant(
+        self,
+        grant: WikiAdmissionGrant | None,
+        outcome: Literal["persisted", "declined", "discarded", "failed"],
+    ) -> None:
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None or grant is None:
+            return
+        await coordinator.finish_grant(
+            grant.checkpoint_id,
+            outcome=outcome,
+            candidate_hash=grant.candidate_hash,
+        )
+
     async def _write(self, manager: WikiManager, params: Params) -> ToolReturnValue:
         resolvable = await self._resolvable_checkpoint_or_error(params)
         if isinstance(resolvable, ToolError):
@@ -409,19 +467,58 @@ class Wiki(CallableTool2[Params]):
                 brief="Missing Wiki candidate",
             )
         operation = cast(Literal["remember", "ingest"], params.operation)
-        context = self._context(operation, params.candidate, params.source)
-        if isinstance(context, ToolError):
-            return context
+        grant: WikiAdmissionGrant | None = None
+        if isinstance(resolvable, WikiCheckpoint):
+            grant = await self._reserve_grant(
+                manager, resolvable, params, _candidate_hash(params.candidate)
+            )
+            if grant is None:
+                return ToolError(
+                    message=(
+                        "This candidate is not admissible: its sources do not match what the "
+                        "runtime actually observed for that checkpoint. Re-read the exact "
+                        "source and try again, or discard the checkpoint."
+                    ),
+                    brief="Wiki candidate not admitted",
+                )
+            context = WikiContext.from_grant(grant, operation)
+        else:
+            legacy = self._context(operation, params.candidate, params.source)
+            if isinstance(legacy, ToolError):
+                return legacy
+            context = legacy
+        try:
+            return await self._prepare_and_commit(
+                manager, params, context, resolvable=resolvable, grant=grant
+            )
+        except BaseException:
+            # No path may leave write authority outstanding, including a
+            # cancellation or an unexpected failure inside Approval.
+            await self._finish_grant(grant, "failed")
+            raise
+
+    async def _prepare_and_commit(
+        self,
+        manager: WikiManager,
+        params: Params,
+        context: WikiContext,
+        *,
+        resolvable: object,
+        grant: WikiAdmissionGrant | None,
+    ) -> ToolReturnValue:
+        assert params.candidate is not None
         prepared: PreparedWikiChange | DiscardedCandidate
         if params.operation == "remember":
             prepared = await asyncio.to_thread(manager.prepare, params.candidate, context)
         else:
             if params.source is None:
+                await self._finish_grant(grant, "failed")
                 return ToolError(
                     message="Wiki ingest requires current-turn source content.",
                     brief="Missing Wiki source",
                 )
             if _is_archive_source(params.source):
+                await self._finish_grant(grant, "failed")
                 return ToolError(
                     message="Wiki ingest does not accept archive sources.",
                     brief="Unsupported Wiki source",
@@ -434,6 +531,7 @@ class Wiki(CallableTool2[Params]):
             )
         if isinstance(prepared, DiscardedCandidate):
             # The gate already decided; the opportunity is spent either way.
+            await self._finish_grant(grant, "discarded")
             await self._close_checkpoint(resolvable, "not_useful")
             return ToolError(
                 message=f"Wiki candidate discarded: {prepared.reason}.",
@@ -461,9 +559,11 @@ class Wiki(CallableTool2[Params]):
                 request_policy="session_only",
             )
             if not result:
+                await self._finish_grant(grant, "declined")
                 await self._close_checkpoint(resolvable, "user_declined")
                 return result.rejection_error()
         committed = await asyncio.to_thread(manager.commit, prepared)
+        await self._finish_grant(grant, "persisted")
         await self._consume_checkpoint(resolvable)
         return _ok(
             {
@@ -522,6 +622,69 @@ class Wiki(CallableTool2[Params]):
             reliable_source=trusted.reliable_source,
             operation=operation,
         )
+
+
+def _candidate_hash(candidate: WikiCandidate) -> str:
+    """Identify the exact proposal a grant authorizes, content and all."""
+    return content_hash(
+        candidate.model_dump_json(exclude_none=True, round_trip=True).encode("utf-8")
+    )
+
+
+def _candidate_source_keys(candidate: WikiCandidate) -> frozenset[str]:
+    """Every source the candidate and its pages claim, as canonical keys."""
+    return frozenset(
+        _canonical_source_key(source)
+        for source in (
+            *candidate.sources,
+            *(source for change in candidate.pages for source in change.page.sources),
+        )
+    )
+
+
+def _canonical_source_key(source: SourceRef) -> str:
+    return source.model_dump_json(exclude_none=True)
+
+
+def _verified_source_keys(
+    manager: WikiManager,
+    candidate: WikiCandidate,
+    conversation_hashes: frozenset[str],
+    session_id: UUID,
+) -> frozenset[str]:
+    """Re-derive each claimed source and keep only those that still match.
+
+    A source hash the model repeats back proves nothing: workspace files are
+    re-read through the registry and re-hashed, web sources must be
+    credential-free, and conversation sources must name this session and text
+    the runtime actually accepted.
+    """
+    verified: set[str] = set()
+    for source in (
+        *candidate.sources,
+        *(source for change in candidate.pages for source in change.page.sources),
+    ):
+        key = _canonical_source_key(source)
+        if source.kind == "workspace-file":
+            try:
+                resolved = manager.registry.resolve(source)
+            except (OSError, ValueError):
+                continue
+            if resolved is None:
+                continue
+            try:
+                current = content_hash(resolved.read_bytes())
+            except OSError:
+                continue
+            if current == source.content_hash:
+                verified.add(key)
+        elif source.kind == "web":
+            if source.url is not None and not has_url_credentials(str(source.url)):
+                verified.add(key)
+        elif source.kind == "conversation":
+            if source.session_id == session_id and source.content_hash in conversation_hashes:
+                verified.add(key)
+    return frozenset(verified)
 
 
 def _ok(payload: object, *, brief: str) -> ToolReturnValue:
