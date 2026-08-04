@@ -290,12 +290,15 @@ async def test_a_rejected_candidate_reports_discarded_with_its_reason(
 
 
 @pytest.mark.asyncio
-async def test_retrieval_reports_a_miss_on_an_empty_wiki(
+async def test_retrieval_reports_a_miss_when_a_real_wiki_has_no_match(
     observed_runtime,
     captured_events,
 ) -> None:
+    """An empty Wiki is skipped before searching; a populated one can still miss."""
     coordinator = observed_runtime.wiki_coordinator
     await coordinator.begin_turn("durable architecture", "durable architecture")
+    # A Wiki that has been written to before, but holds nothing matching.
+    observed_runtime.wiki.layout.revision.write_text("7\n", encoding="ascii")
     captured_events.clear()
 
     result = await retrieve_for_turn(
@@ -409,3 +412,30 @@ async def test_telemetry_failure_never_blocks_retrieval(
     monkeypatch.setattr(wiki_telemetry, "track", _boom)
 
     assert await retrieve_for_turn(observed_runtime.wiki, coordinator, "a prompt") is None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_wiki_costs_no_search_at_all(
+    observed_runtime,
+    captured_events,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh install must not pay for a full-text query on every prompt."""
+    coordinator = observed_runtime.wiki_coordinator
+    await coordinator.begin_turn("anything", "anything")
+    searched = False
+
+    def _search(*_args: Any, **_kwargs: Any):
+        nonlocal searched
+        searched = True
+        return []
+
+    monkeypatch.setattr(observed_runtime.wiki, "search", _search)
+    captured_events.clear()
+
+    result = await retrieve_for_turn(observed_runtime.wiki, coordinator, "anything at all")
+
+    assert result is None
+    assert not searched, "an empty Wiki must be skipped before searching"
+    assert _names(captured_events) == ["wiki_retrieval_skipped"]
+    assert captured_events[0][1]["reason"] == "empty_wiki"

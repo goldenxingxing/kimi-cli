@@ -70,6 +70,13 @@ async def retrieve_for_turn(
         track_wiki_event("wiki_retrieval_skipped", reason=skip_reason)
         return None
 
+    if _wiki_is_empty(manager):
+        # Nothing has ever been committed, so the search can only miss. Skip it
+        # rather than pay for a full-text query on every prompt.
+        await _record_outcome(coordinator, "empty_wiki")
+        track_wiki_event("wiki_retrieval_skipped", reason="empty_wiki")
+        return None
+
     try:
         results = await asyncio.to_thread(manager.search, query, RETRIEVAL_MAX_RESULTS)
         bounded_results = tuple(results[:RETRIEVAL_MAX_RESULTS])
@@ -104,6 +111,21 @@ async def retrieve_for_turn(
         await _record_outcome(coordinator, "failed")
         track_wiki_event("wiki_trigger_failed", stage="retrieval", error_class=type(exc).__name__)
         return None
+
+
+def _wiki_is_empty(manager: WikiManager) -> bool:
+    """Whether the Wiki has never been written to.
+
+    Reading the revision marker is far cheaper than a full-text search, and it
+    is the common case for a fresh install.  Any doubt answers "not empty" so
+    a real Wiki is never skipped.
+    """
+    try:
+        return manager.layout.revision.read_text(encoding="ascii").strip() in ("", "0")
+    except Exception:
+        # Retrieval fails open, so anything unexpected here means "not empty"
+        # and the search proceeds as before.
+        return False
 
 
 def _skip_reason(query: str, *, synthetic: bool, slash_command: bool) -> str | None:
