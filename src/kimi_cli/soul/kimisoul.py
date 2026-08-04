@@ -113,6 +113,7 @@ from kimi_cli.wire.types import (
 )
 
 if TYPE_CHECKING:
+    from kimi_cli.wiki.triggers import WikiCheckpoint
 
     def type_check(soul: KimiSoul):
         _: Soul = soul
@@ -248,6 +249,11 @@ class TurnOutcome:
     stop_reason: TurnStopReason
     final_message: Message | None
     step_count: int
+
+
+def _explicit_only(checkpoints: Sequence[WikiCheckpoint]) -> tuple[WikiCheckpoint, ...]:
+    """Keep only checkpoints the user explicitly asked for."""
+    return tuple(c for c in checkpoints if c.cause == "explicit_user_durable")
 
 
 class KimiSoul:
@@ -1279,21 +1285,27 @@ class KimiSoul:
     async def _pending_checkpoint_message(self) -> Message | None:
         """Return the managed message that must precede finishing this turn.
 
-        The root gets each open checkpoint once, then exactly one reminder.  If
-        it still will not resolve them, they are abandoned as `unresolved` and
-        the turn finishes: an uncooperative model costs one extra completion,
-        never an unbounded loop and never a write.
+        Only knowledge the user explicitly asked to keep is worth interrupting a
+        turn for. Delivering a checkpoint costs a model call, and one more if it
+        is ignored; evidence-based opportunities arise on nearly every turn that
+        reads a file, so charging every conversation two extra completions for
+        them is a bad trade. Those are opportunities, not obligations — they are
+        retired with the turn instead.
+
+        For explicit intent the root gets one delivery, then exactly one
+        reminder. An uncooperative model costs one extra completion, never an
+        unbounded loop and never a write.
         """
         coordinator = self._runtime.wiki_coordinator
         if coordinator is None:
             return None
         try:
-            fresh = await coordinator.undelivered_pending()
+            fresh = _explicit_only(await coordinator.undelivered_pending())
             if fresh:
                 block = await coordinator.render_checkpoints(fresh)
                 await coordinator.mark_delivered([checkpoint.checkpoint_id for checkpoint in fresh])
                 return Message(role="user", content=[system(block)])
-            reminder = await coordinator.awaiting_reminder()
+            reminder = _explicit_only(await coordinator.awaiting_reminder())
             if reminder:
                 block = await coordinator.render_checkpoints(reminder)
                 await coordinator.mark_delivered(

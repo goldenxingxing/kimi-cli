@@ -419,3 +419,48 @@ async def test_subagent_cannot_discard_a_root_checkpoint(wiki_runtime) -> None:
     assert result.is_error
     assert "root agent only" in result.message
     assert (await wiki_runtime.wiki_coordinator.pending_batch()).checkpoints != ()
+
+
+@pytest.mark.asyncio
+async def test_evidence_checkpoints_cost_no_extra_model_call(
+    wiki_runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only explicit intent is worth interrupting a turn for.
+
+    A root_evidence checkpoint arises on nearly every turn that reads a file.
+    Delivering one costs a completion, and a second if it is ignored, so
+    charging that to every conversation is a bad trade — they are retired with
+    the turn instead.
+    """
+    coordinator = wiki_runtime.wiki_coordinator
+    await coordinator.begin_turn("look something up", "look something up")
+    await coordinator.create_checkpoint(
+        "root_evidence", summary_hash=content_hash(b"a reusable conclusion")
+    )
+    soul = _soul(wiki_runtime, tmp_path, monkeypatch)
+
+    outcome = await soul._agent_loop()
+
+    assert outcome.stop_reason == "no_tool_calls"
+    assert soul._step.await_count == 1, "an evidence checkpoint must not add a completion"
+    assert all(
+        OPENKIMO_WIKI_CHECKPOINT_START not in message.extract_text("\n")
+        for message in soul.context.history
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_intent_still_interrupts_the_turn(
+    wiki_runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the user actually asked to keep is still worth the round trip."""
+    await _open_durable_checkpoint(wiki_runtime)
+    soul = _soul(wiki_runtime, tmp_path, monkeypatch)
+
+    await soul._agent_loop()
+
+    assert soul._step.await_count == 3  # deliver, remind, finish
