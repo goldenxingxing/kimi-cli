@@ -780,7 +780,6 @@ class KimiSoul:
                 and self._runtime.wiki_coordinator is not None
             ):
                 from kimi_cli.wiki.intent import detect_durable_intent
-                from kimi_cli.wiki.retrieval import retrieve_for_turn
 
                 coordinator = self._runtime.wiki_coordinator
                 try:
@@ -793,18 +792,14 @@ class KimiSoul:
                     intent = detect_durable_intent(raw_text_input)
                     if intent is not None:
                         await coordinator.record_durable_intent(intent)
-                    retrieval = await retrieve_for_turn(
-                        self._runtime.wiki, coordinator, raw_text_input
-                    )
-                    if retrieval is not None:
-                        user_message = Message(
-                            role="user",
-                            content=[*user_message.content, system(retrieval.block)],
-                        )
+                    # No automatic per-turn search. The Wiki index already sits
+                    # in the system prompt, so the agent can see what exists and
+                    # call Wiki(operation="search") when a turn actually calls
+                    # for it. Searching every prompt regardless of relevance cost
+                    # latency and prompt space on conversations that never
+                    # needed it.
                 except Exception:
-                    logger.warning(
-                        "Wiki retrieval setup failed; continuing without injected references"
-                    )
+                    logger.warning("Wiki turn setup failed; continuing without it")
 
             if command_call:
                 command = self._find_slash_command(command_call.name)

@@ -464,3 +464,43 @@ async def test_explicit_intent_still_interrupts_the_turn(
     await soul._agent_loop()
 
     assert soul._step.await_count == 3  # deliver, remind, finish
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_turn_runs_no_wiki_search(
+    wiki_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrieval is on demand now, not on every prompt.
+
+    The index already sits in the system prompt, so the agent can see what
+    exists and search when a turn calls for it. Searching regardless of
+    relevance cost latency and prompt space on conversations that never needed
+    it — which was most of them.
+    """
+    import kimi_cli.wiki.retrieval as retrieval_module
+
+    searched = False
+
+    async def _unexpected(*_args: object, **_kwargs: object):
+        nonlocal searched
+        searched = True
+        return None
+
+    monkeypatch.setattr(retrieval_module, "retrieve_for_turn", _unexpected)
+    source = (
+        Path(__file__).resolve().parents[2] / "src" / "kimi_cli" / "soul" / "kimisoul.py"
+    ).read_text(encoding="utf-8")
+
+    assert not searched
+    # The call site is gone, not merely guarded.
+    assert "retrieve_for_turn" not in source
+
+
+@pytest.mark.asyncio
+async def test_the_turn_still_opens_and_detects_explicit_intent(wiki_runtime) -> None:
+    """Removing retrieval must not take turn tracking or intent with it."""
+    checkpoint = await _open_durable_checkpoint(wiki_runtime)
+
+    assert checkpoint.cause == "explicit_user_durable"
+    assert wiki_runtime.wiki_coordinator.active_turn_id is not None
