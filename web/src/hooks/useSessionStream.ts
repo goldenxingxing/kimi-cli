@@ -138,6 +138,7 @@ import {
 import { createMessageId, getApiBaseUrl } from "./utils";
 import { kimiCliVersion } from "@/lib/version";
 import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/tool/store";
+import { decideOnClose, shouldReportErrorEvent } from "./connection-policy";
 import { reconcileApprovalRequestIds } from "@/lib/approval-snapshot";
 import { v4 as uuidV4 } from "uuid";
 import { setMessageOutputTime } from "./message-output-time";
@@ -369,6 +370,11 @@ export function useSessionStream(
    */
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  // Consecutive failed reconnects; reset the moment a socket opens.
+  const reconnectAttemptRef = useRef(0);
+  // Set while the client is deliberately closing, so the handlers can tell
+  // an intentional close from a dropped connection.
+  const intentionalCloseRef = useRef(false);
   const connectRef = useRef<() => void>(() => undefined);
   const disconnectRef = useRef<() => void>(() => undefined);
   const reconnectRef = useRef<() => void>(() => undefined);
@@ -2805,6 +2811,7 @@ export function useSessionStream(
         console.log("[SessionStream] Connected to session:", sessionId);
         setIsConnected(true);
         setError(null);
+        reconnectAttemptRef.current = 0;
         awaitingIdleRef.current = false;
         setStatus("streaming"); // Will receive replay, then switch to ready
         lastWsMessageTimeRef.current = Date.now();
@@ -2867,10 +2874,15 @@ export function useSessionStream(
           return;
         }
 
+        // The event carries no detail by design, and usually precedes a close
+        // the client recovers from. The close handler decides what, if
+        // anything, the reader is told.
         console.error("[SessionStream] WebSocket error:", event);
-        const err = new Error("WebSocket connection error");
-        setError(err);
-        onError?.(err);
+        if (shouldReportErrorEvent()) {
+          const err = new Error("WebSocket connection error");
+          setError(err);
+          onError?.(err);
+        }
         setAwaitingFirstResponse(false);
         clearStepRetryStatus();
         awaitingIdleRef.current = false;
@@ -2895,13 +2907,33 @@ export function useSessionStream(
           watchdogIntervalRef.current = null;
         }
 
-        // Handle specific close codes
-        if (event.code === 4004) {
-          const err = new Error("Session not found");
-          setError(err);
-          onError?.(err);
-        } else if (event.code === 4029) {
-          const err = new Error("Too many concurrent sessions");
+        const decision = decideOnClose(
+          event.code,
+          reconnectAttemptRef.current,
+          intentionalCloseRef.current,
+        );
+        intentionalCloseRef.current = false;
+        if (decision.action === "retry") {
+          reconnectAttemptRef.current = decision.attempt;
+          console.log(
+            `[SessionStream] Reconnecting in ${decision.delayMs}ms ` +
+              `(attempt ${decision.attempt})`,
+          );
+          if (reconnectTimeoutRef.current !== null) {
+            window.clearTimeout(reconnectTimeoutRef.current);
+          }
+          reconnectTimeoutRef.current = window.setTimeout(() => {
+            reconnectTimeoutRef.current = null;
+            reconnectRef.current();
+          }, decision.delayMs);
+        } else if (decision.action === "report") {
+          const err = new Error(
+            decision.reason === "sessionNotFound"
+              ? "Session not found"
+              : decision.reason === "tooManySessions"
+                ? "Too many concurrent sessions"
+                : "Lost connection to the session and could not reconnect",
+          );
           setError(err);
           onError?.(err);
         }
@@ -2951,6 +2983,8 @@ export function useSessionStream(
     }
 
     if (wsRef.current) {
+      intentionalCloseRef.current = true;
+      reconnectAttemptRef.current = 0;
       wsRef.current.close();
       wsRef.current = null;
     }
