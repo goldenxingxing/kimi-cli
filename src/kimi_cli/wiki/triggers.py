@@ -633,6 +633,31 @@ class WikiTurnCoordinator:
             self._safe_track("wiki_trigger_durable_intent", family=intent.family)
             return checkpoint
 
+    async def checkpoint_sources(self, checkpoint_id: str) -> tuple[SourceRef, ...]:
+        """Return the sources this checkpoint's own evidence actually observed.
+
+        A model cannot reconstruct these: it would have to guess the workspace
+        id and re-derive a hash that must match byte for byte. Since a
+        model-supplied source contributes nothing to authorization anyway, the
+        runtime hands over what it recorded instead of demanding it back.
+        """
+        async with self._locked():
+            checkpoint = self._checkpoints.get(checkpoint_id)
+            if (
+                checkpoint is None
+                or checkpoint.state != "pending"
+                or checkpoint.root_turn_id != self._active_root_turn_id
+            ):
+                return ()
+            seen: dict[str, SourceRef] = {}
+            for evidence_id in checkpoint.evidence_ids:
+                evidence = self._evidence.get(evidence_id)
+                if evidence is None:
+                    continue
+                for source in evidence.source_refs:
+                    seen.setdefault(_source_key(source), _source_snapshot(source))
+            return tuple(seen.values())
+
     async def reserve_grant(
         self,
         checkpoint_id: str,

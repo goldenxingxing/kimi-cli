@@ -409,6 +409,49 @@ class Wiki(CallableTool2[Params]):
             return
         await coordinator.consume_checkpoint(checkpoint.checkpoint_id)
 
+    async def _fill_sources_from_checkpoint(
+        self,
+        checkpoint: WikiCheckpoint,
+        candidate: WikiCandidate,
+    ) -> WikiCandidate:
+        """Supply provenance the runtime observed, when the model supplied none.
+
+        Task 6 established that a model-supplied source hash contributes
+        nothing to authorization — only the runtime's own evidence does. So
+        demanding that the model restate those hashes was pure friction: it
+        would have to guess the workspace id and reproduce a hash byte for
+        byte, which is not something it can do. The model supplies the
+        content; the runtime supplies the provenance.
+
+        A candidate that does name its own sources is left exactly as it is,
+        and still faces the full check.
+        """
+        coordinator = getattr(self._runtime, "wiki_coordinator", None)
+        if coordinator is None:
+            return candidate
+        needs_fill = not candidate.sources or any(
+            not change.page.sources for change in candidate.pages
+        )
+        if not needs_fill:
+            return candidate
+        sources = await coordinator.checkpoint_sources(checkpoint.checkpoint_id)
+        if not sources:
+            return candidate
+        pages = [
+            change.model_copy(
+                update={"page": change.page.model_copy(update={"sources": list(sources)})}
+            )
+            if not change.page.sources
+            else change
+            for change in candidate.pages
+        ]
+        return candidate.model_copy(
+            update={
+                "sources": list(candidate.sources) or list(sources),
+                "pages": pages,
+            }
+        )
+
     async def _reserve_grant(
         self,
         manager: WikiManager,
@@ -475,6 +518,14 @@ class Wiki(CallableTool2[Params]):
         operation = cast(Literal["remember", "ingest"], params.operation)
         grant: WikiAdmissionGrant | None = None
         if isinstance(resolvable, WikiCheckpoint):
+            params = params.model_copy(
+                update={
+                    "candidate": await self._fill_sources_from_checkpoint(
+                        resolvable, params.candidate
+                    )
+                }
+            )
+            assert params.candidate is not None
             grant = await self._reserve_grant(
                 manager, resolvable, params, _candidate_hash(params.candidate)
             )

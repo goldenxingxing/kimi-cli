@@ -178,8 +178,16 @@ async def test_source_hash_the_runtime_never_observed_is_refused(admission_runti
 
 
 @pytest.mark.asyncio
-async def test_unsourced_candidate_cannot_pass_a_checkpoint(admission_runtime) -> None:
-    checkpoint, _, _ = await _file_checkpoint(admission_runtime)
+async def test_an_unsourced_candidate_cannot_pass_a_checkpoint_with_no_evidence(
+    admission_runtime,
+) -> None:
+    """Filling borrows the checkpoint's own evidence; a checkpoint with none
+    lends nothing, so the candidate stays ungrounded and is refused."""
+    coordinator = admission_runtime.wiki_coordinator
+    await coordinator.begin_turn("remember this rule", "remember this rule")
+    checkpoint = await coordinator.create_checkpoint(
+        "explicit_user_durable", summary_hash=content_hash(b"a durable rule")
+    )
     unsourced = WikiCandidate(
         summary="Record the release rule",
         pages=[
@@ -735,3 +743,84 @@ async def test_a_grant_cannot_be_spent_after_its_turn_moved_on(admission_runtime
     # The authority is gone and the checkpoint is retired, not left in limbo.
     assert coordinator.unconsumed_grant_count == 0
     assert coordinator.unresolved_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_with_no_sources_is_grounded_from_the_checkpoint(
+    admission_runtime,
+) -> None:
+    """The scenario that made the tool unusable in practice.
+
+    The checkpoint block names sources by path only. To restate them the model
+    would have to guess the workspace id and reproduce a content hash byte for
+    byte — it cannot, so it gave up and discarded every checkpoint. Since a
+    model-supplied source never carried authority anyway, the runtime fills in
+    what it observed.
+    """
+    checkpoint, source, _ = await _file_checkpoint(admission_runtime)
+    page = WikiPage(
+        logical_path="concepts/release-rule.md",
+        title="Release rule",
+        created=_NOW,
+        updated=_NOW,
+        tags=["release"],
+        sources=[],  # the model supplies content, not provenance
+        revision=1,
+        body="Signed tags only for every release.\n",
+    )
+    bare = WikiCandidate(
+        summary="Record the signed-tag release rule",
+        pages=[PageChange(page=page, expected_revision=None)],
+        sources=[],
+        value="high",
+    )
+    before = _revision(admission_runtime)
+
+    result = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=bare,
+        )
+    )
+
+    assert not result.is_error, result.message
+    assert _revision(admission_runtime) != before
+    assert admission_runtime.wiki_coordinator.unconsumed_grant_count == 0
+    # What got written is the runtime's own provenance, not anything invented.
+    assert source.path is not None
+
+
+@pytest.mark.asyncio
+async def test_filling_never_widens_what_the_model_actually_claimed(
+    admission_runtime,
+) -> None:
+    """A candidate that names its own sources is still checked in full."""
+    checkpoint, _, _ = await _file_checkpoint(admission_runtime)
+    unread = Path(str(admission_runtime.session.work_dir)) / "not-observed.md"
+    unread.write_text("never opened", encoding="utf-8")
+    invented = admission_runtime.wiki.registry.relative_source(
+        admission_runtime.workspace_id, unread
+    )
+    before = _revision(admission_runtime)
+
+    result = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_candidate(invented),
+        )
+    )
+
+    assert result.is_error
+    assert _revision(admission_runtime) == before
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_filled_without_an_open_checkpoint(admission_runtime) -> None:
+    coordinator = admission_runtime.wiki_coordinator
+    checkpoint, _, _ = await _file_checkpoint(admission_runtime)
+    await coordinator.discard(checkpoint.checkpoint_id, "not_useful")
+
+    assert await coordinator.checkpoint_sources(checkpoint.checkpoint_id) == ()
+    assert await coordinator.checkpoint_sources("invented") == ()
