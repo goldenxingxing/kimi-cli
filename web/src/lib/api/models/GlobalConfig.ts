@@ -40,6 +40,12 @@ export interface GlobalConfig {
      */
     defaultThinking: boolean;
     /**
+     * Share of the context window that may fill before auto-compaction runs. Applies to live sessions immediately, without a restart.
+     * @type {number}
+     * @memberof GlobalConfig
+     */
+    compactionTriggerRatio: number;
+    /**
      * All configured models
      * @type {Array<ConfigModel>}
      * @memberof GlobalConfig
@@ -53,6 +59,7 @@ export interface GlobalConfig {
 export function instanceOfGlobalConfig(value: object): value is GlobalConfig {
     if (!('defaultModel' in value) || value['defaultModel'] === undefined) return false;
     if (!('defaultThinking' in value) || value['defaultThinking'] === undefined) return false;
+    if (!('compactionTriggerRatio' in value) || value['compactionTriggerRatio'] === undefined) return false;
     if (!('models' in value) || value['models'] === undefined) return false;
     return true;
 }
@@ -69,6 +76,7 @@ export function GlobalConfigFromJSONTyped(json: any, ignoreDiscriminator: boolea
         
         'defaultModel': json['default_model'],
         'defaultThinking': json['default_thinking'],
+        'compactionTriggerRatio': json['compaction_trigger_ratio'],
         'models': ((json['models'] as Array<any>).map(ConfigModelFromJSON)),
     };
 }
@@ -86,6 +94,7 @@ export function GlobalConfigToJSONTyped(value?: GlobalConfig | null, ignoreDiscr
         
         'default_model': value['defaultModel'],
         'default_thinking': value['defaultThinking'],
+        'compaction_trigger_ratio': value['compactionTriggerRatio'],
         'models': ((value['models'] as Array<any>).map(ConfigModelToJSON)),
     };
 }

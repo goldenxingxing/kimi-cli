@@ -163,6 +163,20 @@ class JSONRPCSetPlanModeMessage(_MessageBase):
     params: _SetPlanModeParams
 
 
+class _SetCompactionRatioParams(BaseModel):
+    """The share of the context window that may fill before auto-compaction."""
+
+    ratio: float = Field(ge=0.5, le=0.99)
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class JSONRPCSetCompactionRatioMessage(_MessageBase):
+    method: Literal["set_compaction_ratio"] = "set_compaction_ratio"
+    id: str
+    params: _SetCompactionRatioParams
+
+
 class JSONRPCCancelMessage(_MessageBase):
     method: Literal["cancel"] = "cancel"
     id: str
@@ -215,10 +229,19 @@ type JSONRPCInMessage = (
     | JSONRPCSteerMessage
     | JSONRPCReplayMessage
     | JSONRPCSetPlanModeMessage
+    | JSONRPCSetCompactionRatioMessage
     | JSONRPCCancelMessage
 )
 JSONRPCInMessageAdapter = TypeAdapter[JSONRPCInMessage](JSONRPCInMessage)
-JSONRPC_IN_METHODS = {"initialize", "prompt", "steer", "replay", "set_plan_mode", "cancel"}
+JSONRPC_IN_METHODS = {
+    "initialize",
+    "prompt",
+    "steer",
+    "replay",
+    "set_plan_mode",
+    "set_compaction_ratio",
+    "cancel",
+}
 
 type JSONRPCOutMessage = (
     JSONRPCSuccessResponse

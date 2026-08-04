@@ -664,6 +664,38 @@ class SessionProcess:
                 logger.debug(f"WebSocket removed, count={self._websocket_count}")
             self._replay_buffers.pop(ws, None)
 
+    async def apply_compaction_ratio(self, ratio: float) -> bool:
+        """Push a new auto-compaction ratio into a live worker.
+
+        Returns whether the worker was running and the message was written.
+        A stopped worker needs nothing: it reads the persisted value from
+        config.toml the next time it starts.
+        """
+        if not self.is_running:
+            return False
+        process = self._process
+        if process is None or process.stdin is None:
+            return False
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "set_compaction_ratio",
+                "id": uuid4().hex,
+                "params": {"ratio": ratio},
+            },
+            ensure_ascii=False,
+        )
+        try:
+            process.stdin.write((payload + "\n").encode())
+            await process.stdin.drain()
+        except (OSError, RuntimeError):
+            logger.warning(
+                "Could not push the compaction ratio to session {sid}",
+                sid=self.session_id,
+            )
+            return False
+        return True
+
     async def send_message(self, message: str) -> None:
         """Send a message to the subprocess stdin."""
         await self.start()
@@ -739,6 +771,16 @@ class KimiCLIRunner:
             session = self._sessions.get(session_id)
             if session:
                 await session.remove_websocket(ws)
+
+    async def apply_compaction_ratio(self, ratio: float) -> list[UUID]:
+        """Retune every live worker in place; no restart, no interruption."""
+        async with self._lock:
+            running = [(sid, proc) for sid, proc in self._sessions.items() if proc.is_running]
+        applied: list[UUID] = []
+        for session_id, proc in running:
+            if await proc.apply_compaction_ratio(ratio):
+                applied.append(session_id)
+        return applied
 
     async def restart_running_workers(
         self,

@@ -32,7 +32,13 @@ export interface UpdateGlobalConfigRequest {
      */
     defaultThinking?: boolean | null;
     /**
-     * 
+     *
+     * @type {number}
+     * @memberof UpdateGlobalConfigRequest
+     */
+    compactionTriggerRatio?: number | null;
+    /**
+     *
      * @type {boolean}
      * @memberof UpdateGlobalConfigRequest
      */
@@ -64,6 +70,7 @@ export function UpdateGlobalConfigRequestFromJSONTyped(json: any, ignoreDiscrimi
         
         'defaultModel': json['default_model'] == null ? undefined : json['default_model'],
         'defaultThinking': json['default_thinking'] == null ? undefined : json['default_thinking'],
+        'compactionTriggerRatio': json['compaction_trigger_ratio'] == null ? undefined : json['compaction_trigger_ratio'],
         'restartRunningSessions': json['restart_running_sessions'] == null ? undefined : json['restart_running_sessions'],
         'forceRestartBusySessions': json['force_restart_busy_sessions'] == null ? undefined : json['force_restart_busy_sessions'],
     };
@@ -82,6 +89,7 @@ export function UpdateGlobalConfigRequestToJSONTyped(value?: UpdateGlobalConfigR
         
         'default_model': value['defaultModel'],
         'default_thinking': value['defaultThinking'],
+        'compaction_trigger_ratio': value['compactionTriggerRatio'],
         'restart_running_sessions': value['restartRunningSessions'],
         'force_restart_busy_sessions': value['forceRestartBusySessions'],
     };

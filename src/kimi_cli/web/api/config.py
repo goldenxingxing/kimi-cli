@@ -34,6 +34,12 @@ class GlobalConfig(BaseModel):
 
     default_model: str = Field(description="Current default model key")
     default_thinking: bool = Field(description="Current default thinking mode")
+    compaction_trigger_ratio: float = Field(
+        description=(
+            "Share of the context window that may fill before auto-compaction runs. "
+            "Applies to live sessions immediately, without a restart."
+        )
+    )
     models: list[ConfigModel] = Field(description="All configured models")
 
 
@@ -42,6 +48,12 @@ class UpdateGlobalConfigRequest(BaseModel):
 
     default_model: str | None = Field(default=None, description="New default model key")
     default_thinking: bool | None = Field(default=None, description="New default thinking mode")
+    compaction_trigger_ratio: float | None = Field(
+        default=None,
+        ge=0.5,
+        le=0.99,
+        description="New auto-compaction trigger ratio, applied to live sessions in place",
+    )
     restart_running_sessions: bool | None = Field(
         default=None, description="Whether to restart running sessions"
     )
@@ -59,6 +71,10 @@ class UpdateGlobalConfigResponse(BaseModel):
     )
     skipped_busy_session_ids: list[str] | None = Field(
         default=None, description="IDs of busy sessions that were skipped"
+    )
+    retuned_session_ids: list[str] | None = Field(
+        default=None,
+        description="IDs of live sessions that picked up the new compaction ratio in place",
     )
 
 
@@ -269,6 +285,7 @@ def _build_global_config() -> GlobalConfig:
     return GlobalConfig(
         default_model=config.default_model,
         default_thinking=default_thinking,
+        compaction_trigger_ratio=config.loop_control.compaction_trigger_ratio,
         models=models,
     )
 
@@ -320,6 +337,14 @@ async def update_global_config(
     if request.default_thinking is not None:
         config.default_thinking = request.default_thinking
 
+    # Update the auto-compaction trigger ratio
+    ratio_changed = (
+        request.compaction_trigger_ratio is not None
+        and request.compaction_trigger_ratio != config.loop_control.compaction_trigger_ratio
+    )
+    if request.compaction_trigger_ratio is not None:
+        config.loop_control.compaction_trigger_ratio = request.compaction_trigger_ratio
+
     # Save config.  If models are currently sourced from environment
     # variables (config.toml has no model entries) we only persist
     # default_thinking so that we don't write a default_model that
@@ -328,9 +353,20 @@ async def update_global_config(
     had_models_before = bool(config.models)
     if had_models_before:
         save_config(config)
-    elif request.default_thinking is not None:
+    elif request.default_thinking is not None or request.compaction_trigger_ratio is not None:
         # Preserve original default_model (likely empty) and only update thinking
         save_config(config)
+
+    # The compaction ratio is read fresh on every step, so live workers can be
+    # retuned in place. Do it before any restart decision: a session that picks
+    # up the new value this way never needs to be interrupted for it.
+    retuned: list[str] = []
+    if ratio_changed:
+        assert request.compaction_trigger_ratio is not None
+        retuned = [
+            str(sid)
+            for sid in await runner.apply_compaction_ratio(request.compaction_trigger_ratio)
+        ]
 
     # Restart running workers to apply config changes
     restarted: list[str] = []
@@ -338,7 +374,8 @@ async def update_global_config(
 
     restart_running = request.restart_running_sessions
     if restart_running is None:
-        restart_running = True  # Default to restarting sessions
+        # A ratio-only change needs no restart; anything else still does.
+        restart_running = request.default_model is not None or request.default_thinking is not None
 
     if restart_running:
         summary = await runner.restart_running_workers(
@@ -352,6 +389,7 @@ async def update_global_config(
         config=_build_global_config(),
         restarted_session_ids=restarted if restarted else None,
         skipped_busy_session_ids=skipped_busy if skipped_busy else None,
+        retuned_session_ids=retuned if retuned else None,
     )
 
 

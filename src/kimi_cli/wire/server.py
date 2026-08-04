@@ -51,6 +51,7 @@ from .jsonrpc import (
     JSONRPCPromptMessage,
     JSONRPCReplayMessage,
     JSONRPCRequestMessage,
+    JSONRPCSetCompactionRatioMessage,
     JSONRPCSetPlanModeMessage,
     JSONRPCSteerMessage,
     JSONRPCSuccessResponse,
@@ -365,6 +366,8 @@ class WireServer:
                     resp = await self._handle_steer(msg)
                 case JSONRPCSetPlanModeMessage():
                     resp = await self._handle_set_plan_mode(msg)
+                case JSONRPCSetCompactionRatioMessage():
+                    resp = await self._handle_set_compaction_ratio(msg)
                 case JSONRPCCancelMessage():
                     resp = await self._handle_cancel(msg)
                 case JSONRPCSuccessResponse() | JSONRPCErrorResponse():
@@ -814,6 +817,32 @@ class WireServer:
         return JSONRPCSuccessResponse(
             id=msg.id,
             result={"status": "ok", "plan_mode": new_state},
+        )
+
+    async def _handle_set_compaction_ratio(
+        self, msg: JSONRPCSetCompactionRatioMessage
+    ) -> JSONRPCSuccessResponse | JSONRPCErrorResponse:
+        """Retune auto-compaction on a live worker, without a restart.
+
+        `should_auto_compact` reads the ratio from this config object on every
+        step, so mutating it in place is enough for the next step to honour the
+        new value — including mid-turn, while the agent is working.
+        """
+        if not isinstance(self._soul, KimiSoul):
+            return JSONRPCErrorResponse(
+                id=msg.id,
+                error=JSONRPCErrorObject(
+                    code=ErrorCodes.INVALID_STATE,
+                    message="Compaction ratio is not supported",
+                ),
+            )
+
+        loop_control = self._soul.runtime.config.loop_control
+        loop_control.compaction_trigger_ratio = msg.params.ratio
+        logger.info("Compaction trigger ratio set to {ratio}", ratio=msg.params.ratio)
+        return JSONRPCSuccessResponse(
+            id=msg.id,
+            result={"status": "ok", "compaction_trigger_ratio": msg.params.ratio},
         )
 
     async def _handle_replay(
