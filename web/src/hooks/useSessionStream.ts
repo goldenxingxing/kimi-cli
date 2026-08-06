@@ -139,6 +139,12 @@ import { createMessageId, getApiBaseUrl } from "./utils";
 import { kimiCliVersion } from "@/lib/version";
 import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/tool/store";
 import { decideOnClose, shouldReportErrorEvent } from "./connection-policy";
+import {
+  LEGACY_UPLOADS_REGEX,
+  MEDIA_TAG_PATH_REGEX,
+  isUploadedFilePath,
+  uploadedFileName,
+} from "./upload-paths";
 import { reconcileApprovalRequestIds } from "@/lib/approval-snapshot";
 import { v4 as uuidV4 } from "uuid";
 import { setMessageOutputTime } from "./message-output-time";
@@ -150,12 +156,9 @@ const IMAGE_TAG_REGEX = /<image\s+path="([^"]+)"\s+content_type="([^"]+)">/i;
 const VIDEO_TAG_REGEX = /<video\s+path="([^"]+)"\s+content_type="([^"]+)">/i;
 const DOCUMENT_TAG_REGEX =
   /<document\s+path="([^"]+)"\s+content_type="([^"]+)">/i;
-const LEGACY_UPLOADS_REGEX = /`uploads\/([^`]+)`/;
 const TRAILING_DECIMAL_ZERO_REGEX = /\.0$/;
 const HTTP_TO_WS_REGEX = /^http/;
 const NEWLINE_REGEX = /\r?\n/;
-// Match <image path="..."> or <video path="..."> tags (path attribute only, no content_type required)
-const MEDIA_TAG_PATH_REGEX = /<(?:image|video)\s+[^>]*path="([^"]*\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/uploads\/([^"]+))"/g;
 const BROWSER_URL_PROTOCOLS = new Set(["http:", "https:", "data:", "blob:"]);
 const WIRE_PROTOCOL_VERSION = "1.10";
 
@@ -731,12 +734,7 @@ export function useSessionStream(
           return false;
         }
         const filePath = match[1].trim();
-        if (
-          !(
-            filePath &&
-            (filePath.startsWith("/") || filePath.startsWith("uploads/"))
-          )
-        ) {
+        if (!isUploadedFilePath(filePath)) {
           return false;
         }
         uploadedFilePaths.push(filePath);
@@ -762,7 +760,7 @@ export function useSessionStream(
           if (imageTagMatch) {
             // Extract filename from path
             const fullPath = imageTagMatch[1];
-            pendingFilename = fullPath.split("/").pop() ?? fullPath;
+            pendingFilename = uploadedFileName(fullPath);
             pendingMediaType = imageTagMatch[2];
             continue; // Skip this text part, it's just metadata
           }
@@ -777,7 +775,7 @@ export function useSessionStream(
           if (videoTagMatch) {
             // Extract filename from path
             const fullPath = videoTagMatch[1];
-            pendingFilename = fullPath.split("/").pop() ?? fullPath;
+            pendingFilename = uploadedFileName(fullPath);
             pendingMediaType = videoTagMatch[2];
             continue; // Skip this text part, it's just metadata
           }
@@ -814,7 +812,7 @@ export function useSessionStream(
             inDocument = true;
             // Extract filename from path
             const fullPath = documentTagMatch[1];
-            documentFilename = fullPath.split("/").pop() ?? fullPath;
+            documentFilename = uploadedFileName(fullPath);
             documentMediaType = documentTagMatch[2];
             documentContent = [];
             continue;
@@ -921,7 +919,7 @@ export function useSessionStream(
         );
         const seenUploadedFilenames = new Set<string>();
         for (const filePath of uploadedFilePaths) {
-          const filename = filePath.split("/").pop() ?? filePath;
+          const filename = uploadedFileName(filePath);
           if (!filename) {
             continue;
           }
