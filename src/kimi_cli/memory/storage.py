@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -14,6 +15,7 @@ if sys.platform == "win32":
 else:
     import fcntl
 
+from kimi_cli.memory.dedup import classify_entry, compact_entries, merge_entry
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.utils.logging import logger
 
@@ -95,15 +97,96 @@ def read_entries(path: Path) -> list[MemoryEntry]:
         return _read_raw(path)
 
 
-def append_entry(path: Path, entry: MemoryEntry) -> None:
-    """Append ``entry`` to ``path``."""
+def _append_line(path: Path, entry: MemoryEntry) -> None:
+    """Append one record. Caller must already hold the exclusive lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry.model_dump_json())
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+@dataclass(frozen=True, slots=True)
+class UpsertResult:
+    """What a write actually did, as opposed to what it was asked to do."""
+
+    entry: MemoryEntry
+    """The record now on disk — the merge target when ``merged``, else the new one."""
+    merged: bool
+    replaced_content: str | None
+    """The older wording a merge overwrote, so the caller can put it back."""
+    score: float
+    advisories: tuple[tuple[str, str, float], ...]
+    compacted: int
+    """Pre-existing exact duplicates folded away by this write."""
+
+
+def upsert_entry(
+    path: Path,
+    entry: MemoryEntry,
+    *,
+    dedup: bool = True,
+    expect_target_id: str | None = None,
+) -> UpsertResult:
+    """Write ``entry``, folding it into a near-identical existing entry if one exists.
+
+    The append-only fast path survives for the common case: when nothing merged
+    and nothing was compacted, the file on disk is already correct and is
+    extended in place rather than rewritten.
+
+    ``expect_target_id`` pins the merge to an entry the caller has already shown
+    someone. A caller that must classify before asking for approval and write
+    afterwards leaves a window in which another process — the web API, a second
+    CLI — can change the file. If the pinned target is gone or is no longer the
+    best match, the write degrades to a create rather than quietly merging into
+    an entry nobody approved.
+    """
     with _locked(path, exclusive=True):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(entry.model_dump_json())
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
+        if not dedup:
+            _append_line(path, entry)
+            return UpsertResult(
+                entry=entry,
+                merged=False,
+                replaced_content=None,
+                score=0.0,
+                advisories=(),
+                compacted=0,
+            )
+
+        kept, compacted = compact_entries(_read_raw(path))
+        verdict = classify_entry(entry.content, entry.kind, kept)
+        pinned = expect_target_id is None or verdict.target_id == expect_target_id
+
+        if verdict.action == "merge" and verdict.target_id is not None and pinned:
+            for index, existing in enumerate(kept):
+                if existing.id != verdict.target_id:
+                    continue
+                merged = merge_entry(existing, entry.content, now=time.time())
+                kept[index] = merged
+                _write_atomic(path, kept)
+                return UpsertResult(
+                    entry=merged,
+                    merged=True,
+                    replaced_content=existing.content,
+                    score=verdict.score,
+                    advisories=verdict.advisories,
+                    compacted=compacted,
+                )
+
+        kept.append(entry)
+        if compacted:
+            _write_atomic(path, kept)
+        else:
+            _append_line(path, entry)
+        return UpsertResult(
+            entry=entry,
+            merged=False,
+            replaced_content=None,
+            score=0.0,
+            advisories=verdict.advisories,
+            compacted=compacted,
+        )
 
 
 def update_entry(path: Path, entry_id: str, content: str) -> MemoryEntry | None:

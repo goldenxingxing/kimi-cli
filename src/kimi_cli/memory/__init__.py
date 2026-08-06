@@ -1,3 +1,4 @@
+from kimi_cli.memory.dedup import DuplicateVerdict, classify_entry
 from kimi_cli.memory.entry import MemoryEntry, MemoryKind, MemoryScope
 from kimi_cli.memory.knowledge import load_knowledge_base
 from kimi_cli.memory.paths import (
@@ -14,17 +15,25 @@ from kimi_cli.memory.recent import (
     read_recent_summaries,
     trim_old_summaries,
 )
-from kimi_cli.memory.storage import append_entry, delete_entry, read_entries, update_entry
+from kimi_cli.memory.storage import (
+    UpsertResult,
+    delete_entry,
+    read_entries,
+    update_entry,
+    upsert_entry,
+)
 
 __all__ = [
     "ANONYMOUS_USER_SENTINEL",
+    "DuplicateVerdict",
     "MemoryEntry",
     "MemoryKind",
     "MemoryScope",
     "RECENT_FILENAME",
     "SessionSummary",
-    "append_entry",
+    "UpsertResult",
     "append_summary",
+    "classify_entry",
     "delete_entry",
     "get_knowledge_dir",
     "get_persistent_memory_file",
@@ -35,4 +44,5 @@ __all__ = [
     "resolve_owner_id",
     "trim_old_summaries",
     "update_entry",
+    "upsert_entry",
 ]

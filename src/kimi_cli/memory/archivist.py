@@ -78,7 +78,18 @@ async def _archive(
     soul: KimiSoul,
     summary_text: str,
     trigger: SummaryTrigger,
+    *,
+    degraded: bool = False,
 ) -> None:
+    """Write one summary.
+
+    ``degraded`` marks a raw conversation tail written because the summarizer
+    was unavailable. It travels as an argument rather than a field on the
+    record because it describes how the text was produced, not what it says —
+    and adding a field would change every ``recent.jsonl`` on disk. Without it
+    the store cannot tell a degraded ``session_end`` from a real one, and a
+    transcript dump would supersede a good summary of the same session.
+    """
     summary_text = summary_text.strip()
     if not summary_text:
         logger.debug("archivist: empty summary, skipping ({t})", t=trigger)
@@ -100,12 +111,24 @@ async def _archive(
         work_dir=work_dir_str,
     )
     try:
-        append_summary(recent_path, summary)
+        result = append_summary(
+            recent_path,
+            summary,
+            policy="skip_if_session_present" if degraded else "supersede",
+        )
+        if result.stored is None:
+            logger.debug(
+                "archivist: {t} summary for session {s} added nothing, dropped",
+                t=trigger,
+                s=summary.session_id[:8],
+            )
+            return
         logger.debug(
-            "archivist: wrote {t} summary for session {s} ({n} chars)",
+            "archivist: wrote {t} summary for session {s} ({n} chars){sup}",
             t=trigger,
             s=summary.session_id[:8],
             n=len(summary_text),
+            sup=f", superseded {result.superseded_id[:8]}" if result.superseded_id else "",
         )
     except Exception:
         logger.warning("archivist: failed to write summary", exc_info=True)
@@ -145,8 +168,10 @@ async def archive_on_session_end(soul: KimiSoul) -> None:
         except Exception:
             logger.warning("archivist: session-end LLM summary failed", exc_info=True)
 
+    degraded = False
     if not summary_text:
         summary_text = raw_tail_summary(history)
+        degraded = True
 
     if summary_text:
-        await _archive(soul, summary_text, "session_end")
+        await _archive(soul, summary_text, "session_end", degraded=degraded)

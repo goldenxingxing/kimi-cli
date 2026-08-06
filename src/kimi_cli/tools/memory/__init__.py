@@ -6,11 +6,14 @@ from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolRetu
 from pydantic import BaseModel, Field, field_validator
 
 from kimi_cli.memory import (
+    DuplicateVerdict,
     MemoryEntry,
-    append_entry,
+    UpsertResult,
+    classify_entry,
     delete_entry,
     read_entries,
     update_entry,
+    upsert_entry,
 )
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import load_desc
@@ -79,6 +82,63 @@ def _ok(output: str, brief: str) -> ToolReturnValue:
     )
 
 
+def _preview(content: str) -> str:
+    return content if len(content) <= 200 else content[:200] + "..."
+
+
+def _add_payload(result: UpsertResult, op: AddOp) -> dict[str, object]:
+    """The tool result.
+
+    ``id``/``scope``/``kind`` are unchanged so anything reading those keeps
+    working. ``result`` is what lets the model tell a create from a merge — the
+    id alone cannot, since on a merge it belongs to an entry the model may
+    never have seen. ``replaced`` is the recovery channel: if the merge was
+    wrong, the model can restore the old wording in the same turn.
+    """
+    payload: dict[str, object] = {
+        "id": result.entry.id,
+        "scope": "persistent",
+        "kind": op.kind,
+        "result": "merged" if result.merged else "created",
+    }
+    if result.merged:
+        payload["merged_into"] = result.entry.id
+        payload["similarity"] = round(result.score, 3)
+        if result.replaced_content is not None:
+            payload["replaced"] = _preview(result.replaced_content)
+    if result.advisories:
+        payload["possible_duplicates"] = [
+            {"id": entry_id, "similarity": round(score, 3), "content": _preview(content)}
+            for entry_id, content, score in result.advisories
+        ]
+    return payload
+
+
+def _describe_add(op: AddOp, verdict: DuplicateVerdict, existing: list[MemoryEntry]) -> str:
+    """The approval prompt.
+
+    A merge must show both texts: the older one is about to be destroyed, and
+    this prompt is the only place a human can stop it.
+    """
+    if verdict.action != "merge" or verdict.target_id is None:
+        return f"Add persistent memory ({op.kind}): {_preview(op.content)}"
+
+    target = next((e for e in existing if e.id == verdict.target_id), None)
+    head = (
+        f"Merge persistent memory ({op.kind}) into {verdict.target_id[:8]}"
+        f" — {verdict.score:.0%} match"
+    )
+    if target is None:
+        return f"{head}\n  new:      {_preview(op.content)}"
+    return f"{head}\n  existing: {_preview(target.content)}\n  new:      {_preview(op.content)}"
+
+
+def _add_brief(result: UpsertResult, op: AddOp) -> str:
+    if result.merged:
+        return f"Merged into {result.entry.id[:8]} (persistent/{op.kind})"
+    return f"Remembered (persistent/{op.kind})"
+
+
 def _format_entries(entries: list[MemoryEntry], header: str) -> str:
     if not entries:
         return f"{header}: (empty)"
@@ -120,6 +180,10 @@ class Memory(CallableTool2[Params]):
         Persistent memory survives across sessions and influences the agent's
         future behavior, so the user must opt in. Returns ``None`` when the
         action is approved (continue), or a rejection ``ToolError`` otherwise.
+
+        ``action`` becomes part of the approval key that "always allow"
+        remembers, so a merge must not share one with an add: allowing the
+        agent to *create* entries is not consent to *overwrite* existing ones.
         """
         result = await self._runtime.approval.request(
             self.name,
@@ -131,25 +195,36 @@ class Memory(CallableTool2[Params]):
         return None
 
     async def _add(self, op: AddOp) -> ToolReturnValue:
-        if op.scope == "persistent":
-            preview = op.content if len(op.content) <= 200 else op.content[:200] + "..."
-            rejection = await self._request_persistent_approval(
-                "add",
-                f"Add persistent memory ({op.kind}): {preview}",
-            )
-            if rejection is not None:
-                return rejection
-
-        entry = MemoryEntry(kind=op.kind, scope=op.scope, content=op.content)
         if op.scope == "session":
+            entry = MemoryEntry(kind=op.kind, scope=op.scope, content=op.content)
             self._runtime.session.state.session_memory.append(entry)
             self._runtime.session.save_state()
-        else:
-            append_entry(self._persistent_file, entry)
-        return _ok(
-            output=json.dumps({"id": entry.id, "scope": op.scope, "kind": op.kind}),
-            brief=f"Remembered ({op.scope}/{op.kind})",
+            return _ok(
+                output=json.dumps(
+                    {"id": entry.id, "scope": "session", "kind": op.kind, "result": "created"}
+                ),
+                brief=f"Remembered (session/{op.kind})",
+            )
+
+        # Classify before asking, so the prompt can describe what a merge would
+        # overwrite. The write below re-classifies under the lock and pins the
+        # target, so a file that changes in between degrades to a create rather
+        # than merging into an entry the user was never shown.
+        existing = read_entries(self._persistent_file)
+        verdict = classify_entry(op.content, op.kind, existing)
+        rejection = await self._request_persistent_approval(
+            "merge" if verdict.action == "merge" else "add",
+            _describe_add(op, verdict, existing),
         )
+        if rejection is not None:
+            return rejection
+
+        result = upsert_entry(
+            self._persistent_file,
+            MemoryEntry(kind=op.kind, scope="persistent", content=op.content),
+            expect_target_id=verdict.target_id if verdict.action == "merge" else None,
+        )
+        return _ok(output=json.dumps(_add_payload(result, op)), brief=_add_brief(result, op))
 
     def _list(self, op: ListOp) -> ToolReturnValue:
         sections: list[str] = []
@@ -179,10 +254,9 @@ class Memory(CallableTool2[Params]):
                     brief="Memory updated",
                 )
         # Persistent path requires approval.
-        preview = op.content if len(op.content) <= 200 else op.content[:200] + "..."
         rejection = await self._request_persistent_approval(
             "update",
-            f"Update persistent memory ({op.id[:8]}): {preview}",
+            f"Update persistent memory ({op.id[:8]}): {_preview(op.content)}",
         )
         if rejection is not None:
             return rejection

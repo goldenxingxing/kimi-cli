@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from kosong.message import Message
 from pydantic import BaseModel, Field, ValidationError
@@ -32,7 +32,6 @@ from kimi_cli.memory import (
     RECENT_FILENAME,
     MemoryEntry,
     SessionSummary,
-    append_entry,
     append_summary,
     delete_entry,
     get_knowledge_dir,
@@ -42,6 +41,7 @@ from kimi_cli.memory import (
     read_recent_summaries,
     resolve_owner_id,
     update_entry,
+    upsert_entry,
 )
 from kimi_cli.memory.archivist import (
     raw_tail_summary,
@@ -221,6 +221,27 @@ class PersistentEntry(BaseModel):
         )
 
 
+class PossibleDuplicate(BaseModel):
+    id: str
+    content: str
+    similarity: float
+
+
+class PersistentWriteResult(PersistentEntry):
+    """The stored entry, plus what the write did to get there.
+
+    A write may fold into an entry that already existed, so the caller cannot
+    assume the returned id is new. The extra fields are optional and the base
+    shape is unchanged, so an existing client that just reads the entry keeps
+    working.
+    """
+
+    merged: bool = False
+    replaced: str | None = None
+    similarity: float | None = None
+    possible_duplicates: list[PossibleDuplicate] = Field(default_factory=list[PossibleDuplicate])
+
+
 class PersistentAddRequest(BaseModel):
     kind: MemoryKind
     content: str = Field(min_length=1)
@@ -241,12 +262,34 @@ async def list_persistent(
 @router.post("/persistent", summary="Add a persistent memory entry", status_code=201)
 async def add_persistent(
     body: PersistentAddRequest,
+    response: Response,
     user: dict[str, Any] | None = Depends(get_current_user),  # noqa: B008
-) -> PersistentEntry:
+) -> PersistentWriteResult:
+    """Store a fact, folding it into a near-identical existing entry if one exists.
+
+    Deduplication is not gated on confirmation here as it is on the tool path.
+    The caller is the owner acting on their own data and sees the result
+    immediately, whereas on the tool path the model chose the wording and the
+    user may not be watching.
+    """
     path = get_persistent_memory_file(_caller_owner_id(user))
-    entry = MemoryEntry(kind=body.kind, scope="persistent", content=body.content)
-    append_entry(path, entry)
-    return PersistentEntry.from_entry(entry)
+    result = upsert_entry(
+        path, MemoryEntry(kind=body.kind, scope="persistent", content=body.content)
+    )
+    if result.merged:
+        # Nothing was created, so do not keep claiming 201.
+        response.status_code = status.HTTP_200_OK
+    # Report what is on disk, not what we asked for: on a merge they differ.
+    return PersistentWriteResult(
+        **PersistentEntry.from_entry(result.entry).model_dump(),
+        merged=result.merged,
+        replaced=result.replaced_content,
+        similarity=result.score if result.merged else None,
+        possible_duplicates=[
+            PossibleDuplicate(id=entry_id, content=content, similarity=score)
+            for entry_id, content, score in result.advisories
+        ],
+    )
 
 
 @router.put("/persistent/{entry_id}", summary="Update a persistent memory entry")
@@ -468,13 +511,18 @@ async def _run_archive_in_background(
             work_dir=work_dir,
         )
         recent_path = get_user_memory_dir(owner_id) / RECENT_FILENAME
-        append_summary(recent_path, summary)
+        append_result = append_summary(recent_path, summary)
+        # The store may have folded this into the session's existing record, or
+        # dropped it as an exact repeat. Report what is actually there, so the
+        # UI does not add a row that no longer exists on the next refetch.
+        stored = append_result.stored or summary
         _BUS.publish(
             owner_id,
             {
                 "type": "archive.completed",
                 "session_id": str(session_id),
-                "summary": RecentSummaryView.from_summary(summary).model_dump(mode="json"),
+                "deduplicated": append_result.stored is None,
+                "summary": RecentSummaryView.from_summary(stored).model_dump(mode="json"),
             },
         )
     except Exception as exc:

@@ -11,6 +11,10 @@ Only write entries that are worth mentioning to users.
 
 ## Unreleased
 
+- Memory: Deduplicate cross-session memory — recording a fact you already stored now updates the existing entry in place instead of adding a second copy, and duplicates already on file are folded away by the next write. A fact that differs in a number, an identifier, or a negation (a changed date, a different retry limit, a flipped rule) is never treated as a restatement, so corrections still produce a separate entry. The approval prompt for a merge shows both the existing and the new wording
+- Memory: Keep one summary per past session in the recent list — a session used to leave one summary per context compaction plus one at shutdown, so a single long conversation could fill most of the twenty kept slots and crowd out other sessions. Existing files collapse on the next write, so the recent list may get noticeably shorter once
+- Memory: Restore cross-session memory after a context compaction — the snapshot was injected once at startup and, once compaction folded it into the compaction summary, never came back for the rest of the session
+
 ## 1.49.0 (2026-07-16)
 
 **Highlights**: The completion-token budget for Kimi providers now adapts to the model's remaining context window, reducing context-length overflow errors on long turns

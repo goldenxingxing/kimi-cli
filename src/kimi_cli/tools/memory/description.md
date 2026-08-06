@@ -14,7 +14,15 @@ Memory is split into two scopes:
 
 Each entry has an `id` (returned on `add`), a `kind`, a `scope`, and a
 `content` body. Use `update` / `delete` with the `id` to revise or remove
-entries — never re-add the same fact twice.
+entries.
+
+Adding a persistent fact that restates one already stored does not create a
+second entry: it updates the existing one in place and `add` returns
+`result: "merged"` along with `merged_into` (the surviving id) and `replaced`
+(the wording it overwrote). A fact that differs in a **number, an identifier,
+or a negation** is never treated as a restatement, so correcting a date or
+flipping a rule always produces a separate entry — delete the stale one
+yourself if it should not survive.
 
 ## Kinds — what to save and when
 
@@ -75,7 +83,7 @@ worth keeping.
 
 Call `list` at the start of a turn if you need to recall what was previously
 saved, or to confirm a fact before relying on it. The system also injects
-recent persistent entries automatically — duplicate writes are a waste.
+recent persistent entries automatically.
 
 ## Operations
 

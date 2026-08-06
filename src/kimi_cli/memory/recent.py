@@ -5,12 +5,14 @@ import errno
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from kimi_cli.memory.dedup import SummaryPolicy, compact_summaries, place_summary
 from kimi_cli.memory.storage import _locked
 from kimi_cli.utils.logging import logger
 
@@ -83,6 +85,16 @@ def _write_atomic(path: Path, items: list[SessionSummary]) -> None:
         raise
 
 
+def _append_line(path: Path, summary: SessionSummary) -> None:
+    """Append one record. Caller must already hold the exclusive lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(summary.model_dump_json())
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def read_recent_summaries(path: Path, *, limit: int | None = None) -> list[SessionSummary]:
     """Return summaries (oldest first). Pass ``limit`` to take only the tail."""
     with _locked(path, exclusive=False):
@@ -92,27 +104,71 @@ def read_recent_summaries(path: Path, *, limit: int | None = None) -> list[Sessi
     return items
 
 
+@dataclass(frozen=True, slots=True)
+class SummaryAppendResult:
+    """What an append actually did."""
+
+    stored: SessionSummary | None
+    """``None`` when the incoming summary added nothing and was dropped."""
+    superseded_id: str | None
+    compacted: int
+    """Pre-existing redundant summaries folded away by this write."""
+
+
 def append_summary(
     path: Path,
     summary: SessionSummary,
     *,
     max_kept: int = DEFAULT_MAX_SUMMARIES,
-) -> None:
-    """Append ``summary`` and trim the oldest entries if over ``max_kept``."""
+    dedup: bool = True,
+    policy: SummaryPolicy = "supersede",
+) -> SummaryAppendResult:
+    """Append ``summary``, superseding this session's previous record, then trim.
+
+    A session writes one summary per compaction plus one at session end, and
+    compaction summaries are cumulative — each one re-summarizes a history that
+    begins with the previous summary. So a session's later record subsumes its
+    earlier ones, and keeping all of them spends the small tail window that the
+    cross-session injection reads on a single conversation.
+
+    ``policy="skip_if_session_present"`` is for a degraded summary (the raw
+    conversation tail, written when the summarizer was unavailable). Both paths
+    record ``trigger="session_end"``, so nothing in the record itself
+    distinguishes them and superseding blindly would let a transcript dump
+    overwrite a real summary of the same session.
+
+    The whole file is read either way — the trim check already required it — so
+    deduplicating here costs no additional I/O.
+    """
     with _locked(path, exclusive=True):
         items = _read_raw(path)
-        items.append(summary)
-        if len(items) > max_kept:
-            items = items[-max_kept:]
-            _write_atomic(path, items)
-            return
-        # Fast path: no trim needed, just append.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(summary.model_dump_json())
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
+        if not dedup:
+            _append_line(path, summary)
+            return SummaryAppendResult(stored=summary, superseded_id=None, compacted=0)
+
+        kept, compacted = compact_summaries(items)
+        placement = place_summary(kept, summary, policy=policy)
+        result_items = placement.items
+
+        if placement.stored is None and not compacted:
+            # Nothing to add and nothing to fix: leave the file untouched.
+            return SummaryAppendResult(stored=None, superseded_id=None, compacted=0)
+
+        rewrite = compacted > 0 or placement.superseded_id is not None
+        if len(result_items) > max_kept:
+            result_items = result_items[-max_kept:]
+            rewrite = True
+
+        if rewrite:
+            _write_atomic(path, result_items)
+        else:
+            _append_line(path, summary)
+
+        return SummaryAppendResult(
+            stored=placement.stored,
+            superseded_id=placement.superseded_id,
+            compacted=compacted,
+        )
 
 
 def trim_old_summaries(path: Path, *, max_kept: int = DEFAULT_MAX_SUMMARIES) -> int:
