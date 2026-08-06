@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from kosong.message import Message
 
@@ -42,6 +42,22 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         """Force a re-read on the next ``get_injections`` call."""
         self._injected = False
         self._cached = []
+
+    @override
+    async def on_context_compacted(self) -> None:
+        """Re-inject after compaction.
+
+        The snapshot is an ordinary history message, so compaction collapses it
+        into the compaction summary. Without this the one-shot guard keeps
+        returning the cached list against a history that no longer literally
+        contains it, and the agent spends the rest of a long session with no
+        cross-session memory at all — which is also why it re-records facts it
+        has already stored.
+
+        Costs nothing in prompt cache: compaction has already invalidated the
+        whole prefix by definition.
+        """
+        self.invalidate()
 
     async def get_injections(
         self,
