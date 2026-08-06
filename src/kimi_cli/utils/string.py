@@ -3,8 +3,24 @@ from __future__ import annotations
 import random
 import re
 import string
+import unicodedata
 
 _NEWLINE_RE = re.compile(r"[\r\n]+")
+
+
+def fold_text(raw: str) -> str:
+    """Fold Unicode width, whitespace, and case without dropping any content.
+
+    Exactly three axes, chosen so the folded string still stands for the same
+    statement: fullwidth and compatibility forms collapse to their canonical
+    equivalents, runs of whitespace become single spaces, and case is removed.
+    Punctuation, diacritics, and word order survive untouched.
+
+    Shared by the Wiki's intent hashing and by memory deduplication. It lives
+    here rather than in either caller because ``kimi_cli.memory`` is on the CLI
+    startup path and must not pull in the Wiki package to fold a string.
+    """
+    return " ".join(unicodedata.normalize("NFKC", raw).split()).casefold()
 
 
 def shorten(text: str, *, width: int, placeholder: str = "…") -> str:

@@ -10,10 +10,10 @@ runtime-created checkpoint and grant.
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
+from kimi_cli.utils.string import fold_text
 from kimi_cli.wiki.schema import content_hash
 
 DurableIntentFamily = Literal["remember", "preference", "fixed_rule"]
@@ -115,10 +115,11 @@ def normalize_intent_text(raw_text: str) -> str:
 
     Only these three axes are normalized: the normalized hash must still stand
     for the same statement the user made, so a later turn cannot pass off
-    different text as the same accepted intent.
+    different text as the same accepted intent. Any additional folding belongs
+    to the caller, not here — this is an authorization boundary, and a fold
+    added for someone else's convenience widens what counts as the same intent.
     """
-    folded = unicodedata.normalize("NFKC", raw_text)
-    return " ".join(folded.split()).casefold()
+    return fold_text(raw_text)
 
 
 def detect_durable_intent(raw_text: str) -> DurableIntent | None:
