@@ -144,6 +144,7 @@ def _git_exec_path(git_path: str) -> str | None:
             [git_path, "--exec-path"],
             capture_output=True,
             text=True,
+            errors="replace",
             check=False,
             timeout=_GIT_EXEC_PATH_TIMEOUT_SECONDS,
         )
@@ -197,11 +198,19 @@ async def _find_git_executables() -> list[str]:
 
 
 def _where_git_executables() -> list[str]:
+    # errors="replace": these decode child output with the locale encoding, and
+    # a Windows console tool answers in the ANSI codepage — `where.exe git`
+    # prints a localized "not found" line when git is absent. A strict decode
+    # raises inside subprocess's own reader thread, where this function cannot
+    # catch it: detection then returns nothing and the caller reports git-bash
+    # as missing, which aborts worker startup. A garbled path is recoverable;
+    # a dead detector is not.
     try:
         result = subprocess.run(
             ["where.exe", "git"],
             capture_output=True,
             text=True,
+            errors="replace",
             check=False,
         )
     except OSError:

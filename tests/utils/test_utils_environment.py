@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 import subprocess
+import sys
 
 import pytest
 from kaos.path import KaosPath
@@ -258,3 +259,38 @@ def test_is_windows_reflects_platform_system(monkeypatch):
     assert is_windows() is False
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
     assert is_windows() is False
+
+
+def test_git_detection_survives_output_it_cannot_decode(monkeypatch):
+    """Regression guard for the v0.1.29 Windows worker crash.
+
+    ``where.exe git`` answers in the host ANSI codepage — on a Chinese Windows,
+    a localized "not found" line whose first byte is 0xD0. Decoding that
+    strictly raises inside subprocess's own reader thread, which this function
+    cannot catch: detection came back empty, the caller reported git-bash as
+    missing, and the worker exited 1 before the user could type anything.
+    """
+    from kimi_cli.utils import environment
+
+    captured: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        gbk = "信息: 用提供的模式无法找到文件。".encode("gbk")
+        # where.exe exits non-zero when it finds nothing, and prints the notice
+        # on stdout in the ANSI codepage.
+        return real_run(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.stdout.buffer.write({gbk!r}); sys.exit(1)",
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # Must not raise, whatever the locale encoding happens to be.
+    assert environment._where_git_executables() == []
+    assert captured["errors"] == "replace"

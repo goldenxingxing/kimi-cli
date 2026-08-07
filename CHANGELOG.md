@@ -11,6 +11,7 @@ Only write entries that are worth mentioning to users.
 
 ## Unreleased
 
+- Windows: Stop a localized `where.exe` reply from breaking git-bash detection — the lookup decoded console output with the locale encoding and no error handling, so on a system whose codepage is not UTF-8 a strict decode raised inside subprocess's own reader thread, where the lookup could not catch it. Detection then reported git-bash as missing and aborted worker startup
 - Memory: Deduplicate cross-session memory — recording a fact you already stored now updates the existing entry in place instead of adding a second copy, and duplicates already on file are folded away by the next write. A fact that differs in a number, an identifier, or a negation (a changed date, a different retry limit, a flipped rule) is never treated as a restatement, so corrections still produce a separate entry. The approval prompt for a merge shows both the existing and the new wording
 - Memory: Keep one summary per past session in the recent list — a session used to leave one summary per context compaction plus one at shutdown, so a single long conversation could fill most of the twenty kept slots and crowd out other sessions. Existing files collapse on the next write, so the recent list may get noticeably shorter once
 - Memory: Restore cross-session memory after a context compaction — the snapshot was injected once at startup and, once compaction folded it into the compaction summary, never came back for the rest of the session
