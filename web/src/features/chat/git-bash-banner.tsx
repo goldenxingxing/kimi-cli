@@ -7,9 +7,12 @@ import {
 } from "@/lib/api/apis/SystemApi";
 
 /**
- * Banner shown on Windows when Git for Windows (and its bundled bash.exe)
- * cannot be located. Without it, kimi-cli's Shell tool cannot execute
- * commands. Renders nothing on other platforms or once git-bash is detected.
+ * Banner shown on Windows when no shell can be found at all.
+ *
+ * Keyed off `shell_available`, not `git_bash`: a machine running on the
+ * portable shell bundled with the app can execute commands perfectly well and
+ * has nothing to install, so nagging it about Git for Windows would be wrong.
+ * Renders nothing on other platforms, or once a shell is detected.
  */
 export function GitBashBanner() {
   const { t } = useTranslation("chat");
@@ -39,7 +42,7 @@ export function GitBashBanner() {
 
   if (!capabilities) return null;
   if (capabilities.platform !== "win32") return null;
-  if (capabilities.git_bash) return null;
+  if (capabilities.shell_available ?? capabilities.git_bash) return null;
 
   const installUrl = capabilities.git_bash_install_url;
 

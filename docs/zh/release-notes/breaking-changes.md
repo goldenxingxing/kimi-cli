@@ -34,7 +34,7 @@ Windows 上的 Shell 工具现在通过 `bash.exe`（POSIX 语义）执行命令
   2. 如果 `bash.exe` 在非标准位置，启动 kimi-cli 前把 `KIMI_CLI_GIT_BASH_PATH` 环境变量设为它的绝对路径
   3. 把任何硬编码 PowerShell 语法的自定义提示词、agent 规格或代码片段改为 Unix shell 语法（Shell 命令内用正斜杠路径，`/dev/null` 代替 `NUL`，控制流用 `&&` 和 `||`，文本工具用 `grep`/`sed`/`awk` 而非 PowerShell cmdlet）
   4. 注意：从 bash 中调用 `python.exe`、`node.exe` 等原生 Windows 程序时仍需要传入原生 Windows 路径（例如 `python C:\path\to\script.py`）；只有 POSIX-aware 工具（cat、ls、grep 等）才能识别 `/c/path/...` 形式
-  5. 如果 kimi-cli 找不到 `bash.exe`，现在会在启动时打印安装提示并退出，而不是回退到 PowerShell
+  5. 如果 kimi-cli 找不到 `bash.exe`，不会回退到 PowerShell。自 1.50.0 起也不再在启动时退出：会话照常可用，只有 Shell 工具在被调用时报告缺少 shell 并给出安装提示。也可以把 `KIMI_CLI_SHELL_PATH` 指向任意 POSIX shell，或在 `%USERPROFILE%\.kimi\bin\sh.exe` 放一个便携 shell，无需安装 Git for Windows 即可执行命令
 
 ## 1.40.0
 

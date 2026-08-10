@@ -34,7 +34,7 @@ The Shell tool on Windows now runs commands through `bash.exe` (POSIX semantics)
   2. If `bash.exe` lives in a non-standard location, set the `KIMI_CLI_GIT_BASH_PATH` environment variable to its absolute path before launching kimi-cli
   3. Update any custom prompts, agent specs, or snippets that hard-code PowerShell syntax to use Unix shell syntax instead (forward slashes inside Shell commands, `/dev/null` instead of `NUL`, `&&` and `||` for control flow, `grep`/`sed`/`awk` instead of PowerShell cmdlets)
   4. Note that `python.exe`, `node.exe`, and other native Windows binaries called from inside bash still need native Windows paths (e.g. `python C:\path\to\script.py`); only POSIX-aware tools (cat, ls, grep, etc.) understand the `/c/path/...` form
-  5. If kimi-cli cannot find `bash.exe`, it now exits with an install hint at startup instead of falling back to PowerShell
+  5. If kimi-cli cannot find `bash.exe`, it does not fall back to PowerShell. Since 1.50.0 it no longer exits at startup either: the session runs normally and only the Shell tool reports the missing shell, with the install hint. Set `KIMI_CLI_SHELL_PATH` to any POSIX shell, or place a portable one at `%USERPROFILE%\.kimi\bin\sh.exe`, to get commands working without Git for Windows
 
 ## 1.40.0
 

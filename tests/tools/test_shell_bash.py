@@ -399,3 +399,38 @@ async def test_cancelled_command_kills_process(shell_tool: Shell, monkeypatch: p
         await task
 
     assert fake_process.kill_calls == 1
+
+
+async def test_shell_without_a_shell_reports_how_to_fix_it(
+    approval, runtime, monkeypatch: pytest.MonkeyPatch
+):
+    """A host with no bash must fail this one call, not the whole session.
+
+    Detection no longer aborts startup, so the Shell tool is the place where a
+    missing shell has to be explained — and it must not reach kaos.exec with a
+    stringified ``None``.
+    """
+    from kimi_cli.utils.environment import Environment
+    from tests.conftest import tool_call_context
+
+    env_spec = Environment(
+        os_kind="Windows",
+        os_arch="x86_64",
+        os_version="1.0",
+        shell_name=None,
+        shell_path=None,
+        shell_error="No bash here. Install Git for Windows.",
+    )
+    shell = Shell(approval, env_spec, runtime)
+    captured = _capture_exec_kwargs(monkeypatch)
+
+    with tool_call_context("Shell"):
+        result = await shell(Params(command="echo hi"))
+        background = await shell(
+            Params(command="sleep 1", run_in_background=True, description="sleep")
+        )
+
+    assert result.is_error
+    assert "Install Git for Windows" in str(result)
+    assert background.is_error
+    assert captured == []

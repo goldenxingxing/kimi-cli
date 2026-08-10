@@ -65,13 +65,26 @@ class Shell(CallableTool2[Params]):
         super().__init__(
             description=load_desc(
                 Path(__file__).parent / "bash.md",
-                {"SHELL": f"{environment.shell_name} (`{environment.shell_path}`)"},
+                {"SHELL": environment.shell_description},
             )
         )
         self._approval = approval
         self._shell_path = environment.shell_path
+        self._shell_error = environment.shell_error
         self._on_windows = environment.os_kind == "Windows"
         self._runtime = runtime
+
+    def _unavailable(self) -> ToolReturnValue:
+        """Refuse the call when the host has no shell to run it with.
+
+        Reported per call rather than at startup: the rest of the session is
+        perfectly usable without a shell, and the message has to reach the user
+        at the moment it actually matters.
+        """
+        return ToolResultBuilder().error(
+            self._shell_error or "No shell is available on this machine.",
+            brief="No shell available",
+        )
 
     def _preprocess_command(self, command: str) -> str:
         """Apply platform-specific defensive rewrites before execution."""
@@ -83,6 +96,9 @@ class Shell(CallableTool2[Params]):
 
         if not params.command:
             return builder.error("Command cannot be empty.", brief="Empty command")
+
+        if self._shell_path is None:
+            return self._unavailable()
 
         if params.run_in_background:
             return await self._run_in_background(params)
@@ -142,6 +158,9 @@ class Shell(CallableTool2[Params]):
             )
 
     async def _run_in_background(self, params: Params) -> ToolReturnValue:
+        if self._shell_path is None:
+            return self._unavailable()
+
         tool_call = get_current_tool_call_or_none()
         if tool_call is None:
             return ToolResultBuilder().error(

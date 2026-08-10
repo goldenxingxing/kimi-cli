@@ -7,9 +7,21 @@ import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from kaos.path import KaosPath
+
+from kimi_cli.utils.logging import logger
+
+#: Env var pointing at any POSIX shell, honoured on every platform. The escape
+#: hatch of last resort: it skips discovery entirely.
+SHELL_PATH_ENV = "KIMI_CLI_SHELL_PATH"
+
+#: Filename of the optional portable shell shipped with (or dropped next to)
+#: kimi-cli on Windows. It is invoked as ``<path> -c <command>``, so a busybox
+#: build has to be *copied to this name* — busybox dispatches on argv[0].
+_BUNDLED_SHELL_NAME = "sh.exe"
 
 
 class GitBashNotFoundError(RuntimeError):
@@ -17,14 +29,21 @@ class GitBashNotFoundError(RuntimeError):
 
     git-bash (from Git for Windows) is required because kimi-cli's Shell tool
     runs commands through bash, not PowerShell.
+
+    Note that this is *not* fatal: :meth:`Environment.detect` catches it, falls
+    back to the bundled portable shell, and otherwise starts without a shell at
+    all. Only the Shell tool is lost — everything else keeps working.
     """
 
 
 _GIT_BASH_INSTALL_HINT = (
-    "kimi-cli on Windows requires Git for Windows (https://git-scm.com/downloads/win) "
-    "for its bundled bash. If git-bash is installed but not on PATH, set the "
-    "KIMI_CLI_GIT_BASH_PATH environment variable to your bash.exe, e.g.:\n"
-    "    KIMI_CLI_GIT_BASH_PATH=C:\\Program Files\\Git\\bin\\bash.exe"
+    "kimi-cli on Windows runs shell commands through bash, not PowerShell, and no "
+    "bash was found. Any one of these fixes it:\n"
+    "  * Install Git for Windows (https://git-scm.com/downloads/win) for its bundled bash.\n"
+    "  * Point KIMI_CLI_GIT_BASH_PATH at an existing bash.exe, e.g.\n"
+    "    KIMI_CLI_GIT_BASH_PATH=C:\\Program Files\\Git\\bin\\bash.exe\n"
+    "  * Point KIMI_CLI_SHELL_PATH at any POSIX shell to use it as-is.\n"
+    f"  * Drop a portable shell at %USERPROFILE%\\.kimi\\bin\\{_BUNDLED_SHELL_NAME}."
 )
 _GIT_EXEC_PATH_TIMEOUT_SECONDS = 5
 
@@ -34,11 +53,33 @@ class Environment:
     os_kind: Literal["Windows", "Linux", "macOS"] | str
     os_arch: str
     os_version: str
-    shell_name: Literal["bash", "sh"]
-    shell_path: KaosPath
+    #: None when no shell could be found. Only Windows can reach that state.
+    shell_name: Literal["bash", "sh"] | None
+    shell_path: KaosPath | None
+    #: Why no shell was found, phrased for the user. Set iff shell_path is None.
+    shell_error: str | None = None
+
+    @property
+    def has_shell(self) -> bool:
+        return self.shell_path is not None
+
+    @property
+    def shell_description(self) -> str:
+        """One-line shell summary for prompts and tool descriptions."""
+        if self.shell_path is None:
+            return "unavailable (no shell found on this machine)"
+        return f"{self.shell_name} (`{self.shell_path}`)"
 
     @staticmethod
     async def detect() -> Environment:
+        """Describe the host. Never raises — a missing shell is a value, not an error.
+
+        Failing to find bash used to abort startup, which turned "the Shell tool
+        will not work" into "the product does not open". Everything that does not
+        shell out — chat, file edits, the web UI, most skills — has no reason to
+        care, so the missing shell is carried as data and reported by the one
+        tool that needs it.
+        """
         match platform.system():
             case "Darwin":
                 os_kind = "macOS"
@@ -52,9 +93,29 @@ class Environment:
         os_arch = platform.machine()
         os_version = platform.version()
 
-        if os_kind == "Windows":
-            shell_path = await find_git_bash_path()
-            shell_name: Literal["bash", "sh"] = "bash"
+        shell_name: Literal["bash", "sh"] | None
+        shell_path: KaosPath | None
+        shell_error: str | None = None
+
+        override = await _shell_override_path()
+        if override is not None:
+            shell_path = override
+            shell_name = _shell_name_for(override)
+        elif os_kind == "Windows":
+            try:
+                shell_path = await find_git_bash_path()
+                shell_name = "bash"
+            except GitBashNotFoundError as exc:
+                # A real bash is preferred, but a portable one is far better
+                # than no shell at all.
+                bundled = await find_bundled_shell()
+                if bundled is not None:
+                    shell_path = bundled
+                    shell_name = _shell_name_for(bundled)
+                else:
+                    shell_path = None
+                    shell_name = None
+                    shell_error = str(exc)
         else:
             possible_paths = [
                 KaosPath("/bin/bash"),
@@ -77,7 +138,58 @@ class Environment:
             os_version=os_version,
             shell_name=shell_name,
             shell_path=shell_path,
+            shell_error=shell_error,
         )
+
+
+def _shell_name_for(path: KaosPath) -> Literal["bash", "sh"]:
+    """Classify a shell by filename. Anything not named bash is treated as sh.
+
+    The name reaches the model through the system prompt, and calling busybox
+    ash "bash" would invite bashisms it cannot run.
+    """
+    stem = os.path.splitext(os.path.basename(str(path)))[0].casefold()
+    return "bash" if stem == "bash" else "sh"
+
+
+async def _shell_override_path() -> KaosPath | None:
+    """Resolve ``KIMI_CLI_SHELL_PATH``, ignoring it (with a warning) if unusable."""
+    configured = os.environ.get(SHELL_PATH_ENV)
+    if not configured:
+        return None
+    candidate = KaosPath(configured)
+    if await candidate.is_file():
+        return candidate
+    logger.warning(
+        "{env} points to {path} but no file exists there; falling back to discovery.",
+        env=SHELL_PATH_ENV,
+        path=configured,
+    )
+    return None
+
+
+async def find_bundled_shell() -> KaosPath | None:
+    """Locate the portable shell shipped with kimi-cli, if one is present.
+
+    Resolution mirrors the bundled ripgrep (``share dir`` first, then the
+    package's own ``deps/bin``) so an install can be topped up without being
+    rebuilt. Windows-only by design: every POSIX host already has ``/bin/sh``.
+    """
+    if not is_windows():
+        return None
+
+    import kimi_cli
+    from kimi_cli.share import get_share_dir
+
+    package_dir = Path(kimi_cli.__file__).parent
+    candidates = [
+        KaosPath(str(get_share_dir() / "bin" / _BUNDLED_SHELL_NAME)),
+        KaosPath(str(package_dir / "deps" / "bin" / _BUNDLED_SHELL_NAME)),
+    ]
+    for candidate in candidates:
+        if await candidate.is_file():
+            return candidate
+    return None
 
 
 def is_windows() -> bool:

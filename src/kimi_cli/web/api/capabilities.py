@@ -14,7 +14,11 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from kimi_cli.utils.environment import GitBashNotFoundError, find_git_bash_path
+from kimi_cli.utils.environment import (
+    GitBashNotFoundError,
+    find_bundled_shell,
+    find_git_bash_path,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -42,8 +46,14 @@ class SystemCapabilities(BaseModel):
     """Response model for ``GET /api/system/capabilities``."""
 
     platform: Literal["win32", "darwin", "linux"] | str
+    #: True when git-bash itself resolved. Kept narrow on purpose — it answers
+    #: "is Git for Windows installed", not "can we run shell commands".
     git_bash: bool
     git_bash_install_url: str = GIT_BASH_INSTALL_URL
+    #: True when *some* shell is usable, including the bundled portable one.
+    #: This is what the missing-shell banner should key off: a machine running
+    #: on the portable shell needs no nagging.
+    shell_available: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +121,12 @@ capabilities_router = APIRouter(prefix="/api/system", tags=["system"])
 async def get_system_capabilities() -> SystemCapabilities:
     """Report platform-level capabilities for UI banners/feature toggles."""
     git_bash = await _get_git_bash_cached()
+    shell_available = git_bash or await find_bundled_shell() is not None
     return SystemCapabilities(
         platform=_normalized_platform(),
         git_bash=git_bash,
         git_bash_install_url=GIT_BASH_INSTALL_URL,
+        shell_available=shell_available,
     )
 
 

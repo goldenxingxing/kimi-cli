@@ -80,5 +80,61 @@ download-ripgrep:
 	fi
 
 
+# Portable shell shipped for Windows machines without Git for Windows.
+#
+# Installed as `sh.exe` on purpose: kimi-cli invokes the shell as
+# `<path> -c <command>`, and busybox dispatches on argv[0] — a copy still named
+# busybox.exe would look for an applet called "-c".
+#
+# Unlike ripgrep this is fetched for the *target*, not the build host: the
+# Windows installer can be staged from macOS or Linux, and the binary has to be
+# in the source tree either way. Default target matches the installer's
+# x86_64 build (packaging/build_windows.py); pass BUSYBOX_ARCH=arm64 for
+# Windows-on-ARM.
+#
+# Both defaults are the Unicode builds: without them busybox mangles non-ASCII
+# paths and output, which is not optional for CJK users. They need Windows 10
+# 1903 or newer — older hosts still have git-bash and KIMI_CLI_SHELL_PATH.
+#
+# Checksums are upstream's, from https://frippery.org/files/busybox/SHA256SUM
+# (PGP-signed as SHA256SUM.sig). Verify the signature before bumping the pin.
+BUSYBOX_VERSION ?= FRP-6075-g169694ebd
+BUSYBOX_ARCH ?= x86_64
+ifeq ($(BUSYBOX_ARCH),x86_64)
+  BUSYBOX_FILE := busybox-w64u-$(BUSYBOX_VERSION).exe
+  BUSYBOX_SHA256 := 6e263d154d8548d1eb936f65d1d8312c80df31c45974e48d6335e4dcc0f4f34c
+else ifeq ($(BUSYBOX_ARCH),arm64)
+  BUSYBOX_FILE := busybox-w64a-$(BUSYBOX_VERSION).exe
+  BUSYBOX_SHA256 := e67f873d19d58c535cc9f0c4965ffd622e19b7bab87e3da89cb2185fb54464d7
+else
+  $(error Unsupported BUSYBOX_ARCH: $(BUSYBOX_ARCH) (expected x86_64 or arm64))
+endif
+BUSYBOX_URL ?= https://frippery.org/files/busybox/$(BUSYBOX_FILE)
+
+.PHONY: download-busybox
+download-busybox:
+	@echo "==> Ensuring portable shell (busybox) is installed"
+	@if [ -f "$(BIN_DIR)/sh.exe" ]; then \
+		echo "sh.exe already installed at $(BIN_DIR)/sh.exe"; \
+	else \
+		echo "Downloading busybox $(BUSYBOX_VERSION) ($(BUSYBOX_ARCH)) from: $(BUSYBOX_URL)"; \
+		mkdir -p "$(BIN_DIR)" "$(TMP_DIR)"; \
+		DOWNLOAD_PATH="$(TMP_DIR)/$(BUSYBOX_FILE)"; \
+		if command -v curl >/dev/null 2>&1; then \
+			curl -L --fail -o "$$DOWNLOAD_PATH" "$(BUSYBOX_URL)"; \
+		else \
+			if command -v wget >/dev/null 2>&1; then \
+				wget -O "$$DOWNLOAD_PATH" "$(BUSYBOX_URL)"; \
+			else \
+				echo "Error: neither curl nor wget is available" && exit 1; \
+			fi; \
+		fi; \
+		DOWNLOAD_PATH="$$DOWNLOAD_PATH" EXPECTED="$(BUSYBOX_SHA256)" python3 -c "import hashlib, os, sys; d=hashlib.sha256(open(os.environ['DOWNLOAD_PATH'],'rb').read()).hexdigest(); sys.exit(0) if d==os.environ['EXPECTED'] else sys.exit('sha256 mismatch: got %s' % d)"; \
+		cp "$$DOWNLOAD_PATH" "$(BIN_DIR)/sh.exe"; \
+		chmod +x "$(BIN_DIR)/sh.exe"; \
+		echo "sh.exe installed at $(BIN_DIR)/sh.exe"; \
+	fi
+
+
 .PHONY: download-deps
-download-deps: download-ripgrep
+download-deps: download-ripgrep download-busybox

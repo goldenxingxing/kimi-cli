@@ -82,11 +82,18 @@ async def test_environment_detection_windows_invalid_override_raises(monkeypatch
 
     monkeypatch.setattr(KaosPath, "is_file", _mock_is_file)
 
+    # The low-level resolver still raises — the web capabilities probe reads it.
     with pytest.raises(GitBashNotFoundError) as excinfo:
-        await Environment.detect()
+        await find_git_bash_path()
 
     assert "KIMI_CLI_GIT_BASH_PATH" in str(excinfo.value)
     assert "D:\\nonexistent\\bash.exe" in str(excinfo.value)
+
+    # Detection itself degrades instead of aborting the session.
+    env = await Environment.detect()
+    assert env.has_shell is False
+    assert env.shell_path is None
+    assert "D:\\nonexistent\\bash.exe" in (env.shell_error or "")
 
 
 @pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
@@ -230,12 +237,19 @@ async def test_environment_detection_windows_no_git_bash_anywhere(monkeypatch):
 
     monkeypatch.setattr(KaosPath, "is_file", _mock_is_file)
 
-    with pytest.raises(GitBashNotFoundError) as excinfo:
-        await Environment.detect()
+    env = await Environment.detect()
 
-    msg = str(excinfo.value)
+    # No shell, but still a usable Environment: the session starts, only the
+    # Shell tool is lost.
+    assert env.os_kind == "Windows"
+    assert env.has_shell is False
+    assert env.shell_path is None
+    assert env.shell_name is None
+    assert "unavailable" in env.shell_description
+    msg = env.shell_error or ""
     assert "Git for Windows" in msg
     assert "KIMI_CLI_GIT_BASH_PATH" in msg
+    assert "KIMI_CLI_SHELL_PATH" in msg
 
 
 @pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
@@ -294,3 +308,97 @@ def test_git_detection_survives_output_it_cannot_decode(monkeypatch):
     # Must not raise, whatever the locale encoding happens to be.
     assert environment._where_git_executables() == []
     assert captured["errors"] == "replace"
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
+async def test_windows_falls_back_to_bundled_portable_shell(monkeypatch):
+    """No git-bash, but a portable sh.exe is shipped: use it rather than nothing."""
+    from kimi_cli.utils import environment
+
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(platform, "version", lambda: "10.0.19044")
+    monkeypatch.delenv("KIMI_CLI_GIT_BASH_PATH", raising=False)
+    monkeypatch.delenv("KIMI_CLI_SHELL_PATH", raising=False)
+
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda exe: None)
+
+    bundled = KaosPath(r"C:\App\runtime\kimi_cli\deps\bin\sh.exe")
+
+    async def _mock_is_file(self: KaosPath) -> bool:
+        return False
+
+    monkeypatch.setattr(KaosPath, "is_file", _mock_is_file)
+
+    async def _fake_bundled() -> KaosPath | None:
+        return bundled
+
+    monkeypatch.setattr(environment, "find_bundled_shell", _fake_bundled)
+
+    env = await Environment.detect()
+
+    assert env.has_shell is True
+    assert env.shell_path == bundled
+    # busybox ash is not bash, and the prompt must not claim otherwise.
+    assert env.shell_name == "sh"
+    assert env.shell_error is None
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
+async def test_bundled_shell_lookup_prefers_the_share_dir(monkeypatch, tmp_path):
+    """Same order as the bundled ripgrep: share dir, then the package's deps/bin."""
+    from kimi_cli.utils import environment
+
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    share_bin = tmp_path / "share" / "bin"
+    share_bin.mkdir(parents=True)
+    shipped = share_bin / "sh.exe"
+    shipped.write_text("", encoding="utf-8")
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path / "share"))
+
+    found = await environment.find_bundled_shell()
+
+    assert found is not None
+    assert str(found) == str(shipped)
+
+
+async def test_bundled_shell_is_not_consulted_off_windows(monkeypatch):
+    from kimi_cli.utils import environment
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+    assert await environment.find_bundled_shell() is None
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
+async def test_shell_path_override_wins_on_any_platform(monkeypatch, tmp_path):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(platform, "version", lambda: "6.1.0")
+    custom = tmp_path / "dash"
+    custom.write_text("", encoding="utf-8")
+    monkeypatch.setenv("KIMI_CLI_SHELL_PATH", str(custom))
+
+    env = await Environment.detect()
+
+    assert str(env.shell_path) == str(custom)
+    assert env.shell_name == "sh"
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="Skipping test on Windows")
+async def test_unusable_shell_override_is_ignored_not_fatal(monkeypatch):
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(platform, "version", lambda: "6.1.0")
+    monkeypatch.setenv("KIMI_CLI_SHELL_PATH", "/nowhere/nope")
+
+    async def _mock_is_file(self: KaosPath) -> bool:
+        return str(self) == "/bin/bash"
+
+    monkeypatch.setattr(KaosPath, "is_file", _mock_is_file)
+
+    env = await Environment.detect()
+
+    assert str(env.shell_path) == "/bin/bash"
