@@ -19,27 +19,15 @@ from fastapi.responses import StreamingResponse
 
 from kimi_cli.metadata import load_metadata
 from kimi_cli.share import get_share_dir
+from kimi_cli.wire.events import collect_events
 from kimi_cli.wire.file import WireFileMetadata, parse_wire_file_line
 
 router = APIRouter(prefix="/api/vis", tags=["vis"])
 logger = logging.getLogger(__name__)
 
-
-def collect_events(
-    msg_type: str,
-    payload: dict[str, Any],
-    out: list[tuple[str, dict[str, Any]]],
-) -> None:
-    """Recursively unwrap SubagentEvent and collect (type, payload) pairs."""
-    if msg_type == "SubagentEvent":
-        inner: dict[str, Any] | None = payload.get("event")
-        if isinstance(inner, dict):
-            inner_type: str = inner.get("type", "")
-            inner_payload: dict[str, Any] = inner.get("payload", {})
-            if inner_type:
-                collect_events(inner_type, inner_payload, out)
-    else:
-        out.append((msg_type, payload))
+# Re-exported for backwards compatibility: `vis.api.statistics` and existing
+# callers import `collect_events` from this module.
+__all__ = ["collect_events", "router"]
 
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")

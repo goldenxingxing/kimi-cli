@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,22 @@ class ManagedSkill:
     deleted: bool
     modified: bool
     files: tuple[str, ...]
+    #: Category declared in SKILL.md frontmatter, verbatim. ``None`` means the
+    #: skill declared none and the UI is free to classify it however it likes.
+    category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BulkSkillResult:
+    """Outcome of :meth:`SkillManager.bulk_action`.
+
+    ``missing`` holds the names that resolved to no installed skill. A bulk
+    sweep reports them instead of failing: the caller is acting on a whole
+    group, and one stale name must not abandon the rest.
+    """
+
+    applied: tuple[str, ...]
+    missing: tuple[str, ...]
 
 
 class SkillManager:
@@ -214,12 +231,28 @@ class SkillManager:
         return result
 
     @staticmethod
-    def _describe(path: Path) -> tuple[str, str]:
+    def _declared_category(frontmatter: dict[str, object]) -> str | None:
+        """Read ``category`` from the frontmatter, top level or under ``metadata``.
+
+        Both spellings are in the wild — the bundled skills that declare one all
+        nest it under ``metadata`` — and neither is worth privileging.
+        """
+        value = frontmatter.get("category")
+        if value is None:
+            metadata = frontmatter.get("metadata")
+            if isinstance(metadata, dict):
+                value = cast(dict[str, object], metadata).get("category")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    @staticmethod
+    def _describe(path: Path) -> tuple[str, str, str | None]:
         content = (path / "SKILL.md").read_text(encoding="utf-8", errors="replace")
         frontmatter = parse_frontmatter(content) or {}
         name = str(frontmatter.get("name") or path.name)
         description = str(frontmatter.get("description") or "No description provided.")
-        return name, description
+        return name, description, SkillManager._declared_category(frontmatter)
 
     @staticmethod
     def _files(path: Path) -> tuple[str, ...]:
@@ -243,7 +276,7 @@ class SkillManager:
             override = writable.get(key)
             selected = override or builtin
             assert selected is not None
-            name, description = self._describe(selected)
+            name, description, category = self._describe(selected)
             is_deleted = key in deleted and override is None
             result.append(
                 ManagedSkill(
@@ -254,9 +287,37 @@ class SkillManager:
                     deleted=is_deleted,
                     modified=builtin is not None and override is not None,
                     files=self._files(selected),
+                    category=category,
                 )
             )
         return result
+
+    def name_index(self) -> dict[str, str]:
+        """Map normalized *directory* name to the *displayed* skill name.
+
+        These differ whenever a SKILL.md declares a ``name`` in its frontmatter:
+        ``_directories`` keys by directory while ``_describe`` reports the
+        frontmatter name. Anything that joins a filesystem path against
+        :meth:`list_skills` output — such as usage analytics reconstructed from
+        session logs — has to go through this alias table or the two will
+        silently fail to line up.
+
+        The writable layer wins over the builtin layer, matching
+        :meth:`list_skills`.
+        """
+        builtins = self._directories(self.builtin_dir)
+        writable = self._directories(self.writable_dir)
+        index: dict[str, str] = {}
+        for key in builtins.keys() | writable.keys():
+            selected = writable.get(key) or builtins.get(key)
+            if selected is None:  # pragma: no cover - defensive
+                continue
+            try:
+                name, _, _ = self._describe(selected)
+            except OSError:
+                name = selected.name
+            index[key] = name
+        return index
 
     def get(self, name: str) -> ManagedSkill:
         key = normalize_managed_skill_name(name)
@@ -316,6 +377,66 @@ class SkillManager:
                 state["deleted"] = sorted(set(state["deleted"]) | {key})
             state["disabled"] = sorted(set(state["disabled"]) - {key})
             self._save_state(state)
+
+    def bulk_action(
+        self,
+        names: Iterable[str],
+        action: Literal["enable", "disable", "delete"],
+    ) -> BulkSkillResult:
+        """Apply one action to many skills under a single state write.
+
+        The per-skill routes would work in a loop, but each one is its own
+        read-modify-write of ``skill-state.json``; sweeping a category of forty
+        skills that way leaves every intermediate state observable — and a
+        failure halfway through leaves half of it applied. Here the whole batch
+        lands in one revision.
+        """
+        installed = {
+            normalize_managed_skill_name(skill.name): skill for skill in self.list_skills()
+        }
+        keys: list[str] = []
+        missing: list[str] = []
+        for name in names:
+            try:
+                key = normalize_managed_skill_name(name)
+            except ValueError:
+                missing.append(name)
+                continue
+            if key not in installed:
+                missing.append(name)
+            elif key not in keys:
+                keys.append(key)
+
+        if action == "delete":
+            # Drop the writable overrides first: the state write below is what
+            # makes the deletion visible, so doing it last keeps a crash in the
+            # middle from reporting skills as present when their files are gone.
+            for key in keys:
+                with self._mutation_lock(key):
+                    writable = self._directories(self.writable_dir).get(key)
+                    if writable:
+                        shutil.rmtree(writable)
+
+        with self._mutation_lock("state"):
+            state = self._load_state()
+            disabled = set(state["disabled"])
+            deleted = set(state["deleted"])
+            batch = set(keys)
+            if action == "disable":
+                disabled |= batch
+            elif action == "enable":
+                disabled -= batch
+                deleted -= batch
+            else:
+                # Only built-ins are tombstoned; a user-installed skill is gone
+                # with its directory. Mirrors `delete`.
+                builtins = set(self._directories(self.builtin_dir))
+                deleted |= batch & builtins
+                disabled -= batch
+            state["disabled"] = sorted(disabled)
+            state["deleted"] = sorted(deleted)
+            self._save_state(state)
+        return BulkSkillResult(applied=tuple(keys), missing=tuple(missing))
 
     def restore(self, name: str) -> None:
         key = normalize_managed_skill_name(name)

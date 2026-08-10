@@ -72,3 +72,48 @@ def test_admin_can_upload_and_manage_skills(monkeypatch, tmp_path: Path) -> None
     removed = client.delete("/api/admin/skills/custom")
     assert removed.status_code == 204
     assert all(item["name"] != "custom" for item in client.get("/api/admin/skills").json())
+
+
+def test_bulk_endpoint_applies_one_action_to_many_skills(monkeypatch, tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    for name in ("alpha", "beta"):
+        directory = builtin / name
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name}\n---\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(admin, "_skill_manager", lambda: SkillManager(builtin, writable))
+
+    app = FastAPI()
+    app.include_router(admin.router)
+    app.dependency_overrides[require_admin] = lambda: {"id": "admin", "role": "admin"}
+    client = TestClient(app)
+
+    disabled = client.post(
+        "/api/admin/skills/bulk",
+        json={"names": ["alpha", "beta", "ghost"], "action": "disable"},
+    )
+    assert disabled.status_code == 200
+    body = disabled.json()
+    assert body["applied"] == ["alpha", "beta"]
+    assert body["missing"] == ["ghost"]
+    # The refreshed list rides along so the panel does not need a second call.
+    assert {skill["name"]: skill["enabled"] for skill in body["skills"]} == {
+        "alpha": False,
+        "beta": False,
+    }
+
+    enabled = client.post(
+        "/api/admin/skills/bulk",
+        json={"names": ["alpha", "beta"], "action": "enable"},
+    )
+    assert enabled.status_code == 200
+    assert all(skill["enabled"] for skill in enabled.json()["skills"])
+
+    rejected = client.post(
+        "/api/admin/skills/bulk",
+        json={"names": ["alpha"], "action": "vaporize"},
+    )
+    assert rejected.status_code == 422

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
+from kimi_cli.analytics.skill_usage import build_skill_usage
 from kimi_cli.web.db.crud import (
     create_user,
     delete_user,
@@ -178,11 +179,40 @@ class SkillContentUpdate(BaseModel):
     content: str
 
 
+class SkillBulkAction(BaseModel):
+    names: list[str]
+    action: Literal["enable", "disable", "delete"]
+
+
+class SkillBulkResult(BaseModel):
+    applied: list[str]
+    missing: list[str]
+    skills: list[ManagedSkill]
+
+
 @router.get("/skills", summary="List managed skills (admin only)")
 async def list_managed_skills(
     admin: dict[str, Any] = Depends(require_admin),
 ) -> list[ManagedSkill]:
     return _skill_manager().list_skills()
+
+
+# NOTE: keep this registered ahead of the "/skills/{name}/..." routes below.
+# It does not collide today (different segment count), but a future refactor to
+# a bare "/skills/{name}" would shadow it, and the failure would be silent.
+@router.get("/skills/usage", summary="Skill usage statistics (admin only)")
+def get_skill_usage(
+    days: int = 30,
+    refresh: bool = False,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Usage counts reconstructed from session wire logs.
+
+    Defined with ``def`` rather than ``async def`` on purpose: the scan is
+    blocking I/O, so FastAPI runs it in the threadpool instead of stalling the
+    event loop.
+    """
+    return build_skill_usage(days=days, refresh=refresh, manager=_skill_manager())
 
 
 @router.get("/skills/{name}/files/{relative_path:path}", summary="Read a skill file")
@@ -233,6 +263,26 @@ async def upload_managed_skill(
         raise HTTPException(status_code=409, detail=f"Skill already exists: {exc}") from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# Registered ahead of "/skills/{name}/..." for the same reason as
+# "/skills/usage": a single fixed segment must never be reachable as a name.
+@router.post("/skills/bulk", summary="Apply one action to many skills at once")
+async def bulk_managed_skills(
+    body: SkillBulkAction,
+    admin: dict[str, Any] = Depends(require_admin),
+) -> SkillBulkResult:
+    """Enable, disable, or delete a whole set of skills in one state write."""
+    manager = _skill_manager()
+    try:
+        result = manager.bulk_action(body.names, body.action)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SkillBulkResult(
+        applied=list(result.applied),
+        missing=list(result.missing),
+        skills=manager.list_skills(),
+    )
 
 
 def _managed_skill_action(name: str, action: str) -> ManagedSkill:

@@ -180,3 +180,85 @@ def test_replacement_reuses_existing_directory_casing(
         "Demo"
     ]
     assert manager.get("demo").description == "new"
+
+
+def test_bulk_disable_and_enable_apply_in_a_single_revision(tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    writable.mkdir()
+    for name in ("alpha", "beta", "gamma"):
+        _skill(builtin, name)
+    manager = SkillManager(builtin, writable)
+
+    before = manager.revision
+    result = manager.bulk_action(["alpha", "beta"], "disable")
+
+    assert result.applied == ("alpha", "beta")
+    assert result.missing == ()
+    # One write for the whole batch, not one per skill.
+    assert manager.revision == before + 1
+    states = {skill.name: skill.enabled for skill in manager.list_skills()}
+    assert states == {"alpha": False, "beta": False, "gamma": True}
+
+    manager.bulk_action(["alpha", "beta"], "enable")
+    assert all(skill.enabled for skill in manager.list_skills())
+
+
+def test_bulk_reports_unknown_names_instead_of_failing_the_batch(tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    writable.mkdir()
+    _skill(builtin, "alpha")
+    manager = SkillManager(builtin, writable)
+
+    result = manager.bulk_action(["alpha", "ghost", "not a name", "alpha"], "disable")
+
+    assert result.applied == ("alpha",)
+    assert result.missing == ("ghost", "not a name")
+    assert manager.get("alpha").enabled is False
+
+
+def test_bulk_delete_tombstones_builtins_and_removes_user_skills(tmp_path: Path) -> None:
+    builtin = tmp_path / "builtin"
+    writable = tmp_path / "skill"
+    builtin.mkdir()
+    writable.mkdir()
+    _skill(builtin, "factory")
+    _skill(writable, "custom")
+    manager = SkillManager(builtin, writable)
+
+    manager.bulk_action(["factory", "custom"], "delete")
+
+    skills = {skill.name: skill for skill in manager.list_skills()}
+    assert skills["factory"].deleted is True
+    assert "custom" not in skills
+    assert not (writable / "custom").exists()
+
+    manager.restore("factory")
+    assert manager.get("factory").deleted is False
+
+
+@pytest.mark.parametrize(
+    "frontmatter, expected",
+    [
+        ("---\nname: alpha\ndescription: d\ncategory: engineering\n---\n", "engineering"),
+        (
+            "---\nname: alpha\ndescription: d\nmetadata:\n  category: marketing\n---\n",
+            "marketing",
+        ),
+        ("---\nname: alpha\ndescription: d\n---\n", None),
+        ("---\nname: alpha\ndescription: d\ncategory: '   '\n---\n", None),
+    ],
+)
+def test_declared_category_is_surfaced_from_either_spelling(
+    tmp_path: Path, frontmatter: str, expected: str | None
+) -> None:
+    builtin = tmp_path / "builtin"
+    (builtin / "alpha").mkdir(parents=True)
+    (builtin / "alpha" / "SKILL.md").write_text(frontmatter, encoding="utf-8")
+
+    manager = SkillManager(builtin, tmp_path / "skill")
+
+    assert manager.get("alpha").category == expected
