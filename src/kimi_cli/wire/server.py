@@ -53,6 +53,7 @@ from .jsonrpc import (
     JSONRPCRequestMessage,
     JSONRPCSetCompactionRatioMessage,
     JSONRPCSetPlanModeMessage,
+    JSONRPCSetYoloMessage,
     JSONRPCSteerMessage,
     JSONRPCSuccessResponse,
     Statuses,
@@ -366,6 +367,8 @@ class WireServer:
                     resp = await self._handle_steer(msg)
                 case JSONRPCSetPlanModeMessage():
                     resp = await self._handle_set_plan_mode(msg)
+                case JSONRPCSetYoloMessage():
+                    resp = await self._handle_set_yolo(msg)
                 case JSONRPCSetCompactionRatioMessage():
                     resp = await self._handle_set_compaction_ratio(msg)
                 case JSONRPCCancelMessage():
@@ -523,6 +526,13 @@ class WireServer:
             "server": cast(JsonType, {"name": NAME, "version": VERSION}),
             "slash_commands": cast(JsonType, slash_commands),
         }
+        if isinstance(self._soul, KimiSoul):
+            # Unlike plan mode, YOLO can be set before any wire message exists
+            # (the --yolo flag) and is not otherwise replayed, so a client
+            # rendering it as a toggle has to be told where it starts.
+            approval = self._soul.runtime.approval
+            result["yolo"] = approval.is_yolo_flag()
+            result["afk"] = approval.is_afk()
         pending_approvals = self._pending_approval_requests()
         result["approval_requests"] = cast(
             JsonType,
@@ -817,6 +827,39 @@ class WireServer:
         return JSONRPCSuccessResponse(
             id=msg.id,
             result={"status": "ok", "plan_mode": new_state},
+        )
+
+    async def _handle_set_yolo(
+        self, msg: JSONRPCSetYoloMessage
+    ) -> JSONRPCSuccessResponse | JSONRPCErrorResponse:
+        """Turn auto-approval on or off for this session.
+
+        Deliberately a set rather than a toggle: ``/yolo`` in the terminal and
+        a second client can both move this, and a toggle would invert whatever
+        the client last happened to see.
+        """
+        if not isinstance(self._soul, KimiSoul):
+            return JSONRPCErrorResponse(
+                id=msg.id,
+                error=JSONRPCErrorObject(
+                    code=ErrorCodes.INVALID_STATE,
+                    message="YOLO mode is not supported",
+                ),
+            )
+
+        approval = self._soul.runtime.approval
+        approval.set_yolo(msg.params.enabled)
+        new_state = approval.is_yolo_flag()
+
+        status = StatusUpdate(yolo=new_state)
+        await self._send_msg(JSONRPCEventMessage(params=status))
+        # Persist so a replay reconstructs the toggle's position.
+        await self._soul.wire_file.append_message(status)
+        return JSONRPCSuccessResponse(
+            id=msg.id,
+            # `afk` rides along because it also auto-approves: a client showing
+            # "approvals are off" needs to know when YOLO is not the reason.
+            result={"status": "ok", "yolo": new_state, "afk": approval.is_afk()},
         )
 
     async def _handle_set_compaction_ratio(

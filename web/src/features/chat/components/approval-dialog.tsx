@@ -6,6 +6,10 @@ import { cn } from "@/lib/utils";
 import type { ApprovalResponseDecision } from "@/hooks/wireTypes";
 import type { LiveMessage } from "@/hooks/types";
 import { translateBackendMessage } from "@/lib/translate-backend";
+import {
+  summarizeApproval,
+  type ApprovalSummary,
+} from "@/features/chat/approval-summary";
 
 type ApprovalDialogProps = {
   messages: LiveMessage[];
@@ -89,6 +93,99 @@ function asWikiApprovalDisplay(
     }
   }
   return null;
+}
+
+/**
+ * The one-line answer to "what am I approving?", shown above everything else.
+ *
+ * `label` names the kind of action, `detail` carries the part that identifies
+ * this particular one (the command, the path), and `meta` the size of it.
+ * Detail is truncated by CSS rather than by slicing, so the full value stays
+ * available on hover.
+ */
+function ApprovalSummaryLine({
+  summary,
+  t,
+}: {
+  summary: ApprovalSummary;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const { label, detail, meta } = ((): {
+    label: string;
+    detail: string;
+    meta?: string;
+  } => {
+    switch (summary.kind) {
+      case "command":
+        return {
+          label: t("chat:approval.summary.command"),
+          detail: summary.command,
+          meta:
+            summary.extraLines > 0
+              ? t("chat:approval.summary.moreLines", { count: summary.extraLines })
+              : undefined,
+        };
+      case "diff":
+        return {
+          label: t("chat:approval.summary.diff"),
+          detail: summary.path,
+          meta: [
+            t("chat:approval.summary.lines", {
+              before: summary.before,
+              after: summary.after,
+            }),
+            summary.files > 1
+              ? t("chat:approval.summary.files", { count: summary.files })
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        };
+      case "todo":
+        return {
+          label: t("chat:approval.summary.todo"),
+          detail: t("chat:approval.summary.todoDetail", {
+            done: summary.done,
+            total: summary.total,
+          }),
+        };
+      case "task":
+        return {
+          label: t("chat:approval.summary.task"),
+          detail: summary.description,
+        };
+      case "wiki":
+        return {
+          label: t("chat:approval.summary.wiki"),
+          detail: summary.summary,
+          meta: t("chat:approval.summary.pages", { count: summary.pages }),
+        };
+      default:
+        return {
+          label: t("chat:approval.summary.generic"),
+          detail: summary.text,
+        };
+    }
+  })();
+
+  return (
+    <div className="flex items-baseline gap-2 rounded-md border border-border/60 bg-background/60 px-3 py-2">
+      <span className="shrink-0 text-xs font-semibold text-foreground">
+        {label}
+      </span>
+      <span
+        className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/90"
+        title={detail}
+      >
+        {detail}
+      </span>
+      {meta && (
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {meta}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export function ApprovalDialog({
@@ -230,6 +327,13 @@ export function ApprovalDialog({
     (item) => item.type !== "wiki",
   );
 
+  const summary = summarizeApproval({
+    action: approval.action,
+    sender: approval.sender,
+    description: approval.description,
+    display: toolCall.display,
+  });
+
   const sourceLabel = (() => {
     if (approval.sourceDescription) return approval.sourceDescription;
     const agentType = toolCall.subagentType;
@@ -282,6 +386,9 @@ export function ApprovalDialog({
               </span>
             )}
           </div>
+
+          {/* Distilled headline — what this request actually does */}
+          {summary && <ApprovalSummaryLine summary={summary} t={t} />}
 
           {/* Description */}
           {approval.description && (
@@ -375,9 +482,16 @@ export function ApprovalDialog({
             </details>
           )}
 
-          {/* Non-Wiki display blocks retain their existing presentation. */}
+          {/* Raw blocks, behind a disclosure: this is a JSON dump of the whole
+              block — including both sides of an edit — and reading it is never
+              the first thing anyone needs to do. The line above says what it
+              would have said. */}
           {otherDisplay && otherDisplay.length > 0 && (
-            <div className="rounded-md bg-muted/30 px-3 py-2 text-sm max-h-40 overflow-auto">
+            <details className="rounded-md bg-muted/30 px-3 py-2 text-sm">
+              <summary className="cursor-pointer text-xs text-muted-foreground">
+                {t("chat:approval.summary.rawDetails")}
+              </summary>
+              <div className="mt-2 max-h-40 overflow-auto">
               {otherDisplay.map((item) => {
                 const displayKeyBase =
                   typeof item.data === "string" ||
@@ -401,7 +515,8 @@ export function ApprovalDialog({
                   </div>
                 );
               })}
-            </div>
+              </div>
+            </details>
           )}
 
           {/* Action buttons */}

@@ -86,6 +86,8 @@ type ChatWorkspaceProps = {
   slashCommands?: SlashCommandDef[];
   /** Whether plan mode is active */
   planMode?: boolean;
+  yolo?: boolean;
+  onYoloChange?: (enabled: boolean) => void;
   /** Callback to set plan mode */
   onPlanModeChange?: (enabled: boolean) => void;
   /** Maximum context size for the current model (tokens) */
@@ -123,6 +125,8 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
   maxContextSize,
   slashCommands = [],
   planMode = false,
+  yolo = false,
+  onYoloChange,
   onPlanModeChange,
   onForkSession,
   errorMessage,
@@ -350,6 +354,8 @@ export const ChatWorkspace = memo(function ChatWorkspaceComponent({
                       isGitDiffLoading={isGitDiffLoading}
                       slashCommands={slashCommands}
                       planMode={planMode}
+                      yolo={yolo}
+                      onYoloChange={onYoloChange}
                       onPlanModeChange={onPlanModeChange}
                       activityStatus={activityStatus}
                       usagePercent={usagePercent}

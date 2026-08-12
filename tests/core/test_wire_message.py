@@ -194,6 +194,7 @@ async def test_wire_message_serde():
                 "token_usage": None,
                 "message_id": None,
                 "plan_mode": None,
+                "yolo": None,
                 "mcp_status": {
                     "loading": True,
                     "connected": 0,

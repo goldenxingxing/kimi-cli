@@ -13,7 +13,20 @@ from kimi_cli.soul.dynamic_injection import DynamicInjection, DynamicInjectionPr
 from kimi_cli.soul.kimisoul import KimiSoul
 from kimi_cli.soul.slash import afk as afk_slash
 from kimi_cli.soul.slash import yolo as yolo_slash
-from kimi_cli.wire.types import TextPart
+from kimi_cli.wire.types import StatusUpdate, TextPart, WireMessage
+
+
+def _texts(sent: list[WireMessage]) -> list[str]:
+    """Only the user-facing toasts. /yolo also emits a StatusUpdate now."""
+    return [msg.text for msg in sent if isinstance(msg, TextPart)]
+
+
+def _status_yolo(sent: list[WireMessage]) -> list[bool]:
+    return [
+        msg.yolo
+        for msg in sent
+        if isinstance(msg, StatusUpdate) and msg.yolo is not None
+    ]
 
 
 def _make_soul(runtime: Runtime, tmp_path: Path) -> KimiSoul:
@@ -148,7 +161,7 @@ async def test_yolo_slash_under_afk_only_toggles_yolo_flag(
     assert soul.runtime.approval.is_yolo() is False
     assert soul.runtime.approval.is_yolo_flag() is False
 
-    sent: list[TextPart] = []
+    sent: list[WireMessage] = []
     monkeypatch.setattr("kimi_cli.soul.slash.wire_send", lambda msg: sent.append(msg))
 
     await _run(yolo_slash, soul)
@@ -158,8 +171,10 @@ async def test_yolo_slash_under_afk_only_toggles_yolo_flag(
     # Afk untouched.
     assert soul.runtime.approval.is_afk() is True
     # Toast must reflect yolo being turned ON, not the misleading "require approval".
-    assert any("auto-approved" in s.text.lower() for s in sent)
-    assert not any("require approval" in s.text.lower() for s in sent)
+    assert any("auto-approved" in text.lower() for text in _texts(sent))
+    assert not any("require approval" in text.lower() for text in _texts(sent))
+    # Clients render yolo as a toggle, so the new state has to go out too.
+    assert _status_yolo(sent) == [True]
 
 
 async def test_yolo_slash_off_under_afk_does_not_claim_approval_required(
@@ -175,7 +190,7 @@ async def test_yolo_slash_off_under_afk_does_not_claim_approval_required(
     soul.runtime.approval.set_yolo(True)
     soul.runtime.approval.set_afk(True)
 
-    sent: list[TextPart] = []
+    sent: list[WireMessage] = []
     monkeypatch.setattr("kimi_cli.soul.slash.wire_send", lambda msg: sent.append(msg))
 
     await _run(yolo_slash, soul)
@@ -187,9 +202,10 @@ async def test_yolo_slash_off_under_afk_does_not_claim_approval_required(
     assert soul.runtime.approval.is_auto_approve() is True
 
     # Toast must not lie about approvals being required.
-    joined = " ".join(s.text for s in sent).lower()
+    joined = " ".join(_texts(sent)).lower()
     assert "afk" in joined
     assert "auto-approve" in joined or "auto-approved" in joined
+    assert _status_yolo(sent) == [False]
 
 
 async def test_yolo_slash_with_no_flags_turns_yolo_on(
@@ -197,18 +213,20 @@ async def test_yolo_slash_with_no_flags_turns_yolo_on(
 ) -> None:
     """Plain /yolo on a clean state: flag goes True, toast says auto-approve."""
     soul = _make_soul(runtime, tmp_path)
-    sent: list[TextPart] = []
+    sent: list[WireMessage] = []
     monkeypatch.setattr("kimi_cli.soul.slash.wire_send", lambda msg: sent.append(msg))
 
     await _run(yolo_slash, soul)
     assert soul.runtime.approval.is_yolo_flag() is True
-    assert any("auto-approved" in s.text.lower() for s in sent)
+    assert any("auto-approved" in text.lower() for text in _texts(sent))
+    assert _status_yolo(sent) == [True]
 
     # Second call: flag off, toast says approval required.
     sent.clear()
     await _run(yolo_slash, soul)
     assert soul.runtime.approval.is_yolo_flag() is False
-    assert any("require approval" in s.text.lower() for s in sent)
+    assert any("require approval" in text.lower() for text in _texts(sent))
+    assert _status_yolo(sent) == [False]
 
 
 async def test_status_snapshot_separates_yolo_and_afk(runtime: Runtime, tmp_path: Path) -> None:

@@ -145,6 +145,8 @@ export type StatusUpdateEvent = {
     token_usage?: TokenUsage | null;
     message_id?: string;
     plan_mode?: boolean | null;
+    /** Explicit YOLO opt-in. Absent means unchanged, as with plan_mode. */
+    yolo?: boolean | null;
   };
 };
 

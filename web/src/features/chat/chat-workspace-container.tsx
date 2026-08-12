@@ -166,6 +166,8 @@ export function ChatWorkspaceContainer({
     isConnected: isStreamConnected,
     isReplayingHistory,
     planMode,
+    yolo,
+    sendSetYolo,
     sendSetPlanMode,
     slashCommands,
     error: streamError,
@@ -359,6 +361,10 @@ export function ChatWorkspaceContainer({
     sendSetPlanMode(enabled);
   }, [sendSetPlanMode]);
 
+  const handleYoloChange = useCallback((enabled: boolean) => {
+    sendSetYolo(enabled);
+  }, [sendSetYolo]);
+
   const handleForkSession = useCallback(
     async (turnIndex: number) => {
       if (!(selectedSessionId && onForkSession)) {
@@ -429,6 +435,8 @@ export function ChatWorkspaceContainer({
       slashCommands={slashCommands}
       planMode={planMode}
       onPlanModeChange={handlePlanModeChange}
+      yolo={yolo}
+      onYoloChange={handleYoloChange}
       errorMessage={streamError?.message}
       onForkSession={onForkSession ? handleForkSession : undefined}
     />

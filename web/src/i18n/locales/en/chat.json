@@ -6,7 +6,27 @@
     "active": "Plan mode is active. The model will only read and plan, not modify files.",
     "enable": "Enable plan mode for read-only research and planning."
   },
+  "yoloMode": {
+    "label": "YOLO",
+    "toggle": "Toggle YOLO mode",
+    "active": "YOLO is on. Every action runs without asking — commands, file edits and deletes included. Turn it off to review actions again.",
+    "enable": "Skip every approval prompt. The agent runs commands and edits files without asking. Same as the /yolo command."
+  },
   "approval": {
+    "summary": {
+      "command": "Run command",
+      "diff": "Edit file",
+      "todo": "Update todos",
+      "task": "Background task",
+      "wiki": "Write to wiki",
+      "generic": "Action",
+      "moreLines": "+{{count}} more lines",
+      "lines": "{{before}} → {{after}} lines",
+      "files": "{{count}} files",
+      "todoDetail": "{{done}}/{{total}} done",
+      "pages": "{{count}} pages",
+      "rawDetails": "Raw request details"
+    },
     "allowAction": "Allow this {{action}}?",
     "sessionApproved": "Session approved. Future matching requests auto-approve.",
     "approvalConfirmed": "Approval confirmed. Continuing execution…",

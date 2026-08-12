@@ -102,6 +102,9 @@ async def yolo(soul: KimiSoul, args: str):
     # Inspect only the yolo flag: afk is independent and is toggled by /afk.
     if soul.runtime.approval.is_yolo_flag():
         soul.runtime.approval.set_yolo(False)
+        # Clients render this as a toggle; without the status update a /yolo
+        # typed here would leave their switch showing the opposite state.
+        wire_send(StatusUpdate(yolo=False))
         track("yolo_toggle", enabled=False)
         if soul.runtime.approval.is_afk():
             # Yolo off but afk still on -> tool calls remain auto-approved.
@@ -118,6 +121,7 @@ async def yolo(soul: KimiSoul, args: str):
             wire_send(TextPart(text="You only die once! Actions will require approval."))
     else:
         soul.runtime.approval.set_yolo(True)
+        wire_send(StatusUpdate(yolo=True))
         track("yolo_toggle", enabled=True)
         wire_send(TextPart(text="You only live once! All actions will be auto-approved."))
 

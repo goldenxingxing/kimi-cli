@@ -29,12 +29,16 @@ export type GlobalConfigControlsProps = {
   className?: string;
   planMode?: boolean;
   onPlanModeChange?: (enabled: boolean) => void;
+  yolo?: boolean;
+  onYoloChange?: (enabled: boolean) => void;
 };
 
 export function GlobalConfigControls({
   className,
   planMode = false,
   onPlanModeChange,
+  yolo = false,
+  onYoloChange,
 }: GlobalConfigControlsProps): ReactElement {
   const { config, isLoading, isUpdating, error, refresh, update } =
     useGlobalConfig();
@@ -211,6 +215,39 @@ export function GlobalConfigControls({
               {planMode
                 ? t("chat:planMode.active")
                 : t("chat:planMode.enable")}
+            </TooltipContent>
+          </Tooltip>
+        </>
+      )}
+
+      {onYoloChange && (
+        <>
+          <div className="mx-0 h-4 w-px bg-border/70" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex h-9 items-center gap-2 rounded-md px-2">
+                <span
+                  className={cn(
+                    "text-xs",
+                    // Auto-approval is the one setting whose cost is paid
+                    // silently, so an active YOLO says so at a glance instead
+                    // of looking like every other muted label.
+                    yolo
+                      ? "font-medium text-amber-600 dark:text-amber-400"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {t("chat:yoloMode.label")}
+                </span>
+                <Switch
+                  aria-label={t("chat:yoloMode.toggle")}
+                  checked={yolo}
+                  onCheckedChange={onYoloChange}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={8} className="max-w-72">
+              {yolo ? t("chat:yoloMode.active") : t("chat:yoloMode.enable")}
             </TooltipContent>
           </Tooltip>
         </>

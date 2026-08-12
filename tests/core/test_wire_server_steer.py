@@ -372,3 +372,85 @@ async def test_handle_prompt_cleanup_keeps_background_approval_pending(
     assert runtime.approval_runtime is not None
     record = runtime.approval_runtime.get_request("req-bg-prompt-1")
     assert record is None
+
+
+@pytest.mark.asyncio
+async def test_set_yolo_applies_state_and_announces_it(
+    runtime: Runtime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting YOLO must move the approval state *and* tell every client.
+
+    The web UI renders this as a switch, so the event is not decoration: without
+    it a second client (or the terminal's own /yolo) would leave the toggle
+    showing the opposite of reality.
+    """
+    from kimi_cli.wire.jsonrpc import JSONRPCSetYoloMessage
+
+    soul = _make_soul(runtime, tmp_path)
+    server = WireServer(soul)
+    sent: list[JSONRPCEventMessage] = []
+
+    async def capture(message) -> None:
+        assert isinstance(message, JSONRPCEventMessage)
+        sent.append(message)
+
+    monkeypatch.setattr(server, "_send_msg", capture)
+
+    response = await server._handle_set_yolo(
+        JSONRPCSetYoloMessage(id="yolo-1", params={"enabled": True})
+    )
+
+    assert isinstance(response, JSONRPCSuccessResponse)
+    assert response.result == {"status": "ok", "yolo": True, "afk": False}
+    assert runtime.approval.is_yolo_flag() is True
+    assert [event.params.yolo for event in sent] == [True]
+
+    response = await server._handle_set_yolo(
+        JSONRPCSetYoloMessage(id="yolo-2", params={"enabled": False})
+    )
+
+    assert isinstance(response, JSONRPCSuccessResponse)
+    assert response.result["yolo"] is False
+    assert runtime.approval.is_yolo_flag() is False
+    assert [event.params.yolo for event in sent] == [True, False]
+
+    # Replay has to reconstruct the toggle, so both transitions are persisted.
+    persisted = [
+        message
+        async for message in (
+            record.to_wire_message() async for record in soul.wire_file.iter_records()
+        )
+        if getattr(message, "yolo", None) is not None
+    ]
+    assert [message.yolo for message in persisted] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_initialize_reports_current_yolo_state(
+    runtime: Runtime,
+    tmp_path: Path,
+) -> None:
+    """A client has no other way to learn about `--yolo`.
+
+    Unlike plan mode, YOLO can be on before any wire message exists, and it is
+    not otherwise replayed.
+    """
+    soul = _make_soul(runtime, tmp_path)
+    server = WireServer(soul)
+    runtime.approval.set_yolo(True)
+
+    response = await server._handle_initialize(
+        JSONRPCInitializeMessage(
+            id="initialize-yolo",
+            params=JSONRPCInitializeMessage.Params(
+                protocol_version="1.0",
+                client=ClientInfo(name="kiwi", version="test"),
+            ),
+        )
+    )
+
+    assert isinstance(response, JSONRPCSuccessResponse)
+    assert response.result["yolo"] is True
+    assert response.result["afk"] is False

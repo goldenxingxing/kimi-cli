@@ -302,6 +302,10 @@ type UseSessionStreamReturn = {
   planMode: boolean;
   /** Set plan mode via silent RPC (no context message) */
   sendSetPlanMode: (enabled: boolean) => void;
+  /** Whether YOLO (auto-approve every action) is active */
+  yolo: boolean;
+  /** Set YOLO via silent RPC (no context message) */
+  sendSetYolo: (enabled: boolean) => void;
   /** Available slash commands from the server */
   slashCommands: SlashCommandDef[];
 };
@@ -347,6 +351,7 @@ export function useSessionStream(
   const [contextUsage, setContextUsage] = useState(0);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
   const [planMode, setPlanMode] = useState(false);
+  const [yolo, setYolo] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -1084,6 +1089,7 @@ export function useSessionStream(
     setContextUsage(0);
     setTokenUsage(null);
     setPlanMode(false);
+    setYolo(false);
     setError(null);
     setSessionStatus(null);
     lastStatusSeqRef.current = null;
@@ -2034,6 +2040,11 @@ export function useSessionStream(
             setPlanMode(nextPlanMode);
           }
 
+          const nextYolo = event.payload.yolo;
+          if (typeof nextYolo === "boolean") {
+            setYolo(nextYolo);
+          }
+
           // If we have a message_id, create a special message to display it
           const messageId = event.payload.message_id;
           if (messageId) {
@@ -2421,6 +2432,12 @@ export function useSessionStream(
           initializeRetryCountRef.current = 0;
 
           const { slash_commands } = message.result;
+          // YOLO can be on before any wire message exists (the --yolo flag) and
+          // is not replayed, so initialize is the only place the toggle can
+          // learn its starting position.
+          if (typeof message.result.yolo === "boolean") {
+            setYolo(message.result.yolo);
+          }
           const approvalRequests = Array.isArray(
             message.result.approval_requests,
           )
@@ -3251,6 +3268,21 @@ export function useSessionStream(
     resetStateRef.current(true);
   }, [setMessages]);
 
+  // Set YOLO via silent RPC (no context message). The server echoes a
+  // StatusUpdate, so the switch follows /yolo typed anywhere else too.
+  const sendSetYolo = useCallback((enabled: boolean) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const message: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      method: "set_yolo",
+      id: uuidV4(),
+      params: { enabled },
+    };
+    wsRef.current.send(JSON.stringify(message));
+  }, []);
+
   // Set plan mode via silent RPC (no context message)
   const sendSetPlanMode = useCallback((enabled: boolean) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -3348,6 +3380,8 @@ export function useSessionStream(
     clearMessages,
     error,
     planMode,
+    yolo,
+    sendSetYolo,
     sendSetPlanMode,
     slashCommands,
   };

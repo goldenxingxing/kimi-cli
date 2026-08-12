@@ -163,6 +163,24 @@ class JSONRPCSetPlanModeMessage(_MessageBase):
     params: _SetPlanModeParams
 
 
+class _SetYoloParams(BaseModel):
+    enabled: bool
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class JSONRPCSetYoloMessage(_MessageBase):
+    """Set YOLO (auto-approve everything) explicitly, rather than toggling.
+
+    A toggle would drift out of sync whenever the state changes behind the
+    client's back — ``/yolo`` typed in the terminal, or a second UI.
+    """
+
+    method: Literal["set_yolo"] = "set_yolo"
+    id: str
+    params: _SetYoloParams
+
+
 class _SetCompactionRatioParams(BaseModel):
     """The share of the context window that may fill before auto-compaction."""
 
@@ -229,6 +247,7 @@ type JSONRPCInMessage = (
     | JSONRPCSteerMessage
     | JSONRPCReplayMessage
     | JSONRPCSetPlanModeMessage
+    | JSONRPCSetYoloMessage
     | JSONRPCSetCompactionRatioMessage
     | JSONRPCCancelMessage
 )
@@ -239,6 +258,7 @@ JSONRPC_IN_METHODS = {
     "steer",
     "replay",
     "set_plan_mode",
+    "set_yolo",
     "set_compaction_ratio",
     "cancel",
 }
