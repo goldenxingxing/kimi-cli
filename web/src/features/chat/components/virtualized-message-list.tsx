@@ -221,22 +221,28 @@ function VirtualizedMessageListComponent(
   }
   prevItemCountRef.current = listItems.length;
 
-  // followOutput only runs when the item count *grows*, so a conversation
-  // whose history is shorter than the one before it would never trigger it and
-  // would keep whatever offset the previous list left behind. Pin explicitly,
-  // once, on the first populated frame of each conversation; catch-up carries
-  // the rest of the replay from there.
-  const pinnedConversationRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (listItems.length === 0) return;
-    if (pinnedConversationRef.current === conversationKey) return;
-    pinnedConversationRef.current = conversationKey;
+  // followOutput scrolls to the last item while the items it just added are
+  // still sized by `defaultItemHeight`. Real messages are far taller than that
+  // estimate, so as they get measured the content bottom moves away and the
+  // viewport is left stranded above it — the more the estimate was wrong, the
+  // further up. That is what made a replayed conversation open partway up its
+  // own history despite the policy asking to follow every single append.
+  //
+  // So while catch-up is armed, follow the *height* too, not just the count.
+  // Scrolling to an index cannot itself change the height, so this settles
+  // rather than loops, and the reader's first wheel/touch/key disarms it.
+  const listItemsRef = useRef(listItems);
+  listItemsRef.current = listItems;
+  const handleTotalListHeightChanged = useCallback(() => {
+    if (!catchUpRef.current) return;
+    const count = listItemsRef.current.length;
+    if (count === 0) return;
     virtuosoRef.current?.scrollToIndex({
-      index: listItems.length - 1,
+      index: count - 1,
       align: "end",
       behavior: "auto",
     });
-  }, [conversationKey, listItems.length]);
+  }, []);
 
   const handleAtBottomChange = useCallback(
     (atBottom: boolean) => {
@@ -347,6 +353,7 @@ function VirtualizedMessageListComponent(
       overscan={200}
       minOverscanItemCount={4}
       atBottomStateChange={handleAtBottomChange}
+      totalListHeightChanged={handleTotalListHeightChanged}
       initialTopMostItemIndex={{
         index: Math.max(0, listItems.length - 1),
         align: "end",
