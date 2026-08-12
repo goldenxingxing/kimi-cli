@@ -179,6 +179,10 @@ function VirtualizedMessageListComponent(
   // guard the 1500px gap rule below would pin the viewport to the top.
   const catchUpRef = useRef(true);
   const prevItemCountRef = useRef(0);
+  // This component is not remounted when the reader switches conversation —
+  // only the inner Virtuoso is keyed — so the refs above outlive the
+  // conversation they describe unless the switch is noticed here.
+  const prevConversationKeyRef = useRef(conversationKey);
 
   // Filtered messages list (excluding message-id) aligned with listItems indices
   const filteredMessages = useMemo(
@@ -192,16 +196,47 @@ function VirtualizedMessageListComponent(
     [filteredMessages],
   );
 
-  // Detect an empty -> non-empty transition (rebuild from scratch).
-  // Assigned during render so the flag is set before Virtuoso invokes
-  // followOutput for the incoming items (a useEffect would run after
+  // A different conversation starts at its newest message, always. Reading
+  // position belongs to the conversation it was taken in: without this, having
+  // scrolled up anywhere left catch-up off, and the next session opened
+  // wherever the timing of its history happened to leave the viewport — the
+  // top, as often as not.
+  //
+  // Both checks are assigned during render so the flags are set before Virtuoso
+  // invokes followOutput for the incoming items (a useEffect would run after
   // Virtuoso's own effects — too late).
+  if (prevConversationKeyRef.current !== conversationKey) {
+    prevConversationKeyRef.current = conversationKey;
+    prevItemCountRef.current = 0;
+    catchUpRef.current = nextCatchUp(catchUpRef.current, {
+      type: "conversation-switched",
+    });
+  }
+
+  // Detect an empty -> non-empty transition (rebuild from scratch).
   if (prevItemCountRef.current === 0 && listItems.length > 0) {
     catchUpRef.current = nextCatchUp(catchUpRef.current, {
       type: "list-rebuilt",
     });
   }
   prevItemCountRef.current = listItems.length;
+
+  // followOutput only runs when the item count *grows*, so a conversation
+  // whose history is shorter than the one before it would never trigger it and
+  // would keep whatever offset the previous list left behind. Pin explicitly,
+  // once, on the first populated frame of each conversation; catch-up carries
+  // the rest of the replay from there.
+  const pinnedConversationRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (listItems.length === 0) return;
+    if (pinnedConversationRef.current === conversationKey) return;
+    pinnedConversationRef.current = conversationKey;
+    virtuosoRef.current?.scrollToIndex({
+      index: listItems.length - 1,
+      align: "end",
+      behavior: "auto",
+    });
+  }, [conversationKey, listItems.length]);
 
   const handleAtBottomChange = useCallback(
     (atBottom: boolean) => {

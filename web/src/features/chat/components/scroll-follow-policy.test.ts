@@ -74,6 +74,17 @@ describe("nextCatchUp", () => {
     assert.equal(nextCatchUp(true, { type: "reader-took-control" }), false);
   });
 
+  it("re-arms when the reader opens another conversation", () => {
+    // The bug this guards: scrolling up in one session left catch-up off, and
+    // the next session inherited it and opened at its oldest message.
+    const afterScrolling = nextCatchUp(true, { type: "reader-took-control" });
+    assert.equal(afterScrolling, false);
+    assert.equal(
+      nextCatchUp(afterScrolling, { type: "conversation-switched" }),
+      true,
+    );
+  });
+
   it("does not resume catching up just because the reader returns to the bottom", () => {
     assert.equal(nextCatchUp(false, { type: "reached-bottom" }), false);
   });
@@ -105,5 +116,31 @@ describe("the reconnect replay sequence", () => {
     );
 
     assert.equal(decision, false, "the reader's position is theirs to keep");
+  });
+});
+
+describe("switching conversations", () => {
+  it("opens the next conversation at its newest message, not where the last one was left", () => {
+    // Reader scrolls up in session A to read something old.
+    let catchingUp = nextCatchUp(true, { type: "reader-took-control" });
+    let decision = decideFollowOutput(
+      state({ isCatchingUp: catchingUp, gapToBottom: 40_000 }),
+    );
+    assert.equal(decision, false, "their position in A is theirs to keep");
+
+    // They click session B. Its history streams in from empty.
+    catchingUp = nextCatchUp(catchingUp, { type: "conversation-switched" });
+    decision = decideFollowOutput(
+      state({ isCatchingUp: catchingUp, gapToBottom: 40_000 }),
+    );
+    assert.equal(decision, "auto", "B must open at its newest message");
+
+    // Reaching the bottom mid-replay must not end catch-up, or the rest of B's
+    // history would push the viewport back up.
+    catchingUp = nextCatchUp(catchingUp, { type: "reached-bottom" });
+    assert.equal(
+      decideFollowOutput(state({ isCatchingUp: catchingUp, gapToBottom: 90_000 })),
+      "auto",
+    );
   });
 });

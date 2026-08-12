@@ -48,6 +48,8 @@ export function decideFollowOutput(
 export type CatchUpEvent =
   /** The list went from empty to populated — a reconnect or worker restart. */
   | { type: "list-rebuilt" }
+  /** The reader opened a different conversation. */
+  | { type: "conversation-switched" }
   /** The reader scrolled, dragged, or keyed the viewport themselves. */
   | { type: "reader-took-control" }
   /** The viewport happened to reach the bottom. */
@@ -61,10 +63,18 @@ export type CatchUpEvent =
  * that ended catch-up, the hundreds of messages still arriving would push the
  * content far past the gap tolerance and the reader would be left staring at
  * the top of their own history.
+ *
+ * `conversation-switched` re-arms for the same reason `list-rebuilt` does, and
+ * it is listed separately because it is the case that used to be missed:
+ * scrolling up in one session left catch-up off, and opening another session
+ * inherited that — so where the next conversation opened depended on whether
+ * its history happened to arrive while some other flag was still set. Reading
+ * position is per conversation; it does not carry across.
  */
 export function nextCatchUp(current: boolean, event: CatchUpEvent): boolean {
   switch (event.type) {
     case "list-rebuilt":
+    case "conversation-switched":
       return true;
     case "reader-took-control":
       return false;
