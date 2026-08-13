@@ -644,7 +644,10 @@ class Wiki(CallableTool2[Params]):
             if not result:
                 await self._finish_grant(grant, "declined")
                 await self._close_checkpoint(resolvable, "user_declined")
-                return result.rejection_error()
+                # Same as memory: recording a page is incidental to whatever
+                # the agent was actually asked to do, so declining it must not
+                # end the turn.
+                return result.rejection_error(stops_turn=False)
         committed = await asyncio.to_thread(manager.commit, prepared)
         track_wiki_event(
             "wiki_committed",

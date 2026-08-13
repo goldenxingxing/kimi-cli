@@ -1528,12 +1528,17 @@ class KimiSoul:
         rejected_errors = [
             result.return_value
             for result in results
-            if isinstance(result.return_value, ToolRejectedError)
+            if isinstance(result.return_value, ToolRejectedError) and result.return_value.stops_turn
         ]
         if rejected_errors and not any(e.has_feedback for e in rejected_errors) and self.is_root:
             # Pure rejection (no user feedback) — stop the turn.
             # Subagents skip this so the LLM can see the rejection and try
             # an alternative approach instead of terminating immediately.
+            #
+            # Only rejections that stop the turn count. Declining something the
+            # agent chose to do on the side — saving a memory, writing a wiki
+            # page — used to abandon the task it was doing at the time, which
+            # is not what "no" meant.
             _ = self._denwa_renji.fetch_pending_dmail()
             return StepOutcome(stop_reason="tool_rejected", assistant_message=result.message)
 

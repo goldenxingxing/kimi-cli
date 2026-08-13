@@ -161,6 +161,27 @@ async def test_a_rejected_merge_leaves_the_file_untouched(runtime: Runtime) -> N
     assert persistent_file(runtime).read_bytes() == before
 
 
+async def test_declining_a_memory_does_not_end_the_turn(runtime: Runtime) -> None:
+    """Remembering is a side errand the agent starts while doing something else.
+
+    Declining it used to end the whole turn — the root agent stops on any
+    rejection that carries no feedback — so the task in progress was abandoned
+    unfinished, with the user having said nothing about it.
+    """
+    from kimi_cli.tools.utils import ToolRejectedError
+
+    approval = RecordingApproval(approve=False)
+    runtime.approval = approval
+    tool = Memory(runtime)
+
+    with tool_call_context("Memory"):
+        rejected = await add(tool, "Something the user would rather not keep")
+
+    assert isinstance(rejected, ToolRejectedError)
+    assert rejected.stops_turn is False
+    assert "continue with the task" in rejected.message.lower()
+
+
 async def test_session_scope_is_untouched_by_dedup(memory_tool: Memory, runtime: Runtime) -> None:
     with tool_call_context("Memory"):
         await add(memory_tool, "A session note", scope="session")

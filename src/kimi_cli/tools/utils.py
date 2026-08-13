@@ -201,12 +201,22 @@ class ToolResultBuilder:
 
 class ToolRejectedError(ToolError):
     has_feedback: bool = False
+    #: Whether this refusal ends the turn.
+    #:
+    #: True for the actions the agent was asked to perform: declining ``rm -rf``
+    #: means the plan is wrong, and carrying on would be carrying on without
+    #: the user. False for the ones it decided to perform *while* doing
+    #: something else — recording a memory, writing a wiki page. Declining one
+    #: of those means "do not save that", not "abandon the task", and ending
+    #: the turn there leaves the actual work half-finished.
+    stops_turn: bool = True
 
     def __init__(
         self,
         message: str | None = None,
         brief: str = "Rejected by user",
         has_feedback: bool = False,
+        stops_turn: bool = True,
     ):
         super().__init__(
             message=message
@@ -217,3 +227,4 @@ class ToolRejectedError(ToolError):
             brief=brief,
         )
         self.has_feedback = has_feedback
+        self.stops_turn = stops_turn

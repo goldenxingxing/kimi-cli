@@ -80,12 +80,28 @@ class ApprovalResult:
     def __bool__(self) -> bool:
         return self.approved
 
-    def rejection_error(self) -> ToolRejectedError:
+    def rejection_error(self, *, stops_turn: bool = True) -> ToolRejectedError:
+        """Build the error a rejected tool call returns.
+
+        ``stops_turn=False`` is for actions the agent took on its own initiative
+        while working on something else. Declining those says "not that", not
+        "stop"; see :class:`ToolRejectedError`.
+        """
         if self.feedback:
             return ToolRejectedError(
                 message=(f"The tool call is rejected by the user. User feedback: {self.feedback}"),
                 brief=f"Rejected: {self.feedback}",
                 has_feedback=True,
+                stops_turn=stops_turn,
+            )
+        if not stops_turn:
+            return ToolRejectedError(
+                message=(
+                    "The user declined this. It was not saved. Do not retry it and do not "
+                    "ask again for the same item — continue with the task you were working on."
+                ),
+                brief="Declined by user",
+                stops_turn=False,
             )
         source = get_current_approval_source_or_none()
         is_subagent = source is not None and source.agent_id is not None

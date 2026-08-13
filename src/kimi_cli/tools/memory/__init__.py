@@ -191,7 +191,11 @@ class Memory(CallableTool2[Params]):
             description,
         )
         if not result:
-            return result.rejection_error()
+            # Not turn-ending: remembering something is a side errand the agent
+            # started on its own while working. "Do not save that" is not "stop
+            # what you are doing", and treating it as such left the actual task
+            # half-done with no way to resume it.
+            return result.rejection_error(stops_turn=False)
         return None
 
     async def _add(self, op: AddOp) -> ToolReturnValue:
