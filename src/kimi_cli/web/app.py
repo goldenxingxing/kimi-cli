@@ -260,8 +260,14 @@ def create_app(
 
     @application.get("/healthz")
     async def health_probe() -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-        """Health check endpoint."""
-        return {"status": "ok"}
+        """Health check endpoint.
+
+        ``pid`` lets a supervisor tell "my server is up" from "*a* server is up
+        on that port". Without it, a second copy of the app reads someone
+        else's 200 as proof that its own child started, and keeps respawning a
+        child that dies on a port conflict every time.
+        """
+        return {"status": "ok", "pid": os.getpid()}
 
     # SPA catch-all: handles both static assets and client-side routes.
     #
