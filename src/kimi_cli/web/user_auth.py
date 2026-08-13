@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
+from starlette.requests import HTTPConnection
 
 from kimi_cli.web.db.crud import get_user_session
 from kimi_cli.web.db.database import get_db
@@ -12,8 +13,14 @@ from kimi_cli.web.db.database import get_db
 _COOKIE_NAME = "kimi_session"
 
 
-def get_current_user(request: Request) -> dict[str, Any] | None:
-    """Return the currently authenticated user dict, or ``None``.
+def user_from_connection(connection: HTTPConnection) -> dict[str, Any] | None:
+    """Resolve the authenticated user behind any connection, or ``None``.
+
+    Takes an ``HTTPConnection`` rather than a ``Request`` so a WebSocket
+    handshake — which carries the very same cookies and headers — can be
+    authenticated by exactly the same rule. Keeping the two apart is how a
+    logged-in browser ended up authorized for every HTTP call and rejected on
+    every socket.
 
     Authentication sources (in priority order):
     1. Cookie ``kimi_session`` (primary, used by browser clients).
@@ -22,13 +29,13 @@ def get_current_user(request: Request) -> dict[str, Any] | None:
     token: str | None = None
 
     # 1. Cookie
-    cookie_token = request.cookies.get(_COOKIE_NAME)
+    cookie_token = connection.cookies.get(_COOKIE_NAME)
     if cookie_token:
         token = cookie_token
 
     # 2. Bearer header fallback
     if not token:
-        auth_header = request.headers.get("authorization", "")
+        auth_header = connection.headers.get("authorization", "")
         if auth_header.lower().startswith("bearer "):
             token = auth_header[7:].strip() or None
 
@@ -44,6 +51,11 @@ def get_current_user(request: Request) -> dict[str, Any] | None:
         return user
     except Exception:
         return None
+
+
+def get_current_user(request: Request) -> dict[str, Any] | None:
+    """Return the currently authenticated user dict, or ``None``."""
+    return user_from_connection(request)
 
 
 def require_current_user(

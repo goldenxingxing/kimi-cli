@@ -2942,12 +2942,17 @@ export function useSessionStream(
             reconnectRef.current();
           }, decision.delayMs);
         } else if (decision.action === "report") {
+          const REASONS: Record<string, string> = {
+            sessionNotFound: "Session not found",
+            tooManySessions: "Too many concurrent sessions",
+            // Say what the server said. "Lost connection" reads as a network
+            // problem and sends people to the wrong place.
+            unauthorized: "Not signed in for this session — reload the page to sign in again",
+            forbidden: "The server refused this connection (origin or network policy)",
+          };
           const err = new Error(
-            decision.reason === "sessionNotFound"
-              ? "Session not found"
-              : decision.reason === "tooManySessions"
-                ? "Too many concurrent sessions"
-                : "Lost connection to the session and could not reconnect",
+            REASONS[decision.reason] ??
+              "Lost connection to the session and could not reconnect",
           );
           setError(err);
           onError?.(err);

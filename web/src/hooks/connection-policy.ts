@@ -17,6 +17,11 @@
 export const TERMINAL_CLOSE_CODES: Record<number, string> = {
   4004: "sessionNotFound",
   4029: "tooManySessions",
+  // The server has stated a reason a retry cannot change. Leaving these out
+  // spent five reconnects to arrive at "lost connection", which describes a
+  // flaky network — and sent people looking at the wrong thing entirely.
+  4401: "unauthorized",
+  4403: "forbidden",
 };
 
 /** A clean, intentional close. Nothing to recover from. */

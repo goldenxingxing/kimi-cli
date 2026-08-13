@@ -114,3 +114,25 @@ describe("the blip that produced the complaint", () => {
     assert.equal(attempt, MAX_RECONNECT_ATTEMPTS);
   });
 });
+
+describe("a refusal the server explained", () => {
+  it("does not retry an unauthorized handshake", () => {
+    // Five reconnects cannot supply a credential the browser does not have,
+    // and the generic message they ended in blamed the network.
+    assert.deepEqual(decideOnClose(4401, 0, false), {
+      action: "report",
+      reason: "unauthorized",
+    });
+  });
+
+  it("does not retry a forbidden handshake", () => {
+    assert.deepEqual(decideOnClose(4403, 0, false), {
+      action: "report",
+      reason: "forbidden",
+    });
+  });
+
+  it("still retries a close the server did not explain", () => {
+    assert.equal(decideOnClose(1006, 0, false).action, "retry");
+  });
+});

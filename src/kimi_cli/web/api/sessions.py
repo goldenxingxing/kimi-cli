@@ -1172,6 +1172,17 @@ Title:"""
     return GenerateTitleResponse(title=title)
 
 
+def _websocket_user(websocket: WebSocket) -> dict[str, Any] | None:
+    """Resolve the logged-in user behind a WebSocket handshake, if any."""
+    from kimi_cli.web.user_auth import user_from_connection
+
+    try:
+        return user_from_connection(websocket)
+    except Exception:
+        logger.debug("WebSocket user lookup failed")
+        return None
+
+
 @router.websocket("/{session_id}/stream")
 async def session_stream(
     session_id: UUID,
@@ -1208,8 +1219,14 @@ async def session_stream(
             return
 
     if expected_token:
+        # Accept the same credentials the HTTP side does. AuthMiddleware lets a
+        # request through on either the session token *or* a valid kimi_session
+        # cookie; requiring only the token here meant that on any install with
+        # a session token configured, a logged-in browser got 200 on every API
+        # call and a rejected handshake on every socket — which the UI could
+        # only report as "lost connection to the session".
         token = websocket.query_params.get("token")
-        if not verify_token(token, expected_token):
+        if not verify_token(token, expected_token) and not _websocket_user(websocket):
             await websocket.close(code=4401, reason="Auth required")
             return
 
