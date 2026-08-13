@@ -20,6 +20,12 @@ import {
   type SkillSortMode,
 } from "./skill-usage-utils";
 import { groupByCategory, type SkillGroup } from "./skill-categories";
+import {
+  nextExpandAll,
+  readExpandedCategories,
+  toggleCategory,
+  writeExpandedCategories,
+} from "./skill-section-state";
 import { UsageSparkline } from "./usage-sparkline";
 import { formatRelativeTime } from "@/hooks/utils";
 import { cn } from "@/lib/utils";
@@ -45,6 +51,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  ChevronDown,
+  ChevronRight,
   Download,
   FilePenLine,
   Loader2,
@@ -87,6 +95,9 @@ export function AdminSkillsPanel() {
   const [editing, setEditing] = useState<ManagedSkill | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ManagedSkill | null>(null);
   const [bulkBusy, setBulkBusy] = useState<string | null>(null);
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
+    readExpandedCategories,
+  );
   const [bulkDeleteTarget, setBulkDeleteTarget] = useState<SkillGroup | null>(null);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
   const [content, setContent] = useState("");
@@ -97,6 +108,10 @@ export function AdminSkillsPanel() {
   const [usageError, setUsageError] = useState<string | null>(null);
   const [days, setDays] = useState<number>(30);
   const [sortMode, setSortMode] = useState<SkillSortMode>("most-used");
+
+  useEffect(() => {
+    writeExpandedCategories(expandedCategories);
+  }, [expandedCategories]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -287,6 +302,13 @@ export function AdminSkillsPanel() {
   }, [load, replaceFile]);
 
   const totals = usage?.totals;
+
+  // Only the category view has sections to fold; every other sort mode renders
+  // one unlabelled group, which is always open.
+  const grouped = sortMode === "category";
+  const isExpanded = (id: string) => !grouped || expandedCategories.has(id);
+  const allExpanded =
+    grouped && groups.length > 0 && groups.every((group) => expandedCategories.has(group.id));
 
   const renderSkillCard = (skill: ManagedSkill) => {
     const stats = usageByName.get(skill.name.toLowerCase());
@@ -607,7 +629,30 @@ export function AdminSkillsPanel() {
           section it lands in; otherwise it is classified from its name and
           description.
         </p>
-        <div className="ml-auto flex items-center gap-1 rounded-lg border bg-muted/40 p-1">
+        {grouped && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto"
+            onClick={() =>
+              setExpandedCategories(
+                (current) =>
+                  nextExpandAll(
+                    current,
+                    groups.map((group) => group.id),
+                  ).expanded,
+              )
+            }
+          >
+            {allExpanded ? "Collapse all" : "Expand all"}
+          </Button>
+        )}
+        <div
+          className={cn(
+            "flex items-center gap-1 rounded-lg border bg-muted/40 p-1",
+            !grouped && "ml-auto",
+          )}
+        >
           {SORTS.map((option) => (
             <button
               key={option.value}
@@ -631,17 +676,40 @@ export function AdminSkillsPanel() {
           <Loader2 className="size-4 animate-spin" />Loading skills…
         </div>
       ) : (
-        <div className="flex flex-col gap-6">
+        <div
+          // Tighter when grouped: collapsed sections are single rows, and the
+          // point of closing them is to see many at once.
+          className={cn("flex flex-col", grouped ? "gap-3" : "gap-6")}
+        >
           {groups.map((group) => (
             <section key={group.id} className="flex flex-col gap-2">
               {group.label && (
                 <div className="flex flex-wrap items-center gap-2 border-b pb-1">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    {group.label}
-                  </h4>
-                  <span className="text-xs tabular-nums text-muted-foreground">
-                    {group.skills.length}
-                  </span>
+                  {/* Only the label is the toggle. The bulk buttons sit beside
+                      it rather than inside it: nesting them would be invalid
+                      markup, and clicking Delete must not also open a section. */}
+                  <button
+                    type="button"
+                    className="flex items-center gap-2 rounded-sm text-left"
+                    aria-expanded={isExpanded(group.id)}
+                    onClick={() =>
+                      setExpandedCategories((current) =>
+                        toggleCategory(current, group.id),
+                      )
+                    }
+                  >
+                    {isExpanded(group.id) ? (
+                      <ChevronDown className="size-3.5 text-muted-foreground" />
+                    ) : (
+                      <ChevronRight className="size-3.5 text-muted-foreground" />
+                    )}
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {group.label}
+                    </h4>
+                    <span className="text-xs tabular-nums text-muted-foreground">
+                      {group.skills.length}
+                    </span>
+                  </button>
                   <div className="ml-auto flex items-center gap-1">
                     {bulkBusy === group.id && (
                       <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
@@ -673,9 +741,11 @@ export function AdminSkillsPanel() {
                   </div>
                 </div>
               )}
-              <div className="grid gap-3 md:grid-cols-2">
-                {group.skills.map(renderSkillCard)}
-              </div>
+              {isExpanded(group.id) && (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {group.skills.map(renderSkillCard)}
+                </div>
+              )}
             </section>
           ))}
         </div>
