@@ -138,6 +138,7 @@ import {
 import { createMessageId, getApiBaseUrl } from "./utils";
 import { kimiCliVersion } from "@/lib/version";
 import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/tool/store";
+import { isSystemReminderOnly } from "./system-reminder";
 import { decideOnClose, shouldReportErrorEvent } from "./connection-policy";
 import {
   LEGACY_UPLOADS_REGEX,
@@ -1327,6 +1328,14 @@ export function useSessionStream(
           const userText = parsedUserInput.text.trim();
           pendingClearRef.current =
             userText === "/clear" || userText === "/reset";
+
+          // A turn the agent started for itself — woken by a finished
+          // background task — carries a system reminder as its input. It is
+          // not something the user said, so it gets no user bubble; what the
+          // agent then reports is the visible part.
+          if (isSystemReminderOnly(parsedUserInput.text)) {
+            break;
+          }
 
           // Add user message
           const userMessageId = getNextMessageId("user");

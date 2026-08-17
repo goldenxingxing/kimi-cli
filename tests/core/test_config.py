@@ -47,6 +47,8 @@ def test_default_config_dump():
                 "worker_heartbeat_interval_ms": 5000,
                 "worker_stale_after_ms": 15000,
                 "kill_grace_period_ms": 2000,
+                "auto_followup": True,
+                "auto_followup_coalesce_ms": 1500,
                 "keep_alive_on_exit": False,
                 "agent_task_timeout_s": 900,
                 "print_wait_ceiling_s": 3600,

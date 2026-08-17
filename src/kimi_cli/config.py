@@ -112,6 +112,24 @@ class BackgroundConfig(BaseModel):
     worker_heartbeat_interval_ms: int = Field(default=5_000, ge=100)
     worker_stale_after_ms: int = Field(default=15_000, ge=1000)
     kill_grace_period_ms: int = Field(default=2_000, ge=100)
+    auto_followup: bool = Field(
+        default=True,
+        description=(
+            "Report background results without waiting to be asked. When a background "
+            "task or subagent finishes while the session is idle, start a turn so the "
+            "agent reads the result and says something. The interactive terminal has "
+            "always done this; without it a client that only runs turns on request "
+            "leaves the answer sitting unread until the user happens to type again."
+        ),
+    )
+    auto_followup_coalesce_ms: int = Field(
+        default=1_500,
+        ge=0,
+        description=(
+            "How long to keep collecting completions before following up, so a batch "
+            "of subagents finishing together produces one report rather than five."
+        ),
+    )
     keep_alive_on_exit: bool = Field(
         default=False,
         description="Keep background tasks alive when CLI exits. Default: kill on exit.",

@@ -90,6 +90,13 @@ class WireServer:
         self._write_task: asyncio.Task[None] | None = None
         self._write_queue: Queue[JSONRPCOutMessage] = Queue()
 
+        # Background follow-up: armed only after the user has driven a turn on
+        # this connection, so reopening a session with old notifications
+        # pending does not start talking on its own.
+        self._followup_armed = False
+        self._followup_task: asyncio.Task[None] | None = None
+        self._followup_failures = 0
+
         # inward
         self._dispatch_tasks: set[asyncio.Task[None]] = set()
 
@@ -120,6 +127,8 @@ class WireServer:
         if isinstance(self._soul, KimiSoul) and self._soul.runtime.root_wire_hub is not None:
             self._root_hub_queue = self._soul.runtime.root_wire_hub.subscribe()
             self._root_hub_task = asyncio.create_task(self._root_hub_loop())
+        if isinstance(self._soul, KimiSoul) and self._soul.runtime.config.background.auto_followup:
+            self._followup_task = asyncio.create_task(self._background_followup_loop())
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         remove_sigint = install_sigint_handler(loop, stop_event.set)
@@ -153,6 +162,88 @@ class WireServer:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             await self._shutdown()
+
+    #: What the agent is told when it is woken by a completed background task.
+    #: Same wording the interactive shell uses, so the two entry points read
+    #: the same way in a transcript.
+    _FOLLOWUP_PROMPT = (
+        "<system-reminder>Background tasks completed while you were idle.</system-reminder>"
+    )
+
+    #: Give up auto-following-up after this many consecutive failures, rather
+    #: than retrying a broken provider on every completion.
+    _MAX_FOLLOWUP_FAILURES = 3
+
+    async def _background_followup_loop(self) -> None:
+        """Report background results without waiting to be asked.
+
+        The interactive shell already does this: a completed task wakes the
+        loop and the agent reads the notification. A client that only runs a
+        turn when it is sent one has no such loop, so the result sat unread —
+        the session had ended, and the answer waited for the user to type
+        something unrelated before it surfaced.
+        """
+        assert isinstance(self._soul, KimiSoul)
+        runtime = self._soul.runtime
+        manager = runtime.background_tasks
+        notifications = runtime.notifications
+        coalesce_s = runtime.config.background.auto_followup_coalesce_ms / 1000
+
+        while True:
+            await manager.completion_event.wait()
+            manager.completion_event.clear()
+
+            # Let a burst settle: five subagents finishing together should
+            # produce one report, not five turns.
+            if coalesce_s:
+                await asyncio.sleep(coalesce_s)
+                manager.completion_event.clear()
+
+            if not self._followup_armed:
+                logger.debug("Background completion ignored: no user turn yet")
+                continue
+            if self._is_streaming:
+                # A turn is running and will read the notification itself.
+                continue
+            if not notifications.has_pending_for_sink("llm"):
+                continue
+            if self._followup_failures >= self._MAX_FOLLOWUP_FAILURES:
+                logger.warning("Background auto-follow-up disabled after repeated failures")
+                continue
+
+            logger.info("Background task completed while idle; following up")
+            try:
+                await self._run_followup_turn()
+                self._followup_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._followup_failures += 1
+                logger.exception(
+                    "Background auto-follow-up failed ({n}/{max})",
+                    n=self._followup_failures,
+                    max=self._MAX_FOLLOWUP_FAILURES,
+                )
+
+    async def _run_followup_turn(self) -> None:
+        """Run one turn on the agent's behalf. Errors surface to the caller."""
+        if self._is_streaming:
+            return
+        runtime = self._soul.runtime if isinstance(self._soul, KimiSoul) else None
+        self._cancel_event = asyncio.Event()
+        try:
+            await run_soul(
+                self._soul,
+                self._FOLLOWUP_PROMPT,
+                self._stream_wire_messages,
+                self._cancel_event,
+                runtime.session.wire_file if runtime else None,
+                runtime,
+            )
+        except RunCancelled:
+            pass
+        finally:
+            self._cancel_event = None
 
     async def _root_hub_loop(self) -> None:
         assert self._root_hub_queue is not None
@@ -327,6 +418,12 @@ class WireServer:
         if self._write_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._write_task
+
+        if self._followup_task is not None:
+            self._followup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._followup_task
+            self._followup_task = None
 
         if self._root_hub_task is not None:
             self._root_hub_task.cancel()
@@ -690,6 +787,12 @@ class WireServer:
 
         if not self._initialized:
             self._track_session_started(None)
+
+        # The user has driven a turn on this connection, so a later background
+        # completion may speak up on its own. Before this point it must not:
+        # reopening a session with old notifications pending would have the
+        # agent start talking about them unprompted.
+        self._followup_armed = True
 
         self._cancel_event = asyncio.Event()
         runtime = self._soul.runtime if isinstance(self._soul, KimiSoul) else None
