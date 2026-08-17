@@ -44,6 +44,15 @@ export type TurnBeginEvent = {
   };
 };
 
+/** Free text the user typed in answer to an approval or a question. */
+export type UserReplyEvent = {
+  type: "UserReply";
+  payload: {
+    text: string;
+    source: "approval_feedback" | "question_answer";
+  };
+};
+
 export type StepBeginEvent = {
   type: "StepBegin";
   payload: {
@@ -270,6 +279,7 @@ export type PlanDisplayEvent = {
 // Union of all event types
 export type WireEvent =
   | TurnBeginEvent
+  | UserReplyEvent
   | StepBeginEvent
   | StepInterruptedEvent
   | StepRetryEvent

@@ -59,6 +59,29 @@ class Params(BaseModel):
     )
 
 
+def _echo_typed_answers(
+    questions: list[QuestionItem], answers: dict[str, str]
+) -> None:
+    """Put anything the user typed into the transcript, as theirs.
+
+    Only free text. Picking a listed option is a choice rather than something
+    the user said, and it is already on screen in the question itself — so an
+    answer is echoed exactly when it is not one of that question's options.
+    """
+    from kimi_cli.wire.types import UserReply
+
+    for item in questions:
+        answer = (answers.get(item.question) or "").strip()
+        if not answer:
+            continue
+        if any(answer == option.label for option in item.options):
+            continue
+        try:
+            wire_send(UserReply(text=answer, source="question_answer"))
+        except AssertionError:
+            logger.debug("No wire available to echo the user reply")
+
+
 class AskUserQuestion(CallableTool2[Params]):
     name: str = NAME
     description: str = _BASE_DESCRIPTION
@@ -144,6 +167,8 @@ class AskUserQuestion(CallableTool2[Params]):
                 message="User dismissed the question without answering.",
                 display=[BriefDisplayBlock(text="User dismissed")],
             )
+
+        _echo_typed_answers(questions, answers)
 
         formatted = json.dumps({"answers": answers}, ensure_ascii=False)
         return ToolReturnValue(

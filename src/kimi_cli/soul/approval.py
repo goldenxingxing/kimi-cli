@@ -68,6 +68,28 @@ def _track_permission_result(
     track("permission_approval_result", **kwargs)
 
 
+def _echo_user_reply(text: str, source: Literal["approval_feedback", "question_answer"]) -> None:
+    """Put what the user typed into the transcript, as theirs.
+
+    The text already reaches the model inside a tool result, which is why this
+    is easy to miss: the exchange reads as the agent talking to itself. Emitted
+    from the soul so it is recorded to the wire file and survives a reload —
+    a response frame alone would not.
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+    from kimi_cli.soul import wire_send
+    from kimi_cli.wire.types import UserReply
+
+    try:
+        wire_send(UserReply(text=text, source=source))
+    except AssertionError:
+        # No wire in this context (tests, embedded use). The reply still
+        # reaches the model; only the transcript echo is skipped.
+        logger.debug("No wire available to echo the user reply")
+
+
 class ApprovalResult:
     """Result of an approval request. Behaves as bool for backward compatibility."""
 
@@ -414,6 +436,7 @@ class Approval:
                     session_cache_written=False,
                     has_feedback=bool(feedback),
                 )
+                _echo_user_reply(feedback, "approval_feedback")
                 return ApprovalResult(approved=False, feedback=feedback)
             case _:
                 track(

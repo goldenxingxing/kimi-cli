@@ -1349,6 +1349,23 @@ export function useSessionStream(
           break;
         }
 
+        case "UserReply": {
+          // What the user typed when answering an approval or a question. It
+          // reached the model inside a tool result, so without this the
+          // transcript showed the agent asking and then carrying on, with the
+          // user's own words nowhere in it.
+          const text = event.payload.text?.trim();
+          if (text) {
+            upsertMessage({
+              id: getNextMessageId("user"),
+              role: "user",
+              turnIndex: turnCounterRef.current,
+              content: text,
+            });
+          }
+          break;
+        }
+
         case "StepBegin": {
           setCurrentStep(event.payload.n);
           clearStepRetryStatus();

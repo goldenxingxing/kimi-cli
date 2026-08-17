@@ -53,6 +53,26 @@ class SteerInput(BaseModel):
     user_input: str | list[ContentPart]
 
 
+class UserReply(BaseModel):
+    """Text the user typed in answer to something the agent asked.
+
+    Rejecting an approval with feedback, or typing into an AskUserQuestion
+    prompt, is the user speaking — but it reached the model only inside a tool
+    result, so the transcript showed the agent's side of the exchange and not
+    theirs. This carries it as its own event so it can be rendered as what it
+    is, and — because the soul emits it — recorded to the wire file and
+    replayed like everything else, rather than living only in a socket frame
+    that a page reload forgets.
+
+    Only free text goes here. Picking a listed option is a choice, not
+    something the user said, and it is already visible in the request.
+    """
+
+    text: str
+    source: Literal["approval_feedback", "question_answer"]
+    """Which prompt the user was answering."""
+
+
 class TurnEnd(BaseModel):
     """
     Indicates the end of the current agent turn.
@@ -523,6 +543,7 @@ class ToolCallRequest(BaseModel):
 type Event = (
     TurnBegin
     | SteerInput
+    | UserReply
     | TurnEnd
     | StepBegin
     | StepInterrupted
@@ -672,6 +693,7 @@ __all__ = [
     # `WireMessage` variants
     "TurnBegin",
     "SteerInput",
+    "UserReply",
     "TurnEnd",
     "StepBegin",
     "StepInterrupted",

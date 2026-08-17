@@ -25,6 +25,9 @@ import {
 } from "@/components/ai-elements/model-selector";
 import { cn } from "@/lib/utils";
 
+/** Long enough that passing over a control is not a request to read about it. */
+const TOOLTIP_HOVER_DELAY_MS = 500;
+
 export type GlobalConfigControlsProps = {
   className?: string;
   planMode?: boolean;
@@ -198,7 +201,12 @@ export function GlobalConfigControls({
       {onPlanModeChange && (
         <>
           <div className="mx-0 h-4 w-px bg-border/70" />
-          <Tooltip>
+          {/* These two sit between the composer and the session list, so the
+              pointer crosses them on the way to switching sessions. At the
+              zero delay the shared Tooltip defaults to, merely passing over
+              popped the explanation — often enough to read as a glitch. Long
+              enough that only a deliberate hover asks for it. */}
+          <Tooltip delayDuration={TOOLTIP_HOVER_DELAY_MS}>
             <TooltipTrigger asChild>
               <div className="flex h-9 items-center gap-2 rounded-md px-2">
                 <span className="text-xs text-muted-foreground">
@@ -223,7 +231,7 @@ export function GlobalConfigControls({
       {onYoloChange && (
         <>
           <div className="mx-0 h-4 w-px bg-border/70" />
-          <Tooltip>
+          <Tooltip delayDuration={TOOLTIP_HOVER_DELAY_MS}>
             <TooltipTrigger asChild>
               <div className="flex h-9 items-center gap-2 rounded-md px-2">
                 <span
