@@ -223,6 +223,7 @@ async def resolve_skills_roots(
     skills_dirs: Sequence[KaosPath] | None = None,
     merge_brands: bool = False,
     extra_skill_dirs: Sequence[str] | None = None,
+    skip_skill_dirs: Sequence[str] | None = None,
 ) -> list[ScopedSkillsRoot]:
     """Resolve layered skill roots with their scope labels.
 
@@ -243,6 +244,11 @@ async def resolve_skills_roots(
       ``.git`` directory above ``work_dir``, or ``work_dir`` itself if none)
 
     Non-existent entries are silently dropped. Duplicates collapse to one.
+
+    ``skip_skill_dirs`` removes auto-discovered user and project roots by path.
+    Roots that were asked for explicitly — ``skills_dirs`` and
+    ``extra_skill_dirs`` — are never skipped: naming a directory and skipping
+    it is a contradiction, and the explicit request is the clearer intent.
     """
     from kimi_cli.plugin.manager import get_plugins_dir
     from kimi_cli.utils.path import find_project_root
@@ -278,6 +284,19 @@ async def resolve_skills_roots(
         seen.add(key)
         scoped.append(ScopedSkillsRoot(root=canon, scope=scope))
 
+    skipped = _normalize_skip_paths(skip_skill_dirs)
+
+    def _append_discovered(path: KaosPath, scope: SkillScope) -> None:
+        """Append an auto-discovered root unless the user asked to skip it."""
+        try:
+            resolved = str(Path(str(path)).expanduser().resolve(strict=False))
+        except (OSError, ValueError):
+            resolved = str(path)
+        if resolved in skipped:
+            logger.debug("Skipping skills dir per skip_skill_dirs: {path}", path=resolved)
+            return
+        _append(path, scope)
+
     if skills_dirs:
         # --skills-dir overrides user/project auto-discovery, but runs at the
         # top of priority order so its skills take precedence, matching the
@@ -286,9 +305,9 @@ async def resolve_skills_roots(
             _append(d, "extra")
     else:
         for d in await find_project_skills_dirs(work_dir, merge_brands=merge_brands):
-            _append(d, "project")
+            _append_discovered(d, "project")
         for d in await find_user_skills_dirs(merge_brands=merge_brands):
-            _append(d, "user")
+            _append_discovered(d, "user")
 
     # ``CUSTOM_SKILLS_HOST_PATH`` lets the desktop launcher feed a user-picked
     # skills directory into local-mode discovery, mirroring how the same env
@@ -346,6 +365,25 @@ async def resolve_skills_roots(
             "builtin",
         )
     return scoped
+
+
+def _normalize_skip_paths(raw: Sequence[str] | None) -> set[str]:
+    """Resolve skip entries to comparable absolute paths.
+
+    ``strict=False`` on purpose: a skip entry naming a directory that does not
+    exist is harmless, and resolving it anyway keeps the comparison honest if
+    it appears later.
+    """
+    out: set[str] = set()
+    for entry in raw or ():
+        text = entry.strip()
+        if not text:
+            continue
+        try:
+            out.add(str(Path(text).expanduser().resolve(strict=False)))
+        except (OSError, ValueError):
+            logger.info("Ignoring unusable skip_skill_dirs entry: {entry}", entry=entry)
+    return out
 
 
 def _resolve_extra_skill_dir(raw: str, project_root: KaosPath) -> KaosPath | None:
@@ -416,25 +454,22 @@ async def discover_skills_from_roots(
     for scoped in scoped_roots:
         for skill in await discover_skills(scoped.root, scope=scoped.scope):
             skills_by_name.setdefault(normalize_skill_name(skill.name), skill)
-    from kimi_cli.skill.manager import SkillManager, get_managed_skill_dir
+    from kimi_cli.skill.manager import SkillManager
 
+    # A disabled name is disabled, wherever the winning copy came from.
+    #
+    # This used to apply only to skills whose directory sat under the builtin
+    # or managed roots. But a same-named skill in a higher-priority root wins
+    # discovery, and the check ran against the winner — so turning a skill off
+    # in the panel did nothing at all whenever the user had their own copy of
+    # it, which is exactly the case where someone is most likely to be
+    # managing skills. The switch reported a state it was not delivering.
+    #
+    # Names the panel cannot show are still recoverable: it lists every
+    # disabled name, including ones with no managed copy left.
     manager = SkillManager()
-    builtin_root = get_builtin_skills_dir().resolve()
-    managed_root = get_managed_skill_dir().resolve()
-
-    def _managed(skill: Skill) -> bool:
-        try:
-            local_dir = Path(str(skill.dir)).resolve()
-            return local_dir.is_relative_to(builtin_root) or local_dir.is_relative_to(managed_root)
-        except (OSError, ValueError):
-            return False
-
     return sorted(
-        (
-            skill
-            for skill in skills_by_name.values()
-            if not _managed(skill) or manager.is_enabled(skill.name)
-        ),
+        (skill for skill in skills_by_name.values() if manager.is_enabled(skill.name)),
         key=lambda s: s.name,
     )
 

@@ -278,6 +278,7 @@ class Runtime:
                 skills_dirs=skills_dirs,
                 merge_brands=config.merge_all_available_skills,
                 extra_skill_dirs=config.extra_skill_dirs or None,
+                skip_skill_dirs=config.skip_skill_dirs or None,
             )
             skills = await discover_skills_from_roots(scoped_roots)
             revision_after = SkillManager().revision

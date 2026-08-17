@@ -271,7 +271,9 @@ class SkillManager:
         builtins = self._directories(self.builtin_dir)
         writable = self._directories(self.writable_dir)
         result: list[ManagedSkill] = []
+        listed: set[str] = set()
         for key in sorted(builtins.keys() | writable.keys()):
+            listed.add(key)
             builtin = builtins.get(key)
             override = writable.get(key)
             selected = override or builtin
@@ -288,6 +290,32 @@ class SkillManager:
                     modified=builtin is not None and override is not None,
                     files=self._files(selected),
                     category=category,
+                )
+            )
+
+        # A disabled name with no managed copy left — the built-in was dropped
+        # by an upgrade, or the name only ever existed in a directory this
+        # manager does not own. It still suppresses discovery, so leaving it
+        # off the list would make it permanently off with nothing to switch.
+        #
+        # Keyed by directory name, collected above: a skill's frontmatter name
+        # is free-form and need not be a valid managed-skill key, so
+        # re-normalising it here would raise on perfectly good skills.
+        for key in sorted(disabled - listed):
+            result.append(
+                ManagedSkill(
+                    name=key,
+                    description=(
+                        "Disabled. No managed copy of this skill is installed — it may live "
+                        "in a user or project skills directory, or have been removed by an "
+                        "upgrade. Enable to stop suppressing it."
+                    ),
+                    origin="user",
+                    enabled=False,
+                    deleted=False,
+                    modified=False,
+                    files=(),
+                    category=None,
                 )
             )
         return result

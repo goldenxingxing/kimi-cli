@@ -282,6 +282,20 @@ class Config(BaseModel):
             "Missing paths are silently skipped."
         ),
     )
+    skip_skill_dirs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Skills directories to leave alone, matched against the resolved "
+            "auto-discovery roots (user and project locations). Use this to keep "
+            "another agent's catalogue — ``~/.claude/skills`` is the common one — "
+            "out of the prompt: every discovered skill costs a few hundred "
+            "characters of context on every request, whether or not it is ever "
+            "used. Accepts absolute or ``~``-prefixed paths. Entries that match "
+            "nothing are ignored. Directories named in ``extra_skill_dirs`` are "
+            "not filtered: asking for a directory and skipping it is a "
+            "contradiction, and the explicit request wins."
+        ),
+    )
     telemetry: bool = Field(
         default=True,
         description="Enable anonymous telemetry to help improve kimi-cli. Set to false to disable.",
