@@ -28,6 +28,23 @@ import { cn } from "@/lib/utils";
 /** Long enough that passing over a control is not a request to read about it. */
 const TOOLTIP_HOVER_DELAY_MS = 500;
 
+/**
+ * Keep focus from opening a tooltip.
+ *
+ * Radix opens on focus *immediately* — the hover delay does not apply — and
+ * because the trigger wraps the switch rather than being it, focusin bubbles
+ * up from the control and counts as focusing the trigger. So clicking one of
+ * these switches, or anything that lands focus on it, popped the explanation
+ * with no pointer involved: selecting a different session was enough.
+ *
+ * Capture phase, so the event is swallowed on the way down, before Radix's
+ * handler on the trigger sees it. Hover is untouched, and the switches carry
+ * aria-labels, so nothing is lost for screen readers.
+ */
+function swallowFocus(event: React.FocusEvent): void {
+  event.stopPropagation();
+}
+
 export type GlobalConfigControlsProps = {
   className?: string;
   planMode?: boolean;
@@ -206,6 +223,7 @@ export function GlobalConfigControls({
               zero delay the shared Tooltip defaults to, merely passing over
               popped the explanation — often enough to read as a glitch. Long
               enough that only a deliberate hover asks for it. */}
+          <span onFocusCapture={swallowFocus}>
           <Tooltip delayDuration={TOOLTIP_HOVER_DELAY_MS}>
             <TooltipTrigger asChild>
               <div className="flex h-9 items-center gap-2 rounded-md px-2">
@@ -225,12 +243,14 @@ export function GlobalConfigControls({
                 : t("chat:planMode.enable")}
             </TooltipContent>
           </Tooltip>
+          </span>
         </>
       )}
 
       {onYoloChange && (
         <>
           <div className="mx-0 h-4 w-px bg-border/70" />
+          <span onFocusCapture={swallowFocus}>
           <Tooltip delayDuration={TOOLTIP_HOVER_DELAY_MS}>
             <TooltipTrigger asChild>
               <div className="flex h-9 items-center gap-2 rounded-md px-2">
@@ -258,6 +278,7 @@ export function GlobalConfigControls({
               {yolo ? t("chat:yoloMode.active") : t("chat:yoloMode.enable")}
             </TooltipContent>
           </Tooltip>
+          </span>
         </>
       )}
 
