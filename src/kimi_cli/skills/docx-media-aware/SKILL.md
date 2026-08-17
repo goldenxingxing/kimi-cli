@@ -1,3 +1,8 @@
+---
+name: docx-media-aware
+description: "处理任何 Microsoft Word `.docx` 输入任务时，先识别并处理文档中的图片、图注、截图和嵌入式媒体，再执行主任务——纯文本提取会漏掉图注里的错误、截图中的 UI 文字和流程图标注。适用于翻译审校、文档提取、内容总结、格式转换、合规审查等任何涉及 Word 文档的工作流。当输入包含 .docx/.doc 文件，或用户提及“审校翻译”、“翻译 review”、“提取文档内容”、“总结文档”、“转换格式”、“文档对比”、“Word 里有图片”、“文档里有截图”、“图注也要看”时触发。"
+---
+
 # docx-media-aware
 
 ## Description
@@ -29,10 +34,12 @@
 对每一个输入的 `.docx` 文件，运行：
 
 ```bash
-python /Users/qunwei/Documents/local_agent_work/skill/docx-media-aware/extract_docx_media.py \
+python <本 skill 目录>/extract_docx_media.py \
   <input.docx> \
-  --out-dir /Users/qunwei/Documents/local_agent_work/output/docx_media/<task_name>/
+  --out-dir ${KIMI_OUTPUT_DIR}/docx_media/<task_name>/
 ```
+
+`<本 skill 目录>` 就是系统提示里这条 skill 的 `Path` 所在的目录；`${KIMI_OUTPUT_DIR}` 是当前会话的输出目录。
 
 该脚本会输出：
 
@@ -82,7 +89,7 @@ python /Users/qunwei/Documents/local_agent_work/skill/docx-media-aware/extract_d
 2. **禁止**仅使用 `python-docx` 默认文本提取后就开始主任务；`python-docx` 不会输出图片。
 3. 如果图片是截图且包含英文文字，翻译审校必须覆盖这些文字。
 4. 图注（Figure X ... / 图 X ...）与图片必须成对检查；发现图注错误或图片与图注不一致要单独列出。
-5. 所有提取出的媒体文件必须保存到 `/Users/qunwei/Documents/local_agent_work/output/docx_media/<task_name>/`，不要散落在临时目录。
+5. 所有提取出的媒体文件必须保存到 `${KIMI_OUTPUT_DIR}/docx_media/<task_name>/`，不要散落在临时目录或工作目录。
 6. 审校/提取报告里要有一个独立小节：**“图片与图注审查”**。
 7. 如果图片数量巨大（如测试报告里的数百张截图），无法全部读取时要明确告知用户抽样策略，而不是假装已全部处理。
 
@@ -98,7 +105,7 @@ python /Users/qunwei/Documents/local_agent_work/skill/docx-media-aware/extract_d
 - 其中 3 张为软件界面截图（含英文 UI 文字）
 - 2 张为流程图
 - 2 张为签名/印章扫描件（与翻译审校无关）
-- 发现 1 处图注错误：Figure 10 的 caption 写的是 Basal Rate Service，但图片对应 Bolus Service
+- 发现 1 处图注错误：Figure 10 的 caption 描述的模块与图片实际展示的模块不一致
 ```
 
 ## Anti-patterns
@@ -107,6 +114,6 @@ python /Users/qunwei/Documents/local_agent_work/skill/docx-media-aware/extract_d
 |----------|----------|
 | “我已经读取了 docx 的全部内容”但实际上没看图片 | 先运行媒体审计，确认是否有图片 |
 | 看到图片但认为“不重要”就跳过 | 先识别图片类型，再判断是否与任务相关 |
-| 把图片散落在 `/tmp` 或当前目录 | 统一保存到 `output/docx_media/<task_name>/` |
+| 把图片散落在 `/tmp` 或当前目录 | 统一保存到 `${KIMI_OUTPUT_DIR}/docx_media/<task_name>/` |
 | 只提取图片不读内容 | 对含文字/术语的截图使用视觉能力读取 |
 | 图片太多就全部跳过 | 抽样关键图片，并向用户说明范围和原因 |
