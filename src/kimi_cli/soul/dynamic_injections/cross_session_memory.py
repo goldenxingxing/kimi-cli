@@ -36,12 +36,10 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
 
     def __init__(self) -> None:
         self._injected: bool = False
-        self._cached: list[DynamicInjection] = []
 
     def invalidate(self) -> None:
         """Force a re-read on the next ``get_injections`` call."""
         self._injected = False
-        self._cached = []
 
     @override
     async def on_context_compacted(self) -> None:
@@ -64,8 +62,12 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         history: Sequence[Message],
         soul: KimiSoul,
     ) -> list[DynamicInjection]:
+        # Nothing to return once it is in history. The caller appends whatever
+        # comes back as a *new* user message on every step, so handing back a
+        # cached copy re-injected the whole snapshot each time — tens of
+        # thousands of tokens per step, duplicated verbatim.
         if self._injected:
-            return self._cached
+            return []
 
         self._injected = True
         try:
@@ -83,8 +85,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         if not rendered:
             return []
 
-        self._cached = [DynamicInjection(type=_INJECTION_TYPE, content=rendered)]
-        return self._cached
+        return [DynamicInjection(type=_INJECTION_TYPE, content=rendered)]
 
 
 def _render(

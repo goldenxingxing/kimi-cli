@@ -52,6 +52,24 @@ async def test_the_snapshot_returns_after_compaction(soul: Any, stored_fact: Pat
     assert again and "User prefers terse replies" in again[0].content
 
 
+async def test_the_snapshot_is_injected_once_not_once_per_step(
+    soul: Any, stored_fact: Path
+) -> None:
+    """The caller appends whatever comes back as a *new* user message.
+
+    Returning a cached copy on later steps therefore re-injected the entire
+    snapshot every step — the same tens of thousands of tokens, duplicated
+    verbatim, for the whole session. Only the first call may return anything.
+    """
+    provider = CrossSessionMemoryInjectionProvider()
+
+    first = await provider.get_injections([], cast(Any, soul))
+    assert first, "the snapshot has to reach the model at least once"
+
+    for _ in range(3):
+        assert await provider.get_injections([], cast(Any, soul)) == []
+
+
 async def test_the_snapshot_is_not_re_read_on_every_step(
     soul: Any, stored_fact: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
