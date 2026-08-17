@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from kimi_cli.memory.condense import condense_summary
 from kimi_cli.memory.dedup import SummaryPolicy, compact_summaries, place_summary
 from kimi_cli.memory.storage import _locked
 from kimi_cli.utils.logging import logger
@@ -42,9 +43,16 @@ class SessionSummary(BaseModel):
     work_dir: str | None = None
 
     def render(self) -> str:
+        """Render for cross-session injection.
+
+        Condensed rather than verbatim: the stored text is a handover written
+        for the session being compacted, and most of it — file states, absolute
+        paths — is noise to anyone else. See :mod:`kimi_cli.memory.condense`.
+        The full text stays on disk; only what is shown is reduced.
+        """
         ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
         head = f"[{ts}] (session {self.session_id[:8]}, {self.trigger})"
-        return f"{head}\n{self.summary.strip()}"
+        return f"{head}\n{condense_summary(self.summary)}"
 
 
 def _read_raw(path: Path) -> list[SessionSummary]:
