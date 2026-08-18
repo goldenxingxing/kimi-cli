@@ -15,6 +15,7 @@ from kimi_cli.memory import (
     update_entry,
     upsert_entry,
 )
+from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import load_desc
 
@@ -26,6 +27,7 @@ def _validate_key(value: str | None) -> str | None:
     if value is None:
         return None
     return MemoryEntry(kind="project", scope="session", content="x", key=value).key
+
 
 _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "description.md")
 
@@ -56,7 +58,6 @@ class AddOp(BaseModel):
         ),
     )
 
-
     @field_validator("key")
     @classmethod
     def _check_key(cls, value: str | None) -> str | None:
@@ -70,8 +71,7 @@ class GetOp(BaseModel):
     op: Literal["get"] = "get"
     handle: str = Field(
         description=(
-            "The `key` or id shown in parentheses in the memory index. "
-            "Returns the entry in full."
+            "The `key` or id shown in parentheses in the memory index. Returns the entry in full."
         ),
     )
 
@@ -83,13 +83,24 @@ class ListOp(BaseModel):
 
 class UpdateOp(BaseModel):
     op: Literal["update"] = "update"
-    id: str = Field(description="The id of the entry to update.")
+    id: str = Field(
+        description=(
+            "Handle of the entry to update — the `key` or id shown in parentheses "
+            "in the memory index, or a full id. Prefer updating an entry in place "
+            "over adding one that says it supersedes an older record."
+        )
+    )
     content: str = Field(min_length=1, description="The new body for the entry.")
 
 
 class DeleteOp(BaseModel):
     op: Literal["delete"] = "delete"
-    id: str = Field(description="The id of the entry to delete.")
+    id: str = Field(
+        description=(
+            "Handle of the entry to delete — the `key` or id shown in parentheses "
+            "in the memory index, or a full id."
+        )
+    )
 
 
 class Params(BaseModel):
@@ -275,25 +286,27 @@ class Memory(CallableTool2[Params]):
         Both are accepted because the index shows whichever the entry has: a
         record written before keys existed can only offer its id.
         """
-        wanted = op.handle.strip().lower()
         candidates = list(self._runtime.session.state.session_memory) + read_entries(
             self._persistent_file
         )
-        for entry in candidates:
-            if (entry.key or "").lower() == wanted or entry.id.lower().startswith(wanted):
-                return _ok(
-                    output=json.dumps(
-                        {
-                            "id": entry.id,
-                            "key": entry.key,
-                            "kind": entry.kind,
-                            "scope": entry.scope,
-                            "content": entry.content,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    brief=f"Read {entry.handle}",
-                )
+        try:
+            entry = resolve_handle(candidates, op.handle)
+        except AmbiguousHandleError as exc:
+            return ToolError(message=str(exc), brief="Ambiguous handle")
+        if entry is not None:
+            return _ok(
+                output=json.dumps(
+                    {
+                        "id": entry.id,
+                        "key": entry.key,
+                        "kind": entry.kind,
+                        "scope": entry.scope,
+                        "content": entry.content,
+                    },
+                    ensure_ascii=False,
+                ),
+                brief=f"Read {entry.handle}",
+            )
         return ToolError(
             message=(
                 f"No memory entry with handle {op.handle!r}. "
@@ -337,7 +350,10 @@ class Memory(CallableTool2[Params]):
         )
         if rejection is not None:
             return rejection
-        updated = update_entry(self._persistent_file, op.id, op.content)
+        try:
+            updated = update_entry(self._persistent_file, op.id, op.content)
+        except AmbiguousHandleError as exc:
+            return ToolError(message=str(exc), brief="Ambiguous handle")
         if updated is None:
             return ToolError(message=f"No memory entry with id={op.id!r}.", brief="Not found")
         return _ok(
@@ -363,7 +379,11 @@ class Memory(CallableTool2[Params]):
         )
         if rejection is not None:
             return rejection
-        if delete_entry(self._persistent_file, op.id):
+        try:
+            deleted = delete_entry(self._persistent_file, op.id)
+        except AmbiguousHandleError as exc:
+            return ToolError(message=str(exc), brief="Ambiguous handle")
+        if deleted:
             return _ok(
                 output=json.dumps({"id": op.id, "scope": "persistent"}),
                 brief="Memory deleted",

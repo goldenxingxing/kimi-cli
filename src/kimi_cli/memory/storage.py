@@ -15,6 +15,8 @@ if sys.platform == "win32":
 else:
     import fcntl
 
+from collections.abc import Sequence
+
 from kimi_cli.memory.dedup import classify_entry, compact_entries, merge_entry
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.utils.logging import logger
@@ -189,14 +191,56 @@ def upsert_entry(
         )
 
 
+class AmbiguousHandleError(ValueError):
+    """A handle matched more than one entry. Caller must disambiguate."""
+
+    def __init__(self, handle: str, matches: Sequence[MemoryEntry]) -> None:
+        self.matches = list(matches)
+        super().__init__(
+            f"{handle!r} matches {len(self.matches)} entries: "
+            + ", ".join(m.id[:12] for m in self.matches)
+        )
+
+
+def resolve_handle(entries: Sequence[MemoryEntry], handle: str) -> MemoryEntry | None:
+    """Find the entry a handle refers to, or ``None``.
+
+    Accepts a ``key``, a full id, or an id prefix — because those are the three
+    forms an entry is ever *shown* as, and requiring a different one to act on
+    it is how the agent ended up unable to revise anything. The snapshot
+    renders ``id[:8]``, so an exact-id-only lookup meant every handle the model
+    could see was one it could not use: it could add, never amend, and said so
+    by writing "supersedes the older record" into the prose instead.
+
+    An ambiguous prefix raises rather than picking one — silently editing the
+    wrong memory is worse than saying which ones matched.
+    """
+    wanted = handle.strip().lower()
+    if not wanted:
+        return None
+    for entry in entries:
+        if (entry.key or "").lower() == wanted or entry.id.lower() == wanted:
+            return entry
+    prefixed = [e for e in entries if e.id.lower().startswith(wanted)]
+    if len(prefixed) > 1:
+        raise AmbiguousHandleError(handle, prefixed)
+    return prefixed[0] if prefixed else None
+
+
 def update_entry(path: Path, entry_id: str, content: str) -> MemoryEntry | None:
-    """Replace the ``content`` of the entry with the given ID. Returns the
-    updated entry, or ``None`` if no such ID exists."""
+    """Replace the ``content`` of the entry with the given handle.
+
+    ``entry_id`` is any form :func:`resolve_handle` accepts. Returns the
+    updated entry, or ``None`` if nothing matched.
+    """
     with _locked(path, exclusive=True):
         entries = _read_raw(path)
+        target = resolve_handle(entries, entry_id)
+        if target is None:
+            return None
         updated: MemoryEntry | None = None
         for i, e in enumerate(entries):
-            if e.id == entry_id:
+            if e.id == target.id:
                 entries[i] = e.model_copy(update={"content": content, "updated_at": time.time()})
                 updated = entries[i]
                 break
@@ -206,10 +250,16 @@ def update_entry(path: Path, entry_id: str, content: str) -> MemoryEntry | None:
 
 
 def delete_entry(path: Path, entry_id: str) -> bool:
-    """Remove the entry with the given ID. Returns ``True`` if a row was deleted."""
+    """Remove the entry with the given handle. ``True`` if a row was deleted.
+
+    ``entry_id`` is any form :func:`resolve_handle` accepts.
+    """
     with _locked(path, exclusive=True):
         entries = _read_raw(path)
-        kept = [e for e in entries if e.id != entry_id]
+        target = resolve_handle(entries, entry_id)
+        if target is None:
+            return False
+        kept = [e for e in entries if e.id != target.id]
         if len(kept) == len(entries):
             return False
         _write_atomic(path, kept)

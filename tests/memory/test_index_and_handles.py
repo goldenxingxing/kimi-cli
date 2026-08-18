@@ -6,11 +6,19 @@ import pytest
 
 from kimi_cli.memory.dedup import merge_entry
 from kimi_cli.memory.entry import MemoryEntry
+from kimi_cli.memory.recent import SessionSummary
 from kimi_cli.soul.dynamic_injections import cross_session_memory as csm
 
 
 def _entry(kind: str, content: str, key: str | None = None) -> MemoryEntry:
     return MemoryEntry(kind=kind, scope="persistent", content=content, key=key)  # type: ignore[arg-type]
+
+
+def _summaries(n: int) -> list[SessionSummary]:
+    return [
+        SessionSummary(session_id=f"s{i:04d}", trigger="compaction", summary=f"recap {i} " + "y" * 300)
+        for i in range(n)
+    ]
 
 
 class TestHandles:
@@ -78,14 +86,25 @@ class TestKindSplit:
 
 
 class TestBudget:
-    def test_an_oversized_snapshot_is_cut_and_says_so(self) -> None:
+    def test_an_oversized_section_is_cut_and_says_so(self) -> None:
         """Persistent memory has no cap of its own; it only ever grows."""
         entries = [_entry("project", f"fact number {i} " + "x" * 400) for i in range(200)]
 
         out = csm._render(entries, [])
 
-        assert len(out) <= csm._SNAPSHOT_BUDGET_CHARS + 100
+        assert len(out) <= csm._INDEX_BUDGET_CHARS + 500
         assert "truncated" in out
+
+    def test_one_section_growing_does_not_evict_another(self) -> None:
+        """A shared pool would let whichever section grows keep what it takes."""
+        entries = [_entry("feedback", "NEVER force-push to main.")]
+        entries += [_entry("project", f"fact {i} " + "x" * 400) for i in range(200)]
+        recents = _summaries(30)
+
+        out = csm._render(entries, recents)
+
+        assert "NEVER force-push to main." in out
+        assert "Recent session summaries" in out, "recaps must not be squeezed out"
 
     def test_behavioural_memory_survives_the_cut(self) -> None:
         """Losing an instruction changes how the agent works, silently.
@@ -113,3 +132,94 @@ class TestMergeKeepsHandles:
         older = _entry("project", "old text")
         merged = merge_entry(older, "new text", now=1.0, newer_key="p/two")
         assert merged.key == "p/two"
+
+
+class TestAddressableFromWhatIsShown:
+    """The snapshot shows `id[:8]`; update and delete used to demand the full id.
+
+    So every handle the agent could see was one it could not act on: it could
+    add and never amend. Six of thirty-two entries in a real store had the
+    model writing "supersedes the older record" into the prose because of it.
+    """
+
+    def _store(self, tmp_path):
+        from kimi_cli.memory.storage import upsert_entry
+
+        path = tmp_path / "persistent.jsonl"
+        entry = MemoryEntry(kind="project", scope="persistent", content="a fact")
+        upsert_entry(path, entry)
+        return path, entry
+
+    def test_update_accepts_the_handle_the_snapshot_showed(self, tmp_path) -> None:
+        from kimi_cli.memory.storage import update_entry
+
+        path, entry = self._store(tmp_path)
+        assert update_entry(path, entry.handle, "revised") is not None
+
+    def test_delete_accepts_the_handle_the_snapshot_showed(self, tmp_path) -> None:
+        from kimi_cli.memory.storage import delete_entry
+
+        path, entry = self._store(tmp_path)
+        assert delete_entry(path, entry.handle) is True
+
+    def test_a_key_also_works(self, tmp_path) -> None:
+        from kimi_cli.memory.storage import update_entry, upsert_entry
+
+        path = tmp_path / "persistent.jsonl"
+        upsert_entry(
+            path,
+            MemoryEntry(kind="project", scope="persistent", content="a", key="proj/a"),
+        )
+        assert update_entry(path, "proj/a", "revised") is not None
+
+    def test_an_ambiguous_prefix_is_refused_rather_than_guessed(self) -> None:
+        """Editing the wrong memory silently is worse than saying which matched."""
+        from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle
+
+        a = MemoryEntry(id="abcd1111" + "0" * 24, kind="project", scope="persistent", content="a")
+        b = MemoryEntry(id="abcd2222" + "0" * 24, kind="project", scope="persistent", content="b")
+
+        assert resolve_handle([a, b], a.id) is a
+        with pytest.raises(AmbiguousHandleError):
+            resolve_handle([a, b], "abcd")
+
+
+class TestGroundTruth:
+    def test_the_header_says_the_snapshot_is_established_fact(self) -> None:
+        """Without it, an agent re-derives what is already in front of it."""
+        out = csm._render([_entry("feedback", "x")], [])
+        lowered = out.lower()
+        assert "established fact" in lowered
+        assert "do not re-derive" in lowered
+
+    def test_the_header_still_gives_the_conversation_the_last_word(self) -> None:
+        out = csm._render([_entry("feedback", "x")], [])
+        assert "the conversation wins" in out.lower()
+
+
+class TestTruncationDirection:
+    def test_recaps_keep_the_newest_not_the_oldest(self) -> None:
+        """They arrive oldest-first, so cutting from the end loses today's.
+
+        The one section where the usual direction is exactly backwards.
+        """
+        recents = [
+            SessionSummary(session_id=f"s{i:04d}", trigger="compaction", summary=f"RECAP-{i} " + "y" * 900)
+            for i in range(10)
+        ]
+
+        out = csm._render([], recents)
+
+        assert "RECAP-9" in out, "the newest recap must survive"
+        assert "RECAP-0" not in out, "the oldest is what should go"
+
+    def test_a_section_heading_is_never_what_gets_cut(self) -> None:
+        recents = [
+            SessionSummary(session_id=f"s{i:04d}", trigger="compaction", summary="y" * 2000)
+            for i in range(10)
+        ]
+
+        out = csm._render([_entry("project", "x" * 5000)], recents)
+
+        assert "## Recorded facts (index)" in out
+        assert "## Recent session summaries" in out

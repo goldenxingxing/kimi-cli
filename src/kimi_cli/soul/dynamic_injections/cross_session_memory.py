@@ -24,12 +24,18 @@ _PERSISTENT_FILENAME = "persistent.jsonl"
 # How many recent summaries to surface to the LLM at startup.
 _RECENT_INJECTION_LIMIT = 5
 
-# Ceiling on the whole snapshot. Persistent memory has no cap of its own — it
-# only ever grows — so without this the opening cost of every session rises for
-# the life of the account. Behavioural entries are written first and are never
-# dropped: losing "be careful about X" silently changes how the agent works,
-# where losing a project fact only means it has to be looked up.
-_SNAPSHOT_BUDGET_CHARS = 12_000
+# Per-section ceilings, not one shared pool.
+#
+# A single budget consumed in render order means whichever section grows keeps
+# what it takes: two hundred project facts would push out the recaps entirely
+# while nothing about them said they should. Sizing each section separately
+# makes the trade explicit and keeps it stable as the store grows.
+# Behavioural memory gets the most room: it is small, it is instructions, and
+# dropping one changes how the agent works without saying so. If this ever
+# truncates, that is worth seeing rather than absorbing silently.
+_BEHAVIOURAL_BUDGET_CHARS = 8_000
+_INDEX_BUDGET_CHARS = 4_000
+_RECENT_BUDGET_CHARS = 5_000
 
 
 class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
@@ -110,8 +116,10 @@ def _render(
             "Stable facts/preferences you've recorded across sessions:",
             "",
         ]
-        lines.extend(e.render() for e in behavioural)
-        sections.append("\n".join(lines))
+        body = _fit(
+            "\n".join(e.render() for e in behavioural), _BEHAVIOURAL_BUDGET_CHARS
+        )
+        sections.append("\n".join([*lines, body]))
 
     if lookup:
         # Listed, not quoted. These are facts about particular projects; most
@@ -126,8 +134,8 @@ def _render(
             ),
             "",
         ]
-        lines.extend(e.render_index() for e in lookup)
-        sections.append("\n".join(lines))
+        body = _fit("\n".join(e.render_index() for e in lookup), _INDEX_BUDGET_CHARS)
+        sections.append("\n".join([*lines, body]))
 
     if recent:
         lines = [
@@ -135,35 +143,60 @@ def _render(
             "Condensed records of recent past conversations (oldest first):",
             "",
         ]
-        for s in recent:
-            lines.append(s.render())
-            lines.append("")
-        sections.append("\n".join(lines).rstrip())
+        # Recaps arrive oldest-first, so this is the one section where cutting
+        # from the end would throw away the newest — the opposite of intent.
+        body = _fit(
+            "\n\n".join(s.render() for s in recent), _RECENT_BUDGET_CHARS, keep="tail"
+        )
+        sections.append("\n".join([*lines, body]))
 
     if not sections:
         return ""
 
+    # The old header only said what to do when the snapshot and the
+    # conversation disagree. That left the ordinary case unstated, and an
+    # agent that is not told the snapshot is authoritative will go and
+    # rediscover what is already in front of it — paying twice and sometimes
+    # arriving somewhere else.
     header = (
-        "Cross-session memory — a snapshot of what you knew at the start of "
-        "this conversation. Trust the live conversation over this snapshot if "
-        "they conflict."
+        "Cross-session memory — what you already know at the start of this "
+        "conversation. Treat it as established fact: do not re-derive, re-read "
+        "or re-confirm something recorded here unless the live conversation "
+        "contradicts it, in which case the conversation wins. If an index entry "
+        "below looks relevant to the task, read it rather than guessing at it "
+        "from the summary line."
     )
-    return _fit_budget(header + "\n\n" + "\n\n".join(sections))
+    return header + "\n\n" + "\n\n".join(sections)
 
 
-def _fit_budget(text: str, budget: int = _SNAPSHOT_BUDGET_CHARS) -> str:
-    """Hold the snapshot to ``budget``, dropping from the end.
+def _fit(text: str, budget: int, *, keep: str = "head") -> str:
+    """Hold one section to ``budget``, dropping whole lines.
 
-    Sections are ordered so that what goes first is what must survive:
-    behavioural memory, then the fact index, then session recaps. Cutting from
-    the end therefore gives up recaps before facts and facts before
-    instructions — and says so, rather than leaving the model to believe it has
-    been shown everything.
+    ``keep="tail"`` drops from the front instead — for content ordered
+    oldest-first, where the end is the part worth keeping.
+
+    Either way it says that it cut. The failure that matters here is not the
+    missing entry but the confident assumption that nothing is missing.
     """
     if len(text) <= budget:
         return text
-    head = text[:budget]
-    boundary = head.rfind("\n")
-    if boundary > budget // 2:
-        head = head[:boundary]
-    return head.rstrip() + "\n\n… (snapshot truncated; older entries omitted)"
+    note = "… (truncated — use `list` to see everything)"
+    lines = text.splitlines()
+    room = budget - len(note) - 1
+    if keep == "tail":
+        kept: list[str] = []
+        used = 0
+        for line in reversed(lines):
+            if used + len(line) + 1 > room:
+                break
+            kept.append(line)
+            used += len(line) + 1
+        return "\n".join([note, *reversed(kept)])
+    kept = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > room:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join([*kept, note])
