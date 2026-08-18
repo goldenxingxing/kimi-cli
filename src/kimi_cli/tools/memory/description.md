@@ -83,11 +83,31 @@ worth keeping.
 
 Call `list` at the start of a turn if you need to recall what was previously
 saved, or to confirm a fact before relying on it. The system also injects
-recent persistent entries automatically.
+persistent entries automatically — but not all of them in full.
+
+## What the opening snapshot contains
+
+`user` and `feedback` entries appear in full: they describe how to work, and
+would not change anything sitting behind a lookup you have no reason to
+perform.
+
+`project` and `reference` entries appear as a one-line index, each with a
+handle in parentheses. Read one in full with `get` when its summary looks
+relevant to the task in front of you. Do not guess at the rest of an entry
+from its summary line — fetch it.
+
+## Handles
+
+Give `project` and `reference` entries a `key` when you add them: a short
+`namespace/slug` such as `acls/repo-path`, grouping related entries under one
+namespace. It becomes the handle a later session sees in the index, and it is
+what makes an entry recognisable there — an entry without one can only show an
+opaque id fragment.
 
 ## Operations
 
-- `add(kind, scope, content)` → returns the new entry's `id`
+- `add(kind, scope, content, key=None)` → returns the new entry's `id`
+- `get(handle)` → the full entry, addressed by `key` or `id`
 - `list(scope)` → returns formatted entries (use `scope="all"` for everything)
 - `update(id, content)` → replace the body of an existing entry
 - `delete(id)` → remove an entry by id

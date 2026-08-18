@@ -24,6 +24,13 @@ _PERSISTENT_FILENAME = "persistent.jsonl"
 # How many recent summaries to surface to the LLM at startup.
 _RECENT_INJECTION_LIMIT = 5
 
+# Ceiling on the whole snapshot. Persistent memory has no cap of its own — it
+# only ever grows — so without this the opening cost of every session rises for
+# the life of the account. Behavioural entries are written first and are never
+# dropped: losing "be careful about X" silently changes how the agent works,
+# where losing a project fact only means it has to be looked up.
+_SNAPSHOT_BUDGET_CHARS = 12_000
+
 
 class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
     """One-shot startup injection of the user's cross-session memory.
@@ -94,14 +101,32 @@ def _render(
 ) -> str:
     sections: list[str] = []
 
-    if persistent:
+    behavioural = [e for e in persistent if e.is_behavioural]
+    lookup = [e for e in persistent if not e.is_behavioural]
+
+    if behavioural:
         lines = [
             "## Persistent memory",
             "Stable facts/preferences you've recorded across sessions:",
             "",
         ]
-        for e in persistent:
-            lines.append(e.render())
+        lines.extend(e.render() for e in behavioural)
+        sections.append("\n".join(lines))
+
+    if lookup:
+        # Listed, not quoted. These are facts about particular projects; most
+        # are irrelevant to any given conversation, and carrying all of them
+        # into every one costs more than fetching the occasional right answer.
+        lines = [
+            "## Recorded facts (index)",
+            (
+                "Summaries only. Read one in full with "
+                "`Memory(operation={\"op\": \"get\", \"handle\": \"<handle>\"})` "
+                "when it looks relevant to the task at hand:"
+            ),
+            "",
+        ]
+        lines.extend(e.render_index() for e in lookup)
         sections.append("\n".join(lines))
 
     if recent:
@@ -123,4 +148,22 @@ def _render(
         "this conversation. Trust the live conversation over this snapshot if "
         "they conflict."
     )
-    return header + "\n\n" + "\n\n".join(sections)
+    return _fit_budget(header + "\n\n" + "\n\n".join(sections))
+
+
+def _fit_budget(text: str, budget: int = _SNAPSHOT_BUDGET_CHARS) -> str:
+    """Hold the snapshot to ``budget``, dropping from the end.
+
+    Sections are ordered so that what goes first is what must survive:
+    behavioural memory, then the fact index, then session recaps. Cutting from
+    the end therefore gives up recaps before facts and facts before
+    instructions — and says so, rather than leaving the model to believe it has
+    been shown everything.
+    """
+    if len(text) <= budget:
+        return text
+    head = text[:budget]
+    boundary = head.rfind("\n")
+    if boundary > budget // 2:
+        head = head[:boundary]
+    return head.rstrip() + "\n\n… (snapshot truncated; older entries omitted)"

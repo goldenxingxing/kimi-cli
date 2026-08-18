@@ -256,13 +256,27 @@ def _rank(advisories: list[tuple[str, str, float]]) -> tuple[tuple[str, str, flo
     return tuple(advisories[:MAX_ADVISORIES])
 
 
-def merge_entry(older: MemoryEntry, newer_content: str, *, now: float) -> MemoryEntry:
+def merge_entry(
+    older: MemoryEntry,
+    newer_content: str,
+    *,
+    now: float,
+    newer_key: str | None = None,
+) -> MemoryEntry:
     """Fold a restatement into the entry it restates.
 
     Keeps ``id`` so a caller holding it can still update or delete the entry,
     and ``created_at`` so it keeps meaning "when this fact was first learned".
+
+    An existing ``key`` is kept for the same reason as the id — something may
+    already refer to it. But an entry written before keys existed has none, and
+    a restatement that supplies one is the only chance it will ever get to
+    acquire a readable handle, so in that case the new key is adopted.
     """
-    return older.model_copy(update={"content": newer_content, "updated_at": now})
+    update: dict[str, object] = {"content": newer_content, "updated_at": now}
+    if older.key is None and newer_key:
+        update["key"] = newer_key
+    return older.model_copy(update=update)
 
 
 def compact_entries(entries: Sequence[MemoryEntry]) -> tuple[list[MemoryEntry], int]:

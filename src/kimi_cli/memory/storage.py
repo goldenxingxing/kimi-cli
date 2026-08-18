@@ -162,7 +162,7 @@ def upsert_entry(
             for index, existing in enumerate(kept):
                 if existing.id != verdict.target_id:
                     continue
-                merged = merge_entry(existing, entry.content, now=time.time())
+                merged = merge_entry(existing, entry.content, now=time.time(), newer_key=entry.key)
                 kept[index] = merged
                 _write_atomic(path, kept)
                 return UpsertResult(

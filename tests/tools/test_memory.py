@@ -228,3 +228,84 @@ def test_memory_params_accept_json_encoded_operation_object() -> None:
 def test_memory_params_reject_non_object_operation_strings(operation: str) -> None:
     with pytest.raises(ValidationError):
         Params.model_validate({"operation": operation})
+
+
+# --- Reading one entry back -------------------------------------------------
+#
+# Facts are listed in the opening context as one-line summaries rather than in
+# full, so the agent needs a way to read the one it decides is relevant.
+
+
+async def _add_keyed(tool: Memory, content: str, key: str, kind: str = "project"):
+    return await tool(
+        Params.model_validate(
+            {
+                "operation": {
+                    "op": "add",
+                    "kind": kind,
+                    "scope": "persistent",
+                    "content": content,
+                    "key": key,
+                }
+            }
+        )
+    )
+
+
+async def _get(tool: Memory, handle: str):
+    return await tool(Params.model_validate({"operation": {"op": "get", "handle": handle}}))
+
+
+async def test_get_reads_an_entry_by_its_key(memory_tool: Memory) -> None:
+    with tool_call_context("Memory"):
+        await _add_keyed(memory_tool, "acls lives at /Users/x/acls", "acls/repo-path")
+        body = payload(await _get(memory_tool, "acls/repo-path"))
+
+    assert body["content"] == "acls lives at /Users/x/acls"
+    assert body["key"] == "acls/repo-path"
+
+
+async def test_get_reads_an_entry_by_id_for_records_written_before_keys(
+    memory_tool: Memory,
+) -> None:
+    """An entry with no key can still only be addressed by its id."""
+    with tool_call_context("Memory"):
+        created = payload(await add(memory_tool, "an older fact", kind="project"))
+        body = payload(await _get(memory_tool, created["id"][:8]))
+
+    assert body["content"] == "an older fact"
+    assert body["key"] is None
+
+
+async def test_get_is_case_insensitive_about_the_handle(memory_tool: Memory) -> None:
+    with tool_call_context("Memory"):
+        await _add_keyed(memory_tool, "a fact", "acls/repo-path")
+        body = payload(await _get(memory_tool, "ACLS/Repo-Path"))
+
+    assert body["content"] == "a fact"
+
+
+async def test_get_says_so_when_the_handle_is_unknown(memory_tool: Memory) -> None:
+    """A wrong handle must be visible, not silently read as "no memory"."""
+    with tool_call_context("Memory"):
+        result = await _get(memory_tool, "no/such-thing")
+
+    assert result.is_error
+    assert "no/such-thing" in str(result)
+
+
+async def test_a_key_that_could_not_be_typed_back_is_refused_at_the_tool(
+    memory_tool: Memory,
+) -> None:
+    with pytest.raises(ValidationError):
+        Params.model_validate(
+            {
+                "operation": {
+                    "op": "add",
+                    "kind": "project",
+                    "scope": "persistent",
+                    "content": "x",
+                    "key": "not a valid key",
+                }
+            }
+        )

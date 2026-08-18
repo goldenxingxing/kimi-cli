@@ -20,6 +20,13 @@ from kimi_cli.tools.utils import load_desc
 
 NAME = "Memory"
 
+
+def _validate_key(value: str | None) -> str | None:
+    """Run a candidate key through the same rule the stored entry applies."""
+    if value is None:
+        return None
+    return MemoryEntry(kind="project", scope="session", content="x", key=value).key
+
 _BASE_DESCRIPTION = load_desc(Path(__file__).parent / "description.md")
 
 ListScope = Literal["session", "persistent", "all"]
@@ -37,6 +44,36 @@ class AddOp(BaseModel):
         ),
     )
     content: str = Field(min_length=1, description="The memory body. Be concise but specific.")
+    key: str | None = Field(
+        default=None,
+        description=(
+            "Short semantic handle, `namespace/slug` — e.g. `acls/repo-path`. "
+            "Lets a later session recognise this entry from a one-line index and "
+            "fetch it by name. Give one for `project` and `reference` entries, "
+            "which are read back on demand; group related entries under the same "
+            "namespace. Optional, but an entry without one can only be addressed "
+            "by an opaque id."
+        ),
+    )
+
+
+    @field_validator("key")
+    @classmethod
+    def _check_key(cls, value: str | None) -> str | None:
+        # Validated here as well as on the entry so a bad key is rejected as a
+        # tool-argument error the model can correct, rather than surfacing much
+        # later as a write failure with nothing pointing at the cause.
+        return _validate_key(value)
+
+
+class GetOp(BaseModel):
+    op: Literal["get"] = "get"
+    handle: str = Field(
+        description=(
+            "The `key` or id shown in parentheses in the memory index. "
+            "Returns the entry in full."
+        ),
+    )
 
 
 class ListOp(BaseModel):
@@ -56,7 +93,7 @@ class DeleteOp(BaseModel):
 
 
 class Params(BaseModel):
-    operation: AddOp | ListOp | UpdateOp | DeleteOp = Field(
+    operation: AddOp | GetOp | ListOp | UpdateOp | DeleteOp = Field(
         discriminator="op",
         description="The memory operation to perform.",
     )
@@ -166,6 +203,8 @@ class Memory(CallableTool2[Params]):
         op = params.operation
         if isinstance(op, AddOp):
             return await self._add(op)
+        if isinstance(op, GetOp):
+            return self._get(op)
         if isinstance(op, ListOp):
             return self._list(op)
         if isinstance(op, UpdateOp):
@@ -200,7 +239,7 @@ class Memory(CallableTool2[Params]):
 
     async def _add(self, op: AddOp) -> ToolReturnValue:
         if op.scope == "session":
-            entry = MemoryEntry(kind=op.kind, scope=op.scope, content=op.content)
+            entry = MemoryEntry(kind=op.kind, scope=op.scope, content=op.content, key=op.key)
             self._runtime.session.state.session_memory.append(entry)
             self._runtime.session.save_state()
             return _ok(
@@ -225,10 +264,44 @@ class Memory(CallableTool2[Params]):
 
         result = upsert_entry(
             self._persistent_file,
-            MemoryEntry(kind=op.kind, scope="persistent", content=op.content),
+            MemoryEntry(kind=op.kind, scope="persistent", content=op.content, key=op.key),
             expect_target_id=verdict.target_id if verdict.action == "merge" else None,
         )
         return _ok(output=json.dumps(_add_payload(result, op)), brief=_add_brief(result, op))
+
+    def _get(self, op: GetOp) -> ToolReturnValue:
+        """Return one entry in full, addressed by key or id.
+
+        Both are accepted because the index shows whichever the entry has: a
+        record written before keys existed can only offer its id.
+        """
+        wanted = op.handle.strip().lower()
+        candidates = list(self._runtime.session.state.session_memory) + read_entries(
+            self._persistent_file
+        )
+        for entry in candidates:
+            if (entry.key or "").lower() == wanted or entry.id.lower().startswith(wanted):
+                return _ok(
+                    output=json.dumps(
+                        {
+                            "id": entry.id,
+                            "key": entry.key,
+                            "kind": entry.kind,
+                            "scope": entry.scope,
+                            "content": entry.content,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    brief=f"Read {entry.handle}",
+                )
+        return ToolError(
+            message=(
+                f"No memory entry with handle {op.handle!r}. "
+                "Use the handle shown in parentheses in the memory index, "
+                "or `list` to see what is stored."
+            ),
+            brief="Not found",
+        )
 
     def _list(self, op: ListOp) -> ToolReturnValue:
         sections: list[str] = []
