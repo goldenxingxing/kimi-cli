@@ -16,7 +16,9 @@ def _entry(kind: str, content: str, key: str | None = None) -> MemoryEntry:
 
 def _summaries(n: int) -> list[SessionSummary]:
     return [
-        SessionSummary(session_id=f"s{i:04d}", trigger="compaction", summary=f"recap {i} " + "y" * 300)
+        SessionSummary(
+            session_id=f"s{i:04d}", trigger="compaction", summary=f"recap {i} " + "y" * 300
+        )
         for i in range(n)
     ]
 
@@ -214,7 +216,9 @@ class TestTruncationDirection:
         The one section where the usual direction is exactly backwards.
         """
         recents = [
-            SessionSummary(session_id=f"s{i:04d}", trigger="compaction", summary=f"RECAP-{i} " + "y" * 900)
+            SessionSummary(
+                session_id=f"s{i:04d}", trigger="compaction", summary=f"RECAP-{i} " + "y" * 900
+            )
             for i in range(10)
         ]
 
@@ -233,3 +237,19 @@ class TestTruncationDirection:
 
         assert "## Recorded facts (index)" in out
         assert "## Recent session summaries" in out
+
+
+class TestSuggestions:
+    def test_suggestions_are_marked_as_undecided(self) -> None:
+        """They were extracted, not approved. Reading them as fact is the one
+        way this feature could do harm."""
+        from kimi_cli.memory.candidates import MemoryCandidate
+
+        out = csm._render([], [], [MemoryCandidate(kind="project", content="a guessed fact")])
+
+        assert "not saved" in out.lower()
+        assert "have not been approved" in out.lower()
+        assert '"op": "promote"' in out
+
+    def test_no_suggestions_means_no_section(self) -> None:
+        assert "Suggested memories" not in csm._render([_entry("feedback", "x")], [], [])

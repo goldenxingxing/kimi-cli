@@ -50,3 +50,4 @@ static/
 .entire
 .claude
 .worktrees/
+benchmarks/locomo10.json

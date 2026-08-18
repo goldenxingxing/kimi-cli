@@ -1944,7 +1944,11 @@ class KimiSoul:
         if self._runtime.role == "root":
             from kimi_cli.memory.archivist import archive_compaction
 
-            _archive_task = asyncio.create_task(archive_compaction(self, compaction_result))
+            # `history` is what was compacted — the last point at which the
+            # detail exists, and so where memory candidates are noticed.
+            _archive_task = asyncio.create_task(
+                archive_compaction(self, compaction_result, history_before=history)
+            )
             _archive_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @staticmethod

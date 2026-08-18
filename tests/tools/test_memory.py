@@ -357,3 +357,74 @@ async def test_search_reports_no_matches_rather_than_failing(memory_tool: Memory
         body = payload(await _search(memory_tool, "nothing stored about this"))
 
     assert body["hits"] == []
+
+
+# --- Suggestions the agent did not have to think of --------------------------
+
+
+def _queue(runtime: Runtime):
+    from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
+
+    return CandidateFile(runtime.user_memory_dir / CANDIDATES_FILENAME)
+
+
+def _suggest(runtime: Runtime, content: str, kind: str = "project", key: str | None = None):
+    from kimi_cli.memory.candidates import MemoryCandidate
+
+    candidate = MemoryCandidate(kind=kind, content=content, key=key)  # type: ignore[arg-type]
+    _queue(runtime).add([candidate])
+    return _queue(runtime).read()[-1]
+
+
+async def _op(tool: Memory, **operation):
+    return await tool(Params.model_validate({"operation": operation}))
+
+
+async def test_promoting_a_suggestion_stores_it(memory_tool: Memory, runtime: Runtime) -> None:
+    candidate = _suggest(runtime, "acls lives at /Users/x/acls", key="acls/repo")
+
+    with tool_call_context("Memory"):
+        body = payload(await _op(memory_tool, op="promote", id=candidate.id))
+
+    assert body["promoted"] is True
+    stored = read_entries(persistent_file(runtime))
+    assert [e.content for e in stored] == ["acls lives at /Users/x/acls"]
+    assert _queue(runtime).read() == [], "a kept suggestion leaves the queue"
+
+
+async def test_a_refused_suggestion_stays_queued(runtime: Runtime) -> None:
+    """It was noticed automatically; a "no" now is not a "no" forever.
+
+    Dropping it on refusal would silently discard something the user might
+    want raised again later, with no record that it was ever proposed.
+    """
+    approval = RecordingApproval(approve=False)
+    runtime.approval = approval
+    tool = Memory(runtime)
+    candidate = _suggest(runtime, "a fact the user declined for now")
+
+    with tool_call_context("Memory"):
+        result = await _op(tool, op="promote", id=candidate.id)
+
+    assert result.is_error
+    assert not persistent_file(runtime).exists() or read_entries(persistent_file(runtime)) == []
+    assert [c.id for c in _queue(runtime).read()] == [candidate.id]
+
+
+async def test_dismissing_drops_it_without_asking(memory_tool: Memory, runtime: Runtime) -> None:
+    """Nothing was stored, so there is nothing to approve."""
+    candidate = _suggest(runtime, "not worth keeping")
+
+    with tool_call_context("Memory"):
+        body = payload(await _op(memory_tool, op="dismiss", id=candidate.id))
+
+    assert body["dismissed"] is True
+    assert _queue(runtime).read() == []
+
+
+async def test_promoting_something_that_is_gone_says_so(memory_tool: Memory) -> None:
+    with tool_call_context("Memory"):
+        result = await _op(memory_tool, op="promote", id="deadbeef")
+
+    assert result.is_error
+    assert "deadbeef" in str(result)

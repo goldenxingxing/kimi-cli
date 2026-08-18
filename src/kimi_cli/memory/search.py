@@ -17,6 +17,7 @@ finds it under ``trigram``.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -65,30 +66,195 @@ def _fingerprint(path: Path) -> str:
     return f"{st.st_size}:{st.st_mtime_ns}"
 
 
-def _quote(query: str) -> str:
-    """Turn free text into an FTS5 MATCH expression that cannot be a syntax error.
+#: Words that carry no signal in a question and would match half the store.
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "at",
+        "for",
+        "with",
+        "about",
+        "from",
+        "by",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "do",
+        "does",
+        "did",
+        "what",
+        "when",
+        "where",
+        "who",
+        "whom",
+        "why",
+        "how",
+        "which",
+        "that",
+        "this",
+        "these",
+        "those",
+        "it",
+        "its",
+        "his",
+        "her",
+        "their",
+        "they",
+        "them",
+        "he",
+        "she",
+        "you",
+        "your",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "may",
+        "might",
+        "must",
+        "have",
+        "has",
+        "had",
+        "if",
+        "then",
+        "than",
+        "so",
+        "as",
+        "such",
+        "not",
+        "no",
+        "nor",
+        "but",
+    }
+)
 
-    Callers pass what a model wrote, which routinely contains `.`, `/`, `-` and
-    quotes — all of which mean something to the FTS5 grammar. Everything is
-    wrapped as a quoted phrase, so the query is matched literally rather than
-    interpreted.
+#: Below this a term cannot be indexed by trigram and is left to the scan.
+_MIN_TERM_LEN = 3
+
+
+#: A CJK run longer than this is a sentence, not a phrase, and matching it
+#: whole finds nothing.
+_CJK_PHRASE_MAX = 4
+
+#: Two characters is the commonest Chinese word length and below what a trigram
+#: index can hold, so these are for the scan rather than for FTS5.
+_CJK_BIGRAM_LEN = 2
+
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def _cjk_terms(run: str) -> list[str]:
+    """Break a Chinese run into things that might actually appear in an entry.
+
+    Chinese is written without spaces and there is no segmenter here, so a
+    whole run is either the phrase someone meant or an entire sentence — and a
+    sentence never appears verbatim. Sliding character n-grams cover both: the
+    run itself when it is short enough to be a phrase, and otherwise every
+    3-character window, which is the shortest unit the trigram index can match.
+
+    Measured: "邮箱是怎么配置的" as one phrase found nothing; windowed, it finds
+    the entry about mailbox configuration.
     """
-    return '"' + query.replace('"', '""') + '"'
+    if len(run) <= _CJK_PHRASE_MAX:
+        return [run] if len(run) >= _MIN_TERM_LEN else []
+    return [run[i : i + _MIN_TERM_LEN] for i in range(len(run) - _MIN_TERM_LEN + 1)]
 
 
-def _scan(query: str, entries: Sequence[MemoryEntry], *, limit: int) -> list[SearchHit]:
-    """Case-insensitive substring match, for queries too short to index."""
-    needle = query.casefold()
+def _cjk_bigrams(query: str) -> list[str]:
+    """Every two-character window of the query's Chinese runs.
+
+    Two characters is the commonest Chinese word length — 邮箱, 配置, 路径 — and
+    is below what the trigram index can match, so these exist for the scan.
+    Measured: "邮箱是怎么配置的" finds nothing through the index at any window
+    size, and finds the right entry on the bigrams 邮箱 and 配置.
+    """
+    out: list[str] = []
+    for run in _CJK_RUN.findall(query):
+        for i in range(len(run) - _CJK_BIGRAM_LEN + 1):
+            gram = run[i : i + _CJK_BIGRAM_LEN]
+            if gram not in out:
+                out.append(gram)
+    return out
+
+
+def _terms(query: str) -> list[str]:
+    """Split a query into searchable terms.
+
+    Latin words are split and stripped of stopwords: a question is mostly
+    grammar, and matching on "when" or "the" returns the whole store. Chinese
+    goes through :func:`_cjk_terms`.
+    """
+    out: list[str] = []
+    for piece in re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9][A-Za-z0-9._\'-]*", query):
+        candidates = _cjk_terms(piece) if _CJK_RUN.fullmatch(piece) else [piece]
+        for term in candidates:
+            if len(term) < _MIN_TERM_LEN or term.casefold() in _STOPWORDS:
+                continue
+            if term not in out:
+                out.append(term)
+    return out
+
+
+def _match_expression(query: str) -> str | None:
+    """Build an FTS5 MATCH expression, or ``None`` if nothing is searchable.
+
+    Every term is quoted — models write `core.py` and `src/`, and FTS5 reads
+    `.`, `/` and `-` as syntax — then joined with OR so that any one of them
+    can hit.
+
+    The OR matters more than it sounds. Matching the whole query as a single
+    phrase, which is what this did at first, means a natural question can only
+    match a turn that contains that question verbatim. Measured on LoCoMo, that
+    scored exactly zero: 1,982 questions, no hits at any depth.
+    """
+    terms = _terms(query)
+    if not terms:
+        return None
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+
+
+def _scan(needles: Sequence[str], entries: Sequence[MemoryEntry], *, limit: int) -> list[SearchHit]:
+    """Substring match on any of *needles*, best-covered entry first.
+
+    Linear, and deliberately: it runs only when the index cannot help, over a
+    store small enough that the cost is not measurable. Ranking by how many
+    needles an entry contains keeps a scan over many fragments from returning
+    whichever entry happened to be written first.
+    """
+    folded = [n.casefold() for n in needles if n]
+    if not folded:
+        return []
+    scored: list[tuple[int, int, MemoryEntry, int]] = []
+    for order, entry in enumerate(entries):
+        body = entry.content.casefold()
+        positions = [body.find(n) for n in folded]
+        matched = [p for p in positions if p >= 0]
+        if matched:
+            scored.append((len(matched), -order, entry, min(matched)))
+    scored.sort(reverse=True)
+
     hits: list[SearchHit] = []
-    for entry in entries:
-        position = entry.content.casefold().find(needle)
-        if position < 0:
-            continue
+    for _, _, entry, position in scored[:limit]:
         start = max(0, position - 12)
-        snippet = entry.content[start : position + len(query) + 12].replace("\n", " ")
+        snippet = entry.content[start : position + 40].replace("\n", " ")
         hits.append(SearchHit(entry.id, entry.handle, entry.kind, snippet.strip()))
-        if len(hits) >= limit:
-            break
     return hits
 
 
@@ -110,8 +276,11 @@ class MemorySearchIndex:
         query = (query or "").strip()
         if not query:
             return []
-        if len(query) < FTS_MIN_QUERY_LEN:
-            return _scan(query, entries, limit=limit)
+        expression = _match_expression(query)
+        if expression is None:
+            # Nothing long enough to index — two-character Chinese, a bare
+            # number, a stopword. The scan still finds those.
+            return _scan([query, *_cjk_bigrams(query)], entries, limit=limit)
         try:
             with sqlite3.connect(self._db_path) as db:
                 db.executescript(_SCHEMA)
@@ -119,12 +288,18 @@ class MemorySearchIndex:
                 rows = db.execute(
                     "SELECT entry_id, handle, kind, snippet(entries, 3, '', '', '…', 24) "
                     "FROM entries WHERE entries MATCH ? ORDER BY rank LIMIT ?",
-                    (_quote(query), limit),
+                    (expression, limit),
                 ).fetchall()
         except sqlite3.Error:
             logger.warning("memory search failed; treating as no results", exc_info=True)
             return []
-        return [SearchHit(*row) for row in rows]
+        if rows:
+            return [SearchHit(*row) for row in rows]
+        # The index found nothing. For Chinese that is expected rather than
+        # conclusive: the words that carry the meaning are usually two
+        # characters, which no trigram index holds.
+        bigrams = _cjk_bigrams(query)
+        return _scan(bigrams, entries, limit=limit) if bigrams else []
 
     def _sync(self, db: sqlite3.Connection, entries: Sequence[MemoryEntry]) -> None:
         """Rebuild the index when the source file has changed since last time."""

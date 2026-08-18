@@ -80,3 +80,55 @@ def test_results_are_capped(tmp_path: Path) -> None:
     index, _ = _index(tmp_path)
     hits = index.search("common", _entries(*[f"common token {i}" for i in range(40)]), limit=5)
     assert len(hits) == 5
+
+
+class TestQueryConstruction:
+    """How the query is built turned out to matter more than anything indexed.
+
+    Measured on LoCoMo — 1,982 questions with the answering turn labelled —
+    matching the whole query as one phrase scored 0.0% recall at every depth,
+    because a question never appears verbatim inside an answer. Splitting it
+    into OR-ed terms scored 65.3% at recall@10, past a BM25 baseline's 57.9%.
+    """
+
+    def test_a_question_matches_a_turn_that_answers_it(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        entries = _entries(
+            "Caroline: I went to a LGBTQ support group yesterday and it was powerful.",
+            "Melanie: nice weather today",
+        )
+
+        hits = index.search("When did Caroline go to the LGBTQ support group?", entries)
+
+        assert [h.handle for h in hits][:1] == ["p/0"]
+
+    def test_grammar_alone_matches_nothing(self, tmp_path: Path) -> None:
+        """Otherwise "when did the" would return the entire store."""
+        index, _ = _index(tmp_path)
+        assert index.search("when did the", _entries("some content here")) == []
+
+    def test_a_chinese_question_matches_its_answer(self, tmp_path: Path) -> None:
+        """Chinese has no spaces and no segmenter here.
+
+        The words that carry meaning are two characters — 邮箱, 配置 — which is
+        below what a trigram index holds, so this only works via the scan.
+        """
+        index, _ = _index(tmp_path)
+        entries = _entries("126 邮箱已接入并验证可用，配置在 ~/mail.env", "无关的一条记录")
+
+        hits = index.search("邮箱是怎么配置的", entries)
+
+        assert [h.handle for h in hits][:1] == ["p/0"]
+
+    def test_a_path_like_term_is_not_split_or_read_as_syntax(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        hits = index.search("where is core.py", _entries("the file core.py lives in src/"))
+        assert [h.handle for h in hits] == ["p/0"]
+
+    def test_an_entry_matching_more_of_the_query_ranks_first(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        entries = _entries("只提到配置", "同时提到邮箱和配置两件事")
+
+        hits = index.search("邮箱配置", entries)
+
+        assert hits[0].handle == "p/1"

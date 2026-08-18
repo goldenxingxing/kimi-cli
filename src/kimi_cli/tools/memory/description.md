@@ -104,6 +104,17 @@ When a fact you already have recorded has changed, `update` it in place
 instead of adding a new entry that says it supersedes the old one. The handle
 shown in the index is what `update` and `delete` accept.
 
+## Suggested memories
+
+The snapshot may also list suggestions — facts noticed automatically at the end
+of an earlier conversation, which nobody has decided on yet. They are **not**
+stored and **not** established fact; treat them as questions, not answers.
+
+When one is relevant to what you are doing, say so and let the user decide,
+then `promote` it to keep it or `dismiss` it to drop it. Promoting asks for the
+same approval an explicit `add` does. Do not promote in bulk to tidy the list —
+an unwanted memory costs more than a missing one, every session, forever.
+
 ## Handles
 
 Give `project` and `reference` entries a `key` when you add them: a short
@@ -117,6 +128,8 @@ opaque id fragment.
 - `add(kind, scope, content, key=None)` → returns the new entry's `id`
 - `get(handle)` → the full entry, addressed by `key` or `id`
 - `search(query)` → handles and snippets for entries containing the text
+- `promote(id)` → keep a suggested memory (asks for approval)
+- `dismiss(id)` → drop a suggested memory
 - `list(scope)` → returns formatted entries (use `scope="all"` for everything)
 - `update(id, content)` → replace the body of an existing entry
 - `delete(id)` → remove an entry by id

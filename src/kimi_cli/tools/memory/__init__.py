@@ -15,6 +15,7 @@ from kimi_cli.memory import (
     update_entry,
     upsert_entry,
 )
+from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
 from kimi_cli.memory.search import MemorySearchIndex
 from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle
 from kimi_cli.soul.agent import Runtime
@@ -68,6 +69,16 @@ class AddOp(BaseModel):
         return _validate_key(value)
 
 
+class PromoteOp(BaseModel):
+    op: Literal["promote"] = "promote"
+    id: str = Field(description="Id of the suggested memory to keep, from the suggestions list.")
+
+
+class DismissOp(BaseModel):
+    op: Literal["dismiss"] = "dismiss"
+    id: str = Field(description="Id of the suggested memory to drop, from the suggestions list.")
+
+
 class SearchOp(BaseModel):
     op: Literal["search"] = "search"
     query: str = Field(
@@ -117,9 +128,11 @@ class DeleteOp(BaseModel):
 
 
 class Params(BaseModel):
-    operation: AddOp | GetOp | SearchOp | ListOp | UpdateOp | DeleteOp = Field(
-        discriminator="op",
-        description="The memory operation to perform.",
+    operation: AddOp | GetOp | SearchOp | PromoteOp | DismissOp | ListOp | UpdateOp | DeleteOp = (
+        Field(
+            discriminator="op",
+            description="The memory operation to perform.",
+        )
     )
 
     @field_validator("operation", mode="before")
@@ -239,6 +252,10 @@ class Memory(CallableTool2[Params]):
             return self._get(op)
         if isinstance(op, SearchOp):
             return self._search(op)
+        if isinstance(op, PromoteOp):
+            return await self._promote(op)
+        if isinstance(op, DismissOp):
+            return self._dismiss(op)
         if isinstance(op, ListOp):
             return self._list(op)
         if isinstance(op, UpdateOp):
@@ -339,6 +356,64 @@ class Memory(CallableTool2[Params]):
             brief="Not found",
         )
 
+    @property
+    def _candidate_file(self) -> CandidateFile:
+        return CandidateFile(self._runtime.user_memory_dir / CANDIDATES_FILENAME)
+
+    async def _promote(self, op: PromoteOp) -> ToolReturnValue:
+        """Keep a suggested memory — through the same approval as any add.
+
+        The suggestion was produced automatically; the decision is not. Taken
+        off the queue only once the write succeeds, so a refusal leaves it
+        there to be raised again rather than silently discarding it.
+        """
+        pending = self._candidate_file.read()
+        wanted = op.id.strip().lower()
+        candidate = next((c for c in pending if c.id.lower() == wanted), None)
+        if candidate is None:
+            return ToolError(
+                message=(
+                    f"No suggested memory with id {op.id!r}. It may have been "
+                    "promoted, dismissed, or expired."
+                ),
+                brief="Not found",
+            )
+
+        rejection = await self._request_persistent_approval(
+            "add",
+            f"Keep this suggested memory?\n\n[{candidate.kind}] {candidate.content}",
+        )
+        if rejection is not None:
+            return rejection
+
+        result = upsert_entry(
+            self._persistent_file,
+            MemoryEntry(
+                kind=candidate.kind,
+                scope="persistent",
+                content=candidate.content,
+                key=candidate.key,
+            ),
+        )
+        self._candidate_file.take(candidate.id)
+        return _ok(
+            output=json.dumps(
+                {"id": result.entry.id, "key": result.entry.key, "promoted": True},
+                ensure_ascii=False,
+            ),
+            brief=f"Kept {result.entry.handle}",
+        )
+
+    def _dismiss(self, op: DismissOp) -> ToolReturnValue:
+        """Drop a suggestion. No approval — nothing was stored to begin with."""
+        taken = self._candidate_file.take(op.id)
+        if taken is None:
+            return ToolError(message=f"No suggested memory with id {op.id!r}.", brief="Not found")
+        return _ok(
+            output=json.dumps({"id": taken.id, "dismissed": True}, ensure_ascii=False),
+            brief="Dismissed",
+        )
+
     def _search(self, op: SearchOp) -> ToolReturnValue:
         """Find entries by content when the index summary is not enough.
 
@@ -361,8 +436,7 @@ class Memory(CallableTool2[Params]):
                 {
                     "query": op.query,
                     "hits": [
-                        {"handle": h.handle, "kind": h.kind, "snippet": h.snippet}
-                        for h in hits
+                        {"handle": h.handle, "kind": h.kind, "snippet": h.snippet} for h in hits
                     ],
                 },
                 ensure_ascii=False,

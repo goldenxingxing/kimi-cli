@@ -15,10 +15,15 @@ Both write to ``{user_memory_dir}/recent.jsonl`` with file locking.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from kosong.message import Message
 
+from kimi_cli.memory.candidates import (
+    CANDIDATES_FILENAME,
+    CandidateFile,
+    MemoryCandidate,
+)
 from kimi_cli.memory.recent import (
     RECENT_FILENAME,
     SessionSummary,
@@ -32,6 +37,34 @@ from kimi_cli.wire.types import TextPart
 if TYPE_CHECKING:
     from kimi_cli.soul.kimisoul import KimiSoul
 
+
+_EXTRACTION_PROMPT = """\
+From the conversation below, list facts worth carrying into future \
+conversations with this user.
+
+Include only what stays true after this conversation ends:
+- user  — who they are, their role, how they work
+- feedback — a correction or standing instruction they gave you
+- project — a durable fact about a repository, system or decision
+- reference — where something lives that you had to find
+
+Exclude anything tied to this conversation: what you did, what is in flight, \
+file contents, command output, anything you would have to re-check to rely on.
+Exclude anything phrased as a plan rather than a fact.
+
+Reply with a JSON array, at most 5 objects, each:
+  {"kind": "...", "content": "one self-contained sentence", "key": "ns/slug"}
+
+`key` is optional and only for project/reference. Reply `[]` if nothing \
+qualifies — that is the common answer, and a wrong entry costs more than a \
+missing one.
+
+CONVERSATION:
+"""
+
+#: Cap on what is fed to the extractor. The tail is where durable statements
+#: are made; sending more costs tokens for progressively less.
+_EXTRACTION_TAIL_CHARS = 12_000
 
 _MIN_HISTORY_FOR_SESSION_END_SUMMARY = 4
 RAW_FALLBACK_TAIL_MESSAGES = 6
@@ -137,13 +170,24 @@ async def _archive(
 async def archive_compaction(
     soul: KimiSoul,
     compaction_result: CompactionResult,
+    *,
+    history_before: Sequence[Message] | None = None,
 ) -> None:
-    """Archive the summary produced by the most recent context compaction."""
+    """Archive the summary produced by the most recent context compaction.
+
+    ``history_before`` is what was about to be collapsed. Compaction is the
+    last moment that detail exists, so it is where candidates are extracted
+    from; without it the caller's history is already the summary.
+    """
     text = summary_from_compaction_result(compaction_result)
     if not text:
         # Compaction may have been a no-op (too few messages to summarize).
         return
     await _archive(soul, text, "compaction")
+    # The history about to be collapsed is the last chance to notice anything
+    # in it worth keeping; after this it exists only as a summary.
+    if history_before and soul.runtime.config.memory.propose_candidates:
+        await propose_candidates(soul, history_before)
 
 
 async def archive_on_session_end(soul: KimiSoul) -> None:
@@ -175,3 +219,97 @@ async def archive_on_session_end(soul: KimiSoul) -> None:
 
     if summary_text:
         await _archive(soul, summary_text, "session_end", degraded=degraded)
+
+
+async def propose_candidates(soul: KimiSoul, history: Sequence[Message]) -> int:
+    """Notice facts worth keeping and queue them for approval.
+
+    Returns how many proposals were added. Never raises and never writes to
+    persistent memory: a candidate is a suggestion, and the user still approves
+    each one. What this removes is the requirement that the agent *think* to
+    record something at the moment it comes up.
+
+    Runs where summaries are already produced, so it costs one extra call at
+    compaction and session end rather than anything per-turn.
+    """
+    try:
+        text = extract_text(list(history))
+        if len(text) < 200:
+            return 0
+        raw = await _ask_for_candidates(soul, text[-_EXTRACTION_TAIL_CHARS:])
+        proposals = _parse_candidates(raw, session_id=soul.runtime.session.id)
+        if not proposals:
+            return 0
+        CandidateFile(soul.runtime.user_memory_dir / CANDIDATES_FILENAME).add(proposals)
+        logger.info("queued {n} memory candidate(s) for approval", n=len(proposals))
+        return len(proposals)
+    except Exception:
+        logger.warning("memory candidate extraction failed", exc_info=True)
+        return 0
+
+
+async def _ask_for_candidates(soul: KimiSoul, conversation: str) -> str:
+    """One completion, no tools, no history. Returns raw text."""
+    import kosong
+    from kosong.tooling.empty import EmptyToolset
+
+    llm = soul.runtime.llm
+    if llm is None:
+        return ""
+    result = await kosong.step(
+        llm.chat_provider,
+        "You extract durable facts from conversations. You reply with JSON and nothing else.",
+        EmptyToolset(),
+        [Message(role="user", content=[TextPart(text=_EXTRACTION_PROMPT + conversation)])],
+    )
+    return extract_text([result.message])
+
+
+def _parse_candidates(raw: str, *, session_id: str | None) -> list[MemoryCandidate]:
+    """Read the model's JSON, discarding anything malformed.
+
+    Deliberately forgiving about what surrounds the array and strict about what
+    goes in it: an unusable proposal should vanish here rather than reach the
+    user as something to approve.
+    """
+    import json
+    import re
+
+    if not raw.strip():
+        return []
+    match = re.search(r"\[.*\]", raw, re.S)
+    if match is None:
+        return []
+    try:
+        parsed: object = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    rows = cast(list[object], parsed)
+
+    out: list[MemoryCandidate] = []
+    for raw_row in rows[:5]:
+        if not isinstance(raw_row, dict):
+            continue
+        row = cast(dict[str, object], raw_row)
+        content = str(row.get("content") or "").strip()
+        kind = str(row.get("kind") or "").strip()
+        if not content or kind not in ("user", "feedback", "project", "reference"):
+            continue
+        key = row.get("key")
+        try:
+            out.append(
+                MemoryCandidate(
+                    kind=kind,  # type: ignore[arg-type]
+                    content=content,
+                    key=str(key).strip() if key else None,
+                    session_id=session_id,
+                )
+            )
+        except Exception:
+            # A key that fails validation should not take the fact with it.
+            out.append(
+                MemoryCandidate(kind=kind, content=content, session_id=session_id)  # type: ignore[arg-type]
+            )
+    return out

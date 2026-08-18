@@ -101,6 +101,23 @@ class LoopControl(BaseModel):
     leaving ~300 KiB headroom for tool schemas and generation parameters."""
 
 
+class MemoryConfig(BaseModel):
+    """Cross-session memory behaviour."""
+
+    propose_candidates: bool = Field(
+        default=True,
+        description=(
+            "Notice facts worth keeping and queue them for approval. Without "
+            "this, persistent memory only ever contains what the agent thought "
+            "to record with a tool call at the moment it came up, so anything "
+            "it did not think of is lost. Proposals are never written to memory "
+            "on their own — they wait for the same approval an explicit add "
+            "requires. Costs one extra model call where summaries are already "
+            "produced: at compaction and session end."
+        ),
+    )
+
+
 class BackgroundConfig(BaseModel):
     """Background task runtime configuration."""
 
@@ -281,6 +298,9 @@ class Config(BaseModel):
             "project root (the nearest ``.git`` directory above the work dir). "
             "Missing paths are silently skipped."
         ),
+    )
+    memory: MemoryConfig = Field(
+        default_factory=lambda: MemoryConfig(), description="Memory configuration"
     )
     skip_skill_dirs: list[str] = Field(
         default_factory=list,

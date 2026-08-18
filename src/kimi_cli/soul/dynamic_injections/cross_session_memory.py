@@ -5,6 +5,11 @@ from typing import TYPE_CHECKING, override
 
 from kosong.message import Message
 
+from kimi_cli.memory.candidates import (
+    CANDIDATES_FILENAME,
+    CandidateFile,
+    MemoryCandidate,
+)
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.recent import (
     RECENT_FILENAME,
@@ -86,6 +91,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         try:
             user_memory_dir = soul.runtime.user_memory_dir
             persistent = read_entries(user_memory_dir / _PERSISTENT_FILENAME)
+            pending = CandidateFile(user_memory_dir / CANDIDATES_FILENAME).read()
             recent = read_recent_summaries(
                 user_memory_dir / RECENT_FILENAME,
                 limit=_RECENT_INJECTION_LIMIT,
@@ -94,7 +100,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
             logger.warning("cross-session memory read failed", exc_info=True)
             return []
 
-        rendered = _render(persistent, recent)
+        rendered = _render(persistent, recent, pending)
         if not rendered:
             return []
 
@@ -104,6 +110,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
 def _render(
     persistent: Sequence[MemoryEntry],
     recent: Sequence[SessionSummary],
+    pending: Sequence[MemoryCandidate] = (),
 ) -> str:
     sections: list[str] = []
 
@@ -149,6 +156,24 @@ def _render(
             "\n\n".join(s.render() for s in recent), _RECENT_BUDGET_CHARS, keep="tail"
         )
         sections.append("\n".join([*lines, body]))
+
+    if pending:
+        # Noticed automatically, and deliberately not stored. Listing them here
+        # is the whole mechanism: the agent proposes, the user decides, and
+        # nothing enters memory on the strength of an extraction alone.
+        lines = [
+            "## Suggested memories (not saved)",
+            (
+                "Noticed in earlier conversations and awaiting your decision. Raise one "
+                "with the user when it is relevant, then "
+                '`Memory(operation={"op": "promote", "id": "<id>"})` to keep it or '
+                '`{"op": "dismiss", "id": "<id>"}` to drop it. Do not treat these as '
+                "established fact — they have not been approved:"
+            ),
+            "",
+        ]
+        lines.extend(c.render_index() for c in pending)
+        sections.append("\n".join(lines))
 
     if not sections:
         return ""

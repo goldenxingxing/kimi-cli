@@ -62,6 +62,7 @@ def test_default_config_dump():
             "merge_all_available_skills": True,
             "extra_skill_dirs": [],
             "telemetry": True,
+            "memory": {"propose_candidates": True},
             "skip_skill_dirs": [],
             "skip_afk_prompt_injection": False,
         }
