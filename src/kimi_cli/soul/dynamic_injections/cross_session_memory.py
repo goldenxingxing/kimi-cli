@@ -205,7 +205,10 @@ def _fit(text: str, budget: int, *, keep: str = "head") -> str:
     """
     if len(text) <= budget:
         return text
-    note = "… (truncated — use `list` to see everything)"
+    # Not `list`: that returns every entry in full, which is the cost this
+    # whole section exists to avoid. Someone reaching a truncated list is
+    # looking for one thing, and `search` is how you find one thing.
+    note = "… (truncated — use `search` to reach what is not shown)"
     lines = text.splitlines()
     room = budget - len(note) - 1
     if keep == "tail":

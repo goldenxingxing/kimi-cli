@@ -7,9 +7,11 @@ also removing the user from the decision.
 
 from __future__ import annotations
 
+import inspect
 import time
 from pathlib import Path
 
+import kimi_cli.memory.archivist as archivist_module
 from kimi_cli.memory.archivist import _parse_candidates
 from kimi_cli.memory.candidates import (
     CANDIDATE_TTL_SECONDS,
@@ -183,3 +185,35 @@ class TestExtractionCall:
             )
             == 0
         )
+
+
+class TestExtractionPromptShape:
+    """The transcript must sit *inside* the prompt, not after it.
+
+    With the conversation appended last, the model treats its final turn as the
+    live one and continues it instead of analysing it — against real sessions
+    it replied to the transcript, or emitted the tool call the transcript was
+    about to make, and returned no JSON at all. These assertions are cheap and
+    the failure they guard against is silent: `propose_candidates` swallows
+    everything, so an unparseable answer is indistinguishable from "nothing
+    worth keeping".
+    """
+
+    def test_the_conversation_is_embedded_and_the_task_stated_after_it(self) -> None:
+        from kimi_cli.memory.archivist import _EXTRACTION_PROMPT
+
+        prompt = _EXTRACTION_PROMPT.format(conversation="user: hello\nassistant: hi")
+
+        assert "<transcript>\nuser: hello" in prompt
+        assert prompt.index("</transcript>") < prompt.index("JSON array"), (
+            "the instruction has to come after the transcript, or it is what gets continued"
+        )
+        assert not prompt.rstrip().endswith("hi")
+
+    def test_the_call_builds_the_prompt_rather_than_concatenating(self, monkeypatch) -> None:
+        """A stray `PROMPT + conversation` would pass every other test here."""
+        from kimi_cli.memory.archivist import _EXTRACTION_PROMPT
+
+        assert "{conversation}" in _EXTRACTION_PROMPT
+        source = inspect.getsource(archivist_module._ask_for_candidates)
+        assert "_EXTRACTION_PROMPT.format(conversation=conversation)" in source

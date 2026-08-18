@@ -17,7 +17,7 @@ from pathlib import Path
 
 DATA = Path(__file__).with_name("locomo10.json")
 """Download: https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"""
-TOP_K = (1, 5, 10)
+TOP_K = (1, 3, 8)  # match memory_recall.py — the depth the tool returns
 K1, B = 1.5, 0.75
 
 

@@ -30,7 +30,9 @@ from kimi_cli.memory.search import MemorySearchIndex
 
 DATA = Path(__file__).with_name("locomo10.json")
 """Download: https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"""
-TOP_K = (1, 5, 10)
+#: The tool returns eight hits. Reporting recall@10 would be scoring a depth
+#: no caller ever sees, so the deepest figure here is the one that ships.
+TOP_K = (1, 3, 8)
 
 _STOP = {
     "what",
