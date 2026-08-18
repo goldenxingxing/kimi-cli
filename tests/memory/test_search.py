@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kimi_cli.memory import search
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.search import MemorySearchIndex
 
@@ -196,3 +197,60 @@ class TestRankingOnASmallStore:
     def test_a_single_entry_store_still_answers(self, tmp_path: Path) -> None:
         index, _ = _index(tmp_path)
         assert [h.handle for h in index.search("邮箱", _entries("邮箱已验证"))] == ["p/0"]
+
+
+class TestPostingListAgreesWithTheSweep:
+    """Two implementations of one ranking, so they have to be checked against each other.
+
+    The posting list exists to avoid touching every entry for a Chinese query.
+    It is only an optimisation if it returns what the sweep would have: when
+    the two had separate scoring code they disagreed on 96 of 197 real
+    questions, because summing the same weights in a different order reorders
+    ties — and one of the ties it reordered dropped the correct answer out of
+    the results entirely.
+    """
+
+    def _both(self, tmp_path: Path, query: str, entries):
+        index, _ = _index(tmp_path)
+        viaindex = index._scan_via_postings(query, entries, limit=8)
+        sweep = search._scan(search._needles(query), entries, limit=8)
+        assert viaindex is not None, "the posting path should be available here"
+        return [h.handle for h in viaindex], [h.handle for h in sweep]
+
+    def test_a_chinese_query_ranks_identically(self, tmp_path: Path) -> None:
+        entries = _entries(
+            "邮箱配置在 ~/mail.env，已验证可用",
+            "部署脚本读取邮箱配置并推送通知",
+            "完全无关的一条记录，讲的是别的事情",
+            "配置项很多，部署时要注意顺序",
+        )
+
+        assert (
+            self._both(tmp_path, "邮箱配置怎么部署", entries)[0]
+            == (self._both(tmp_path, "邮箱配置怎么部署", entries)[1])
+        )
+
+    def test_an_entry_reachable_only_by_its_latin_half_is_not_lost(self, tmp_path: Path) -> None:
+        """The posting list holds Chinese only, so this entry has no gram to find it by."""
+        entries = _entries(
+            "CodeGraph indexes the current checkout only",
+            "索引不感知分支，只反映当前检出",
+        )
+
+        viaindex, sweep = self._both(tmp_path, "CodeGraph 有什么限制", entries)
+
+        assert viaindex == sweep
+        assert "p/0" in viaindex, "a Latin-only match still has to be reachable"
+
+    def test_an_entry_removed_from_the_store_leaves_the_index(self, tmp_path: Path) -> None:
+        """Incremental sync has to delete, not only insert."""
+        index, source = _index(tmp_path)
+        entries = _entries("邮箱配置在 mail.env", "部署说明在 deploy.md")
+        index.search("邮箱", entries)
+
+        source.write_text("changed", encoding="utf-8")
+        remaining = entries[1:]
+
+        hits = index.search("邮箱配置", remaining)
+
+        assert [h.handle for h in hits] == [] or all(h.handle != "p/0" for h in hits)

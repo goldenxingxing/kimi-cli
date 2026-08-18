@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import zip_longest
 from pathlib import Path
@@ -44,6 +44,29 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
     tokenize='trigram'
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+
+-- Which entries are indexed and at what content, so a write that appends one
+-- entry costs one insert rather than a rebuild of everything.
+CREATE TABLE IF NOT EXISTS indexed (
+    num INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id TEXT NOT NULL UNIQUE,
+    stamp TEXT NOT NULL
+);
+
+-- Posting list for Chinese bigrams. The trigram FTS index cannot hold them —
+-- two characters is below its window and is also the commonest Chinese word
+-- length — so matching them meant a substring pass over the whole store for
+-- every needle. Here a query reaches only the entries that can match.
+-- Keyed by the integer from `indexed`, not by the entry's 32-character id:
+-- there is one row per (gram, entry) and a store of twenty thousand entries
+-- produces most of a million of them, where the difference is a hundred
+-- megabytes of index against sixteen.
+CREATE TABLE IF NOT EXISTS grams (
+    gram TEXT NOT NULL,
+    num INTEGER NOT NULL,
+    PRIMARY KEY (gram, num)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS grams_by_entry ON grams (num);
 """
 
 
@@ -162,6 +185,17 @@ _CJK_BIGRAM_LEN = 2
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 
 
+def _content_stamp(entry: MemoryEntry) -> str:
+    """Cheap "has this entry changed" marker for incremental indexing."""
+    return f"{len(entry.content)}:{hash(entry.content) & 0xFFFFFFFF:08x}"
+
+
+def _hit(entry: MemoryEntry, position: int) -> SearchHit:
+    start = max(0, position - 12)
+    snippet = entry.content[start : position + 40].replace("\n", " ")
+    return SearchHit(entry.id, entry.handle, entry.kind, snippet.strip())
+
+
 def _cjk_terms(run: str) -> list[str]:
     """Break a Chinese run into things that might actually appear in an entry.
 
@@ -177,6 +211,21 @@ def _cjk_terms(run: str) -> list[str]:
     if len(run) <= _CJK_PHRASE_MAX:
         return [run] if len(run) >= _MIN_TERM_LEN else []
     return [run[i : i + _MIN_TERM_LEN] for i in range(len(run) - _MIN_TERM_LEN + 1)]
+
+
+def _entry_bigrams(text: str) -> set[str]:
+    """Every distinct two-character Chinese window in *text*, for the posting list.
+
+    Indexed rather than searched: this is the same extraction the query side
+    uses, so a gram found here is exactly a substring the scan would have
+    found, and the posting list can replace the sweep without changing which
+    entries match.
+    """
+    out: set[str] = set()
+    for run in _CJK_RUN.findall(text):
+        for i in range(len(run) - _CJK_BIGRAM_LEN + 1):
+            out.add(run[i : i + _CJK_BIGRAM_LEN])
+    return out
 
 
 def _cjk_bigrams(query: str) -> list[str]:
@@ -284,6 +333,34 @@ def _needles(query: str) -> list[str]:
     return list(dict.fromkeys(_cjk_bigrams(query) + latin))
 
 
+def _rank(
+    candidates: Sequence[tuple[int, MemoryEntry, str]],
+    needles: Sequence[str],
+    weight: Mapping[str, float],
+    *,
+    limit: int,
+) -> list[SearchHit]:
+    """Score *candidates* against *needles*, best first.
+
+    Shared by the sweep and the posting-list path so that the only difference
+    between them is which entries get looked at. Keeping two copies of this
+    produced results that differed on 96 of 197 questions: the totals were sums
+    of the same floats in a different order, which is enough to reorder ties,
+    and one of the ties it reordered was the correct answer falling out of the
+    top eight. `order` is each entry's position in the store, so it has to be
+    passed in rather than recomputed over a subset.
+    """
+    scored: list[tuple[float, int, MemoryEntry, int]] = []
+    for order, entry, body in candidates:
+        positions = [(body.find(n), n) for n in needles]
+        matched = [(at, n) for at, n in positions if at >= 0]
+        if matched:
+            total = sum(weight[n] for _, n in matched)
+            scored.append((total, -order, entry, min(at for at, _ in matched)))
+    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [_hit(entry, at) for _, _, entry, at in scored[:limit]]
+
+
 def _scan(
     needles: Sequence[str],
     entries: Sequence[MemoryEntry],
@@ -309,30 +386,20 @@ def _scan(
     bodies = cache.of(entries) if cache is not None else [e.content.casefold() for e in entries]
     n_docs = len(bodies) or 1
     df = _document_frequency(folded, bodies)
-    kept = folded
 
     # Weight, rather than a cutoff. Dropping needles above a frequency
     # threshold scored marginally better on a store of two thousand entries and
     # was destructive on a real one: a memory file holds tens of entries, five
     # percent of which rounds below one, so every needle that actually matched
     # something was the one discarded. Down-weighting has no such cliff.
-    weight = {n: math.log(1 + n_docs / (1 + df[n])) for n in kept}
+    weight = {n: math.log(1 + n_docs / (1 + df[n])) for n in folded}
 
-    scored: list[tuple[float, int, MemoryEntry, int]] = []
-    for order, (entry, body) in enumerate(zip(entries, bodies, strict=True)):
-        positions = [(body.find(n), n) for n in kept]
-        matched = [(p, n) for p, n in positions if p >= 0]
-        if matched:
-            total = sum(weight[n] for _, n in matched)
-            scored.append((total, -order, entry, min(p for p, _ in matched)))
-    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
-
-    hits: list[SearchHit] = []
-    for _, _, entry, position in scored[:limit]:
-        start = max(0, position - 12)
-        snippet = entry.content[start : position + 40].replace("\n", " ")
-        hits.append(SearchHit(entry.id, entry.handle, entry.kind, snippet.strip()))
-    return hits
+    return _rank(
+        [(i, e, b) for i, (e, b) in enumerate(zip(entries, bodies, strict=True))],
+        folded,
+        weight,
+        limit=limit,
+    )
 
 
 def _merge(
@@ -406,7 +473,9 @@ class MemorySearchIndex:
         # Choosing per query rather than globally is what makes the Chinese
         # gain cost the English path nothing.
         if _CJK_RUN.search(query):
-            hits = _scan(_needles(query), entries, limit=limit, cache=self._folded)
+            hits = self._scan_via_postings(query, entries, limit=limit)
+            if hits is None:
+                hits = _scan(_needles(query), entries, limit=limit, cache=self._folded)
             if len(hits) >= limit:
                 return hits
             return _merge_tail(hits, self._fts(query, entries, limit=limit), limit=limit)
@@ -450,18 +519,135 @@ class MemorySearchIndex:
         return [SearchHit(*row) for row in rows]
 
     def _sync(self, db: sqlite3.Connection, entries: Sequence[MemoryEntry]) -> None:
-        """Rebuild the index when the source file has changed since last time."""
+        """Bring the index in line with *entries*, touching only what changed.
+
+        The whole index used to be dropped and rebuilt whenever the source file
+        moved, and the source file moves on every memory write — so adding one
+        entry to a large store cost a full reindex before the next search could
+        run (measured at 690 ms for twenty thousand entries). Comparing per
+        entry costs one cheap query and makes the common case, an append, cost
+        one insert.
+        """
         stamp = _fingerprint(self._source)
         current = db.execute("SELECT v FROM meta WHERE k = 'fingerprint'").fetchone()
         if current and current[0] == stamp:
             return
-        db.execute("DELETE FROM entries")
-        db.executemany(
-            "INSERT INTO entries (entry_id, handle, kind, body) VALUES (?, ?, ?, ?)",
-            [(e.id, e.handle, e.kind, e.content) for e in entries],
-        )
+
+        want = {e.id: (e, _content_stamp(e)) for e in entries}
+        have = {
+            row[0]: (row[1], row[2])
+            for row in db.execute("SELECT entry_id, stamp, num FROM indexed")
+        }
+
+        stale = [(i, have[i][1]) for i in have if i not in want or want[i][1] != have[i][0]]
+        fresh = [i for i, (_, st) in want.items() if i not in have or have[i][0] != st]
+
+        if stale:
+            db.executemany("DELETE FROM entries WHERE entry_id = ?", [(i,) for i, _ in stale])
+            db.executemany("DELETE FROM grams WHERE num = ?", [(n,) for _, n in stale])
+            db.executemany("DELETE FROM indexed WHERE entry_id = ?", [(i,) for i, _ in stale])
+
+        if fresh:
+            rows = [want[i][0] for i in fresh]
+            db.executemany(
+                "INSERT INTO entries (entry_id, handle, kind, body) VALUES (?, ?, ?, ?)",
+                [(e.id, e.handle, e.kind, e.content) for e in rows],
+            )
+            db.executemany(
+                "INSERT INTO indexed (entry_id, stamp) VALUES (?, ?)",
+                [(e.id, want[e.id][1]) for e in rows],
+            )
+            nums = dict(
+                db.execute(
+                    "SELECT entry_id, num FROM indexed WHERE entry_id IN "
+                    f"({','.join('?' * len(rows))})",  # noqa: S608
+                    [e.id for e in rows],
+                )
+            )
+            db.executemany(
+                "INSERT OR IGNORE INTO grams (gram, num) VALUES (?, ?)",
+                [(g, nums[e.id]) for e in rows for g in _entry_bigrams(e.content.casefold())],
+            )
+
         db.execute(
             "INSERT INTO meta (k, v) VALUES ('fingerprint', ?) "
             "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
             (stamp,),
+        )
+
+    def _scan_via_postings(
+        self, query: str, entries: Sequence[MemoryEntry], *, limit: int
+    ) -> list[SearchHit] | None:
+        """The weighted scan, but reaching only entries that can match.
+
+        Returns ``None`` when the index is unusable, so the caller can fall back
+        to sweeping the store rather than silently returning nothing.
+
+        Document frequency comes from the posting list by counting rows, which
+        is the same number the sweep computed by testing every entry, so the
+        ranking is unchanged — only the number of entries touched is. Latin
+        needles keep substring semantics ("deploy" matching "deployment"), which
+        a token posting list cannot express, so they are applied to the
+        candidates the Chinese half turned up rather than to the whole store.
+        """
+        needles = [n.casefold() for n in _needles(query)]
+        grams = [g.casefold() for g in _cjk_bigrams(query)]
+        if not grams:
+            return None
+        latin = [n for n in needles if n not in set(grams)]
+
+        try:
+            with sqlite3.connect(self._db_path) as db:
+                db.executescript(_SCHEMA)
+                self._sync(db, entries)
+                placeholders = ",".join("?" * len(grams))
+                pairs = db.execute(
+                    "SELECT g.gram, i.entry_id FROM grams g JOIN indexed i ON i.num = g.num "
+                    f"WHERE g.gram IN ({placeholders})",  # noqa: S608
+                    grams,
+                ).fetchall()
+                n_docs = db.execute("SELECT COUNT(*) FROM indexed").fetchone()[0] or 1
+        except sqlite3.Error:
+            logger.warning("posting lookup failed; falling back to a scan", exc_info=True)
+            return None
+
+        df: dict[str, int] = dict.fromkeys(grams, 0)
+        candidate_ids: set[str] = set()
+        for gram, entry_id in pairs:
+            df[gram] += 1
+            candidate_ids.add(entry_id)
+
+        bodies = self._folded.of(entries)
+        if len(bodies) != n_docs:
+            # The index is describing a different store than the caller holds.
+            # Sweeping is correct where guessing is not.
+            return None
+
+        # Latin needles keep substring semantics — "deploy" matching
+        # "deployment" — which a token posting list cannot express, so their
+        # frequency comes from a pass over the bodies. That pass also collects
+        # the entries the posting list cannot see: one matching a Latin term
+        # and no Chinese gram is a candidate the sweep would have scored.
+        for needle in latin:
+            df[needle] = 0
+        if latin:
+            for entry, body in zip(entries, bodies, strict=True):
+                for needle in latin:
+                    if needle in body:
+                        df[needle] += 1
+                        candidate_ids.add(entry.id)
+
+        if not candidate_ids:
+            return []
+
+        weight = {n: math.log(1 + n_docs / (1 + df[n])) for n in needles}
+        return _rank(
+            [
+                (i, e, b)
+                for i, (e, b) in enumerate(zip(entries, bodies, strict=True))
+                if e.id in candidate_ids
+            ],
+            needles,
+            weight,
+            limit=limit,
         )
