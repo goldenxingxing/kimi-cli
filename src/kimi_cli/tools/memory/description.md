@@ -92,9 +92,17 @@ would not change anything sitting behind a lookup you have no reason to
 perform.
 
 `project` and `reference` entries appear as a one-line index, each with a
-handle in parentheses. Read one in full with `get` when its summary looks
-relevant to the task in front of you. Do not guess at the rest of an entry
-from its summary line — fetch it.
+handle and a date in parentheses. Read one in full with `get` when its summary
+looks relevant to the task in front of you. Do not guess at the rest of an
+entry from its summary line — fetch it. The date is when the entry was last
+true: prefer the more recent of two entries that cover the same ground.
+
+If you half-remember something that is not in the index — or the index has
+been truncated — use `search` before concluding it was never recorded.
+
+When a fact you already have recorded has changed, `update` it in place
+instead of adding a new entry that says it supersedes the old one. The handle
+shown in the index is what `update` and `delete` accept.
 
 ## Handles
 
@@ -108,6 +116,7 @@ opaque id fragment.
 
 - `add(kind, scope, content, key=None)` → returns the new entry's `id`
 - `get(handle)` → the full entry, addressed by `key` or `id`
+- `search(query)` → handles and snippets for entries containing the text
 - `list(scope)` → returns formatted entries (use `scope="all"` for everything)
 - `update(id, content)` → replace the body of an existing entry
 - `delete(id)` → remove an entry by id

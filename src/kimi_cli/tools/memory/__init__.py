@@ -15,6 +15,7 @@ from kimi_cli.memory import (
     update_entry,
     upsert_entry,
 )
+from kimi_cli.memory.search import MemorySearchIndex
 from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import load_desc
@@ -67,6 +68,18 @@ class AddOp(BaseModel):
         return _validate_key(value)
 
 
+class SearchOp(BaseModel):
+    op: Literal["search"] = "search"
+    query: str = Field(
+        min_length=1,
+        description=(
+            "Free text to look for across stored memory. Matches substrings, so "
+            "a distinctive fragment works better than a sentence. Returns "
+            "handles and snippets; read a hit in full with `get`."
+        ),
+    )
+
+
 class GetOp(BaseModel):
     op: Literal["get"] = "get"
     handle: str = Field(
@@ -104,7 +117,7 @@ class DeleteOp(BaseModel):
 
 
 class Params(BaseModel):
-    operation: AddOp | GetOp | ListOp | UpdateOp | DeleteOp = Field(
+    operation: AddOp | GetOp | SearchOp | ListOp | UpdateOp | DeleteOp = Field(
         discriminator="op",
         description="The memory operation to perform.",
     )
@@ -209,6 +222,14 @@ class Memory(CallableTool2[Params]):
     def _persistent_file(self) -> Path:
         return self._runtime.user_memory_dir / "persistent.jsonl"
 
+    @property
+    def _search_db(self) -> Path:
+        """Derived index, beside the store it is derived from.
+
+        Safe to delete: it rebuilds from the JSONL on the next search.
+        """
+        return self._runtime.user_memory_dir / "search.sqlite3"
+
     @override
     async def __call__(self, params: Params) -> ToolReturnValue:
         op = params.operation
@@ -216,6 +237,8 @@ class Memory(CallableTool2[Params]):
             return await self._add(op)
         if isinstance(op, GetOp):
             return self._get(op)
+        if isinstance(op, SearchOp):
+            return self._search(op)
         if isinstance(op, ListOp):
             return self._list(op)
         if isinstance(op, UpdateOp):
@@ -314,6 +337,37 @@ class Memory(CallableTool2[Params]):
                 "or `list` to see what is stored."
             ),
             brief="Not found",
+        )
+
+    def _search(self, op: SearchOp) -> ToolReturnValue:
+        """Find entries by content when the index summary is not enough.
+
+        The opening snapshot lists facts one line each, which is enough to
+        recognise something already anticipated and not enough to find
+        something half-remembered. This covers the second case.
+        """
+        entries = list(self._runtime.session.state.session_memory) + read_entries(
+            self._persistent_file
+        )
+        index = MemorySearchIndex(self._search_db, self._persistent_file)
+        hits = index.search(op.query, entries)
+        if not hits:
+            return _ok(
+                output=json.dumps({"query": op.query, "hits": []}, ensure_ascii=False),
+                brief="No matches",
+            )
+        return _ok(
+            output=json.dumps(
+                {
+                    "query": op.query,
+                    "hits": [
+                        {"handle": h.handle, "kind": h.kind, "snippet": h.snippet}
+                        for h in hits
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            brief=f"{len(hits)} match(es)",
         )
 
     def _list(self, op: ListOp) -> ToolReturnValue:

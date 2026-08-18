@@ -68,7 +68,7 @@ class TestKindSplit:
         assert "The user is an insulin pump manufacturer." in out
         assert "acls lives at" in out, "the index still has to identify the fact"
         assert "TAIL-MARKER" not in out, "a long fact is summarised, not recited"
-        assert "(acls/repo)" in out and "(mail/config)" in out
+        assert "(acls/repo, " in out and "(mail/config, " in out
 
     def test_the_index_says_how_to_read_an_entry(self) -> None:
         out = csm._render([_entry("project", "a fact", key="p/one")], [])
@@ -83,6 +83,16 @@ class TestKindSplit:
     def test_sections_are_omitted_when_empty(self) -> None:
         assert "Recorded facts" not in csm._render([_entry("feedback", "x")], [])
         assert "Persistent memory" not in csm._render([_entry("project", "x")], [])
+
+
+class TestStaleness:
+    def test_the_index_dates_each_fact(self) -> None:
+        """Project facts go stale, and two entries about the same thing are
+        told apart by which is more recent."""
+        import re
+
+        line = _entry("project", "a fact", key="p/one").render_index()
+        assert re.search(r"\(p/one, \d{4}-\d{2}-\d{2}\)", line)
 
 
 class TestBudget:

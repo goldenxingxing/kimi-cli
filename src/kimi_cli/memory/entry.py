@@ -83,8 +83,15 @@ class MemoryEntry(BaseModel):
 
         The summary is the first line of the body — memory is written as a
         statement, so its opening clause is what the entry is about.
+
+        The date is when this was last true, not when it was filed: project
+        facts go stale, and two entries about the same thing are told apart by
+        which is more recent. Without it the agent has been reading undated
+        claims and, in a real store, working around that by writing "supersedes
+        the older record" into the text.
         """
         first = next((ln.strip() for ln in self.content.splitlines() if ln.strip()), "")
         if len(first) > width:
             first = first[: width - 1].rstrip() + "…"
-        return f"- [{self.kind}] ({self.handle}) {first}"
+        stamp = time.strftime("%Y-%m-%d", time.localtime(self.updated_at or self.created_at))
+        return f"- [{self.kind}] ({self.handle}, {stamp}) {first}"

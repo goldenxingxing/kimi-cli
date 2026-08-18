@@ -309,3 +309,51 @@ async def test_a_key_that_could_not_be_typed_back_is_refused_at_the_tool(
                 }
             }
         )
+
+
+# --- Finding an entry you cannot name ---------------------------------------
+
+
+async def _search(tool: Memory, query: str):
+    return await tool(Params.model_validate({"operation": {"op": "search", "query": query}}))
+
+
+async def test_search_finds_an_entry_by_its_content(memory_tool: Memory) -> None:
+    with tool_call_context("Memory"):
+        await _add_keyed(memory_tool, "CodeGraph does not track git branches", "acls/codegraph")
+        body = payload(await _search(memory_tool, "CodeGraph"))
+
+    assert [h["handle"] for h in body["hits"]] == ["acls/codegraph"]
+
+
+async def test_search_works_on_chinese_shorter_than_a_trigram(memory_tool: Memory) -> None:
+    """Two characters is a whole word in Chinese, and below what FTS5 can index."""
+    with tool_call_context("Memory"):
+        await _add_keyed(memory_tool, "126 邮箱已接入并验证可用", "mail/126")
+        body = payload(await _search(memory_tool, "邮箱"))
+
+    assert [h["handle"] for h in body["hits"]] == ["mail/126"]
+
+
+async def test_search_on_chinese_above_the_trigram_floor(memory_tool: Memory) -> None:
+    with tool_call_context("Memory"):
+        await _add_keyed(memory_tool, "真实仓库路径为 /Users/x/acls，不是副本", "acls/repo")
+        body = payload(await _search(memory_tool, "仓库路径"))
+
+    assert [h["handle"] for h in body["hits"]] == ["acls/repo"]
+
+
+async def test_a_query_full_of_fts_syntax_is_matched_literally(memory_tool: Memory) -> None:
+    """Models write `core.py` and `a/b-c`; FTS5 reads those as operators."""
+    with tool_call_context("Memory"):
+        await _add_keyed(memory_tool, "the file core.py lives under src/", "proj/core")
+        body = payload(await _search(memory_tool, "core.py"))
+
+    assert [h["handle"] for h in body["hits"]] == ["proj/core"]
+
+
+async def test_search_reports_no_matches_rather_than_failing(memory_tool: Memory) -> None:
+    with tool_call_context("Memory"):
+        body = payload(await _search(memory_tool, "nothing stored about this"))
+
+    assert body["hits"] == []
