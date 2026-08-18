@@ -65,3 +65,53 @@ entry, and gave an identical 100% before and after the bilingual fix; it was
 worthless until it was rewritten to fail.
 
 [locomo]: https://github.com/snap-research/locomo
+
+
+## vs_mem0_retrieval.py — 与 mem0 的检索对比
+
+只比检索器，不比整个记忆系统。两边存入完全相同的原文（mem0 用 `infer=False`
+关掉它的 LLM 抽取），打分用 LoCoMo 自带的 `evidence` 证据轮标注，不看答案字符串
+——否则"存原文"的一方会因为标准答案本就是原文子串而白捡分数。
+
+这也意味着它**测不到 mem0 的抽取层**，而那是 mem0 的核心。任何"谁的记忆系统更好"
+的结论都不能从这个脚本得出。
+
+运行（mem0 不是本项目依赖）：
+
+    BENCH_SYS_PATH=/path/to/mem0-install python benchmarks/vs_mem0_retrieval.py
+
+中文对比需要先用翻译脚本生成 `locomo10_zh.json`：证据标注是轮次 id，翻译不会
+破坏它，所以除语言外所有变量都被控制住。中文必须配多语言嵌入模型
+（`BENCH_EMBED`），用英文专用模型测中文测的是模型选型不是检索能力。
+
+### 两个必须设对的参数
+
+mem0 的 `search()` 参数是 `top_k` 不是 `limit`；传 `limit=` 会被 `**kwargs`
+静默吞掉。`threshold` 默认 0.1，中文场景下正确命中的分数常在 0.101 附近，默认值
+会把结果砍到只剩一条——那时测的是阈值，不是召回。两处都设错过，都产生过看起来
+可信但完全错误的结论。
+
+### 结果（2 段对话，788 轮，302 问，2026-08）
+
+英文：
+
+| 检索器 | recall@1 | recall@3 | recall@8 |
+|---|---|---|---|
+| OpenKimo (FTS5 词法) | 36.4% | 52.6% | 64.6% |
+| mem0 纯向量 (bge-small-en) | 25.5% | 44.4% | 58.3% |
+| mem0 混合 (向量+BM25) | 36.4% | 57.3% | **68.5%** |
+
+中文（同批对话译入，证据标注不变）：
+
+| 检索器 | recall@1 | recall@3 | recall@8 |
+|---|---|---|---|
+| OpenKimo (FTS5 词法) | 19.5% | 34.8% | 47.7% |
+| mem0 纯向量 (多语言 MiniLM) | 20.2% | 38.4% | **54.6%** |
+| mem0 混合 (向量+BM25) | 18.5% | 31.8% | 49.3% |
+
+结论：**纯词法检索在两种语言上都落后于带稠密向量的方案**（英文 -3.9、中文
+-6.9，均为 recall@8，也是 `search` 工具实际返回的条数）。BM25 那一半在英文上
+值 +10 个点，在中文上是负收益（49.3 对 54.6）——空格分词在中文上不成立，这一点
+与选哪个嵌入模型无关。
+
+我们自己的中文比英文低 17 个点（47.7 对 64.6）：中文检索是这套方案最弱的一环。
