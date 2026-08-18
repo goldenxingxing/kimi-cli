@@ -233,8 +233,41 @@ def _match_expression(query: str) -> str | None:
 
 
 def _document_frequency(needles: Sequence[str], bodies: Sequence[str]) -> dict[str, int]:
-    """How many entries contain each needle. One pass over text already in memory."""
-    return {n: sum(1 for b in bodies if n in b) for n in needles}
+    """How many entries contain each needle.
+
+    One pass over the corpus for all needles together rather than one pass per
+    needle: with twenty needles that is the difference between twenty full
+    sweeps and one. The inner loop is a substring test, which is C-speed, so
+    the cost is dominated by how many times the corpus is walked.
+    """
+    counts = dict.fromkeys(needles, 0)
+    for body in bodies:
+        for needle in needles:
+            if needle in body:
+                counts[needle] += 1
+    return counts
+
+
+class _FoldedBodies:
+    """Case-folded entry text, reused across searches over the same entries.
+
+    ``str.casefold`` on every entry on every query allocates a second copy of
+    the whole store per search. At the sizes memory was designed for that is
+    nothing; measured at twenty thousand entries it is most of a 63 ms Chinese
+    query. Entries are immutable and rebuilt wholesale when the file changes,
+    so identity of the list plus its length is a sound cache key.
+    """
+
+    def __init__(self) -> None:
+        self._key: tuple[int, int] | None = None
+        self._bodies: list[str] = []
+
+    def of(self, entries: Sequence[MemoryEntry]) -> list[str]:
+        key = (id(entries), len(entries))
+        if key != self._key:
+            self._bodies = [e.content.casefold() for e in entries]
+            self._key = key
+        return self._bodies
 
 
 def _needles(query: str) -> list[str]:
@@ -251,7 +284,13 @@ def _needles(query: str) -> list[str]:
     return list(dict.fromkeys(_cjk_bigrams(query) + latin))
 
 
-def _scan(needles: Sequence[str], entries: Sequence[MemoryEntry], *, limit: int) -> list[SearchHit]:
+def _scan(
+    needles: Sequence[str],
+    entries: Sequence[MemoryEntry],
+    *,
+    limit: int,
+    cache: _FoldedBodies | None = None,
+) -> list[SearchHit]:
     """Substring match on *needles*, ranked by how much each one narrows things.
 
     Counting matched needles equally — which this did at first — makes a
@@ -267,7 +306,7 @@ def _scan(needles: Sequence[str], entries: Sequence[MemoryEntry], *, limit: int)
     if not folded:
         return []
 
-    bodies = [e.content.casefold() for e in entries]
+    bodies = cache.of(entries) if cache is not None else [e.content.casefold() for e in entries]
     n_docs = len(bodies) or 1
     df = _document_frequency(folded, bodies)
     kept = folded
@@ -344,6 +383,7 @@ class MemorySearchIndex:
     def __init__(self, db_path: Path, source: Path) -> None:
         self._db_path = db_path
         self._source = source
+        self._folded = _FoldedBodies()
 
     def search(
         self, query: str, entries: Sequence[MemoryEntry], *, limit: int = 8
@@ -366,7 +406,7 @@ class MemorySearchIndex:
         # Choosing per query rather than globally is what makes the Chinese
         # gain cost the English path nothing.
         if _CJK_RUN.search(query):
-            hits = _scan(_needles(query), entries, limit=limit)
+            hits = _scan(_needles(query), entries, limit=limit, cache=self._folded)
             if len(hits) >= limit:
                 return hits
             return _merge_tail(hits, self._fts(query, entries, limit=limit), limit=limit)
@@ -375,7 +415,7 @@ class MemorySearchIndex:
         if expression is None:
             # Nothing long enough to index — a bare number, a stopword. The
             # scan still finds those.
-            return _scan(_needles(query) or [query], entries, limit=limit)
+            return _scan(_needles(query) or [query], entries, limit=limit, cache=self._folded)
         return self._fts(query, entries, limit=limit, expression=expression)
 
     def _fts(

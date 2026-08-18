@@ -105,7 +105,31 @@ class TestBudget:
         out = csm._render(entries, [])
 
         assert len(out) <= csm._INDEX_BUDGET_CHARS + 500
-        assert "truncated" in out
+        assert "not shown" in out, "a silent cut reads as a complete store"
+        assert "search" in out, "and it has to say how to reach the rest"
+
+    def test_the_cut_says_how_many_were_left_out(self) -> None:
+        """ "Some were omitted" and "1,879 were omitted" call for different behaviour."""
+        entries = [_entry("project", f"fact number {i} " + "x" * 400) for i in range(200)]
+
+        out = csm._render(entries, [])
+
+        shown = sum(1 for i in range(200) if f"fact number {i} " in out)
+        assert f"({200 - shown} older" in out, "the count has to match what was actually dropped"
+
+    def test_the_newest_entries_are_the_ones_kept(self) -> None:
+        """The store is append-only, so cutting from the head drops the newest.
+
+        For behavioural memory that is the correction the user gave most
+        recently — the single entry least safe to lose, and the first one a
+        head-truncation discarded.
+        """
+        entries = [_entry("feedback", f"rule number {i} " + "x" * 400) for i in range(60)]
+
+        out = csm._render(entries, [])
+
+        assert "rule number 59 " in out, "the most recent instruction must survive"
+        assert "rule number 0 " not in out, "and the oldest is what gives way"
 
     def test_one_section_growing_does_not_evict_another(self) -> None:
         """A shared pool would let whichever section grows keep what it takes."""

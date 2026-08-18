@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, override
 
 from kosong.message import Message
@@ -107,6 +107,43 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         return [DynamicInjection(type=_INJECTION_TYPE, content=rendered)]
 
 
+def _fit_entries(
+    entries: Sequence[MemoryEntry], budget: int, render: Callable[[MemoryEntry], str]
+) -> str:
+    """Render what fits, preferring the newest, and say how many were left out.
+
+    `persistent.jsonl` is append-only, so entries arrive oldest-first and a
+    plain head-truncation keeps the oldest and discards the newest. For
+    behavioural memory that is precisely backwards: the newest entry is the
+    correction the user gave most recently, and it was the first to be dropped
+    once the store outgrew the budget — silently, because a standing
+    instruction that is never injected simply stops being followed.
+
+    Selection is by recency; display stays oldest-first, which is how the
+    entries read. The count is included because "some were omitted" and "1,879
+    were omitted" call for different behaviour from the reader.
+    """
+    rendered = [(e, render(e)) for e in entries]
+    total = sum(len(text) + 1 for _, text in rendered)
+    if total <= budget:
+        return "\n".join(text for _, text in rendered)
+
+    kept: list[tuple[int, str]] = []
+    used = 0
+    note_room = 80
+    for i in range(len(rendered) - 1, -1, -1):
+        text = rendered[i][1]
+        if used + len(text) + 1 > budget - note_room:
+            break
+        kept.append((i, text))
+        used += len(text) + 1
+    kept.reverse()
+
+    dropped = len(rendered) - len(kept)
+    note = f"… ({dropped} older entries not shown — use `search` to reach them)"
+    return "\n".join([note, *(text for _, text in kept)])
+
+
 def _render(
     persistent: Sequence[MemoryEntry],
     recent: Sequence[SessionSummary],
@@ -123,9 +160,7 @@ def _render(
             "Stable facts/preferences you've recorded across sessions:",
             "",
         ]
-        body = _fit(
-            "\n".join(e.render() for e in behavioural), _BEHAVIOURAL_BUDGET_CHARS
-        )
+        body = _fit_entries(behavioural, _BEHAVIOURAL_BUDGET_CHARS, lambda e: e.render())
         sections.append("\n".join([*lines, body]))
 
     if lookup:
@@ -136,12 +171,12 @@ def _render(
             "## Recorded facts (index)",
             (
                 "Summaries only. Read one in full with "
-                "`Memory(operation={\"op\": \"get\", \"handle\": \"<handle>\"})` "
+                '`Memory(operation={"op": "get", "handle": "<handle>"})` '
                 "when it looks relevant to the task at hand:"
             ),
             "",
         ]
-        body = _fit("\n".join(e.render_index() for e in lookup), _INDEX_BUDGET_CHARS)
+        body = _fit_entries(lookup, _INDEX_BUDGET_CHARS, lambda e: e.render_index())
         sections.append("\n".join([*lines, body]))
 
     if recent:
@@ -152,9 +187,7 @@ def _render(
         ]
         # Recaps arrive oldest-first, so this is the one section where cutting
         # from the end would throw away the newest — the opposite of intent.
-        body = _fit(
-            "\n\n".join(s.render() for s in recent), _RECENT_BUDGET_CHARS, keep="tail"
-        )
+        body = _fit("\n\n".join(s.render() for s in recent), _RECENT_BUDGET_CHARS, keep="tail")
         sections.append("\n".join([*lines, body]))
 
     if pending:
