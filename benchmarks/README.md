@@ -34,12 +34,34 @@ so until this was run. Splitting the query into OR-ed terms took recall@10 to
 **65.3%**, past BM25's 57.9%.
 
 Worth re-running after any change to query construction, tokenisation, or
-ranking. The numbers below are English-only — LoCoMo is an English dataset, and
-the Chinese path has unit tests but no benchmark.
+ranking.
 
 | | recall@1 | recall@5 | recall@10 |
 | --- | --- | --- | --- |
 | whole question | 35.3% | 57.0% | 65.3% |
 | BM25 baseline | 26.1% | 49.3% | 57.9% |
+
+## Bilingual
+
+```bash
+python benchmarks/bilingual_recall.py
+```
+
+LoCoMo is English, and English alone is not what this has to work for: a real
+store mixes Chinese prose with English identifiers inside single entries and is
+queried the same way. That path arrived as a fallback — used only when the index
+came back empty — so a mixed query answered its English half and dropped the
+Chinese one, which is the commonest shape of query there is.
+
+The fixture is written by hand; there is no public Chinese long-conversation
+memory set to sample from. So this is a regression target rather than a
+comparison: it says whether a change made retrieval worse, not whether
+retrieval is good.
+
+Several queries expect **two** entries — one matched by an English identifier,
+one by Chinese prose — and score only if both come back. That detail is the
+whole point. The first version scored each query on finding any one relevant
+entry, and gave an identical 100% before and after the bilingual fix; it was
+worthless until it was rewritten to fail.
 
 [locomo]: https://github.com/snap-research/locomo

@@ -132,3 +132,38 @@ class TestQueryConstruction:
         hits = index.search("邮箱配置", entries)
 
         assert hits[0].handle == "p/1"
+
+
+class TestBilingual:
+    """A real store mixes Chinese prose with English identifiers in one entry.
+
+    Chinese arrived as a fallback path — used only when the index came back
+    empty — which meant a mixed query answered its English half and silently
+    dropped the Chinese one. That is the commonest shape of query there is.
+    """
+
+    def test_a_mixed_query_finds_both_halves(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        entries = _entries(
+            "CodeGraph 索引不感知 git 分支，只反映当前检出的快照",
+            "工具的限制：单次请求最多 2MiB，超过会被网关拒绝",
+        )
+
+        hits = {h.handle for h in index.search("CodeGraph 有什么限制", entries)}
+
+        assert hits == {"p/0", "p/1"}, "the English term must not shadow the Chinese one"
+
+    def test_each_language_alone_still_works(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        entries = _entries("CodeGraph 不感知分支", "端口 5494 被占用时不会自动更换")
+
+        assert [h.handle for h in index.search("CodeGraph", entries)] == ["p/0"]
+        assert [h.handle for h in index.search("端口被占用会怎么样", entries)] == ["p/1"]
+
+    def test_an_english_identifier_inside_chinese_prose_is_findable(
+        self, tmp_path: Path
+    ) -> None:
+        index, _ = _index(tmp_path)
+        entries = _entries("配置由 KIMI_SHARE_DIR 指向 sessions 目录", "无关记录")
+
+        assert [h.handle for h in index.search("KIMI_SHARE_DIR 指向哪", entries)][:1] == ["p/0"]

@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Sequence
+from itertools import zip_longest
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -258,6 +259,28 @@ def _scan(needles: Sequence[str], entries: Sequence[MemoryEntry], *, limit: int)
     return hits
 
 
+def _merge(
+    primary: Sequence[SearchHit], secondary: Sequence[SearchHit], *, limit: int
+) -> list[SearchHit]:
+    """Interleave two result lists, keeping each side's order and dropping dupes.
+
+    Interleaved rather than concatenated because neither side deserves the top
+    of the list by default: one query can be mostly English and the next mostly
+    Chinese, and appending would bury whichever half the store happened to
+    answer better.
+    """
+    out: list[SearchHit] = []
+    seen: set[str] = set()
+    for pair in zip_longest(primary, secondary):
+        for hit in pair:
+            if hit is not None and hit.entry_id not in seen:
+                seen.add(hit.entry_id)
+                out.append(hit)
+                if len(out) >= limit:
+                    return out
+    return out
+
+
 class MemorySearchIndex:
     """A rebuildable FTS5 index over memory entries."""
 
@@ -293,13 +316,18 @@ class MemorySearchIndex:
         except sqlite3.Error:
             logger.warning("memory search failed; treating as no results", exc_info=True)
             return []
-        if rows:
-            return [SearchHit(*row) for row in rows]
-        # The index found nothing. For Chinese that is expected rather than
-        # conclusive: the words that carry the meaning are usually two
-        # characters, which no trigram index holds.
+        hits = [SearchHit(*row) for row in rows]
+
+        # Chinese words that carry meaning are usually two characters, which no
+        # trigram index can hold, so the index result is never the whole story
+        # for a query containing any. Running the bigram scan *alongside* the
+        # index rather than only when it comes back empty is the difference
+        # between "CodeGraph 有什么限制" finding both halves and finding only the
+        # English one — the shape most of a bilingual store is written in.
         bigrams = _cjk_bigrams(query)
-        return _scan(bigrams, entries, limit=limit) if bigrams else []
+        if not bigrams:
+            return hits
+        return _merge(hits, _scan(bigrams, entries, limit=limit), limit=limit)
 
     def _sync(self, db: sqlite3.Connection, entries: Sequence[MemoryEntry]) -> None:
         """Rebuild the index when the source file has changed since last time."""
