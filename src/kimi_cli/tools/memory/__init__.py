@@ -17,7 +17,7 @@ from kimi_cli.memory import (
 )
 from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
 from kimi_cli.memory.search import MemorySearchIndex
-from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle
+from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle, set_retired
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import load_desc
 
@@ -117,6 +117,27 @@ class UpdateOp(BaseModel):
     content: str = Field(min_length=1, description="The new body for the entry.")
 
 
+class RetireOp(BaseModel):
+    """Stop injecting an entry without losing it.
+
+    Deleting is for something that was wrong. This is for something that was
+    right and no longer applies — a convention that changed, a project that
+    ended. The record stays and stays searchable; it just stops arriving in
+    every conversation, which is the only cost a stale behavioural entry
+    actually imposes.
+    """
+
+    op: Literal["retire"]
+    handle: str
+
+
+class RestoreOp(BaseModel):
+    """Put a retired entry back into force."""
+
+    op: Literal["restore"]
+    handle: str
+
+
 class DeleteOp(BaseModel):
     op: Literal["delete"] = "delete"
     id: str = Field(
@@ -128,11 +149,20 @@ class DeleteOp(BaseModel):
 
 
 class Params(BaseModel):
-    operation: AddOp | GetOp | SearchOp | PromoteOp | DismissOp | ListOp | UpdateOp | DeleteOp = (
-        Field(
-            discriminator="op",
-            description="The memory operation to perform.",
-        )
+    operation: (
+        AddOp
+        | GetOp
+        | SearchOp
+        | PromoteOp
+        | DismissOp
+        | ListOp
+        | UpdateOp
+        | RetireOp
+        | RestoreOp
+        | DeleteOp
+    ) = Field(
+        discriminator="op",
+        description="The memory operation to perform.",
     )
 
     @field_validator("operation", mode="before")
@@ -258,6 +288,8 @@ class Memory(CallableTool2[Params]):
             return self._dismiss(op)
         if isinstance(op, ListOp):
             return self._list(op)
+        if isinstance(op, RetireOp | RestoreOp):
+            return await self._set_retired(op)
         if isinstance(op, UpdateOp):
             return await self._update(op)
         return await self._delete(op)
@@ -487,6 +519,34 @@ class Memory(CallableTool2[Params]):
         return _ok(
             output=json.dumps({"id": op.id, "scope": "persistent"}),
             brief="Memory updated",
+        )
+
+    async def _set_retired(self, op: RetireOp | RestoreOp) -> ToolReturnValue:
+        """Take an entry out of the injected set, or put it back.
+
+        Goes through the same approval as any other persistent write. Retiring
+        does not destroy anything, but it does change what every later session
+        is told without being asked — which is the part the user has a stake in.
+        """
+        retiring = isinstance(op, RetireOp)
+        verb = "Retire" if retiring else "Restore"
+        rejection = await self._request_persistent_approval(
+            "retire" if retiring else "restore",
+            f"{verb} persistent memory entry {op.handle}",
+        )
+        if rejection is not None:
+            return rejection
+        try:
+            entry = set_retired(self._persistent_file, op.handle, retired=retiring)
+        except AmbiguousHandleError as exc:
+            return ToolError(message=str(exc), brief="Ambiguous handle")
+        if entry is None:
+            return ToolError(
+                message=f"No memory entry with handle={op.handle!r}.", brief="Not found"
+            )
+        return _ok(
+            output=json.dumps({"handle": entry.handle, "retired": entry.retired_at is not None}),
+            brief=f"Memory {'retired' if retiring else 'restored'}",
         )
 
     async def _delete(self, op: DeleteOp) -> ToolReturnValue:

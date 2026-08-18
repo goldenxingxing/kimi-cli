@@ -98,24 +98,33 @@ class TestStaleness:
 
 
 class TestBudget:
-    def test_an_oversized_section_is_cut_and_says_so(self) -> None:
-        """Persistent memory has no cap of its own; it only ever grows."""
+    def test_an_oversized_index_says_how_much_of_itself_it_is_showing(self) -> None:
+        """Persistent memory has no cap of its own; it only ever grows.
+
+        A list introduced as the index, which is in fact fifty of two hundred
+        entries, tells the reader that everything else was never recorded.
+        """
         entries = [_entry("project", f"fact number {i} " + "x" * 400) for i in range(200)]
 
         out = csm._render(entries, [])
 
-        assert len(out) <= csm._INDEX_BUDGET_CHARS + 500
-        assert "not shown" in out, "a silent cut reads as a complete store"
-        assert "search" in out, "and it has to say how to reach the rest"
-
-    def test_the_cut_says_how_many_were_left_out(self) -> None:
-        """ "Some were omitted" and "1,879 were omitted" call for different behaviour."""
-        entries = [_entry("project", f"fact number {i} " + "x" * 400) for i in range(200)]
-
-        out = csm._render(entries, [])
-
+        # The budget governs the list itself; the allowance is the document
+        # preamble, this section's heading, and the sentence saying what is
+        # missing. What must not happen is the total tracking the store's size.
+        assert len(out) <= csm._INDEX_BUDGET_CHARS + 700
         shown = sum(1 for i in range(200) if f"fact number {i} " in out)
-        assert f"({200 - shown} older" in out, "the count has to match what was actually dropped"
+        assert f"index: {shown} of 200" in out, "the heading has to carry both numbers"
+        assert f"The {200 - shown} older ones not listed" in out
+        assert "search" in out, "and say how the rest is reached"
+
+    def test_an_index_that_fits_makes_no_excuses(self) -> None:
+        """The counts are for a truncated list; a complete one should not carry them."""
+        entries = [_entry("project", f"fact {i}") for i in range(5)]
+
+        out = csm._render(entries, [])
+
+        assert "## Recorded facts (index)" in out
+        assert "not listed" not in out
 
     def test_the_newest_entries_are_the_ones_kept(self) -> None:
         """The store is append-only, so cutting from the head drops the newest.
@@ -277,3 +286,48 @@ class TestSuggestions:
 
     def test_no_suggestions_means_no_section(self) -> None:
         assert "Suggested memories" not in csm._render([_entry("feedback", "x")], [], [])
+
+
+class TestRetirement:
+    """Behavioural memory is injected unasked, and only about a hundred fit.
+
+    Past that the oldest stop arriving by attrition, which is indistinguishable
+    from the agent ignoring them. Retiring is the same outcome reached
+    deliberately — and, unlike deleting, it is reversible and loses nothing.
+    """
+
+    def test_a_retired_entry_is_not_injected(self) -> None:
+        live = _entry("feedback", "NEVER force-push to main.")
+        gone = _entry("feedback", "Always target the 2024 API.")
+        gone.retired_at = 1_700_000_000.0
+
+        out = csm._render([live, gone], [])
+
+        assert "NEVER force-push to main." in out
+        assert "Always target the 2024 API." not in out
+
+    def test_the_agent_is_told_that_retiring_happened(self) -> None:
+        """Otherwise a rule it followed last week looks like one it forgot."""
+        live = _entry("feedback", "NEVER force-push to main.")
+        gone = _entry("feedback", "Always target the 2024 API.")
+        gone.retired_at = 1_700_000_000.0
+
+        out = csm._render([live, gone], [])
+
+        assert "1 retired" in out
+        assert "search" in out
+
+    def test_nothing_is_said_when_nothing_is_retired(self) -> None:
+        out = csm._render([_entry("feedback", "NEVER force-push to main.")], [])
+
+        assert "retired" not in out
+
+    def test_a_retired_lookup_entry_leaves_the_index_too(self) -> None:
+        kept = _entry("project", "acls builds with uv")
+        gone = _entry("project", "acls used to build with poetry")
+        gone.retired_at = 1_700_000_000.0
+
+        out = csm._render([kept, gone], [])
+
+        assert "acls builds with uv" in out
+        assert "used to build with poetry" not in out

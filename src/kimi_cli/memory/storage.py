@@ -191,6 +191,33 @@ def upsert_entry(
         )
 
 
+def set_retired(path: Path, handle: str, *, retired: bool) -> MemoryEntry | None:
+    """Mark an entry retired, or put it back. Returns the entry, or ``None``.
+
+    Rewrites in place rather than removing: a retired entry is still a record
+    of what was once true, and something that can be un-retired has to still be
+    there to un-retire.
+    """
+    with _locked(path, exclusive=True):
+        entries = _read_raw(path)
+        target = resolve_handle(entries, handle)
+        if target is None:
+            return None
+        for index, existing in enumerate(entries):
+            if existing.id != target.id:
+                continue
+            updated = existing.model_copy(
+                update={
+                    "retired_at": time.time() if retired else None,
+                    "updated_at": time.time(),
+                }
+            )
+            entries[index] = updated
+            _write_atomic(path, entries)
+            return updated
+    return None
+
+
 class AmbiguousHandleError(ValueError):
     """A handle matched more than one entry. Caller must disambiguate."""
 

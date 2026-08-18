@@ -102,7 +102,20 @@ been truncated — use `search` before concluding it was never recorded.
 
 When a fact you already have recorded has changed, `update` it in place
 instead of adding a new entry that says it supersedes the old one. The handle
-shown in the index is what `update` and `delete` accept.
+shown in the index is what `update`, `retire` and `delete` accept.
+
+## Retiring
+
+`delete` is for an entry that was wrong. `retire` is for one that was right and
+no longer applies — a convention that changed, a project that ended. A retired
+entry stops being carried into new conversations but stays in the file and
+stays reachable through `search`, and `restore` puts it back.
+
+This matters because behavioural entries are injected whether or not anyone
+asks for them, and only about a hundred fit. Past that the oldest stop arriving
+on their own, so a store nobody prunes ends up with standing instructions that
+are on disk and not in force. Retiring is how that happens on purpose. Both
+operations ask for the user's approval, and neither removes anything.
 
 ## Suggested memories
 
@@ -132,4 +145,6 @@ opaque id fragment.
 - `dismiss(id)` → drop a suggested memory
 - `list(scope)` → returns formatted entries (use `scope="all"` for everything)
 - `update(id, content)` → replace the body of an existing entry
+- `retire(handle)` → stop injecting an entry, without losing it
+- `restore(handle)` → put a retired entry back into force
 - `delete(id)` → remove an entry by id

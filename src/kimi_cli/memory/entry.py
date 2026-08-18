@@ -37,6 +37,22 @@ class MemoryEntry(BaseModel):
     content: str
     created_at: float = Field(default_factory=time.time)
     updated_at: float | None = None
+    retired_at: float | None = None
+    """When this stopped being injected, if it has.
+
+    Behavioural memory is carried into every conversation whether or not anyone
+    asks for it, and the budget that holds it fits roughly a hundred entries.
+    Past that, the oldest simply stop arriving — so a store that only grows
+    ends up with standing instructions that are still on disk and no longer in
+    force, with nothing to say which.
+
+    Retiring is how an entry leaves that set deliberately instead of by
+    attrition. Nothing is removed: the record stays in the file, `search` and
+    `get` still reach it, and clearing this field puts it back. A memory the
+    user can open is worth more than one that is tidy, so retirement marks
+    rather than deletes.
+    """
+
     key: str | None = None
     """Short semantic handle, e.g. ``acls/repo-path``.
 

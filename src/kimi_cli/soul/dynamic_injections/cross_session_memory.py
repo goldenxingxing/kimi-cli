@@ -107,6 +107,26 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         return [DynamicInjection(type=_INJECTION_TYPE, content=rendered)]
 
 
+def _select_newest(
+    entries: Sequence[MemoryEntry], budget: int, render: Callable[[MemoryEntry], str]
+) -> list[MemoryEntry]:
+    """The newest entries whose rendered form fits in *budget*, oldest-first.
+
+    Selection and rendering are separate so the caller can say how many were
+    left out — a number the reader needs and the rendered text cannot carry.
+    """
+    kept: list[MemoryEntry] = []
+    used = 0
+    for entry in reversed(entries):
+        size = len(render(entry)) + 1
+        if used + size > budget:
+            break
+        kept.append(entry)
+        used += size
+    kept.reverse()
+    return kept
+
+
 def _fit_entries(
     entries: Sequence[MemoryEntry], budget: int, render: Callable[[MemoryEntry], str]
 ) -> str:
@@ -151,8 +171,13 @@ def _render(
 ) -> str:
     sections: list[str] = []
 
-    behavioural = [e for e in persistent if e.is_behavioural]
-    lookup = [e for e in persistent if not e.is_behavioural]
+    # Retired entries stay in the file and stay searchable; what they stop
+    # doing is arriving unasked in every conversation. That is the whole point
+    # of retiring one, and it is also the only thing retiring does.
+    live = [e for e in persistent if e.retired_at is None]
+    behavioural = [e for e in live if e.is_behavioural]
+    lookup = [e for e in live if not e.is_behavioural]
+    retired = len(persistent) - len(live)
 
     if behavioural:
         lines = [
@@ -161,22 +186,47 @@ def _render(
             "",
         ]
         body = _fit_entries(behavioural, _BEHAVIOURAL_BUDGET_CHARS, lambda e: e.render())
+        if retired:
+            # Said once, beside the instructions it affects: an agent told a
+            # rule in an earlier session and not told it here should be able to
+            # see that the change was deliberate rather than a lapse.
+            body += (
+                f'\n({retired} retired and no longer in force; still readable via `op: "search"`)'
+            )
         sections.append("\n".join([*lines, body]))
 
     if lookup:
         # Listed, not quoted. These are facts about particular projects; most
         # are irrelevant to any given conversation, and carrying all of them
         # into every one costs more than fetching the occasional right answer.
-        lines = [
-            "## Recorded facts (index)",
-            (
-                "Summaries only. Read one in full with "
-                '`Memory(operation={"op": "get", "handle": "<handle>"})` '
-                "when it looks relevant to the task at hand:"
-            ),
-            "",
-        ]
-        body = _fit_entries(lookup, _INDEX_BUDGET_CHARS, lambda e: e.render_index())
+        #
+        # The budget holds about fifty lines, so past a few hundred entries this
+        # stopped being an index of the store and became an index of an
+        # arbitrary slice of it — 0.5% of a ten-thousand-entry store — while
+        # still being introduced as though it listed everything. A reader who
+        # believes the list is complete concludes that what is not in it was
+        # never recorded, which is worse than being told to search.
+        shown = _select_newest(lookup, _INDEX_BUDGET_CHARS, lambda e: e.render_index())
+        omitted = len(lookup) - len(shown)
+        heading = (
+            f"## Recorded facts (index: {len(shown)} of {len(lookup)})"
+            if omitted
+            else "## Recorded facts (index)"
+        )
+        blurb = (
+            "Summaries only. Read one in full with "
+            '`Memory(operation={"op": "get", "handle": "<handle>"})` '
+            "when it looks relevant to the task at hand"
+        )
+        if omitted:
+            # Terse on purpose: this is prompt overhead paid on every session
+            # whose store has outgrown the list.
+            blurb += (
+                f". The {omitted} older ones not listed are reachable only via "
+                '`op: "search"` — the store knows more than this shows'
+            )
+        lines = [heading, blurb + ":", ""]
+        body = "\n".join(e.render_index() for e in shown)
         sections.append("\n".join([*lines, body]))
 
     if recent:
