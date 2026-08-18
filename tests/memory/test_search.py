@@ -160,10 +160,39 @@ class TestBilingual:
         assert [h.handle for h in index.search("CodeGraph", entries)] == ["p/0"]
         assert [h.handle for h in index.search("端口被占用会怎么样", entries)] == ["p/1"]
 
-    def test_an_english_identifier_inside_chinese_prose_is_findable(
-        self, tmp_path: Path
-    ) -> None:
+    def test_an_english_identifier_inside_chinese_prose_is_findable(self, tmp_path: Path) -> None:
         index, _ = _index(tmp_path)
         entries = _entries("配置由 KIMI_SHARE_DIR 指向 sessions 目录", "无关记录")
 
         assert [h.handle for h in index.search("KIMI_SHARE_DIR 指向哪", entries)][:1] == ["p/0"]
+
+
+class TestRankingOnASmallStore:
+    """Ranking was tuned on two thousand entries; a memory file holds tens.
+
+    The first version of the weighted scan dropped needles appearing in more
+    than five percent of the store. On the benchmark that was worth half a
+    point. On a store of two entries the threshold rounds below one, so every
+    needle that matched anything was above it and the only ones kept were those
+    matching nothing — the search returned empty. The benchmark could not have
+    caught it: it never ran on a store the size of a real one.
+    """
+
+    def test_the_only_matching_entry_is_found_in_a_two_entry_store(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        entries = _entries("邮箱配置在 ~/mail.env", "无关的一条")
+
+        assert [h.handle for h in index.search("邮箱配置", entries)][:1] == ["p/0"]
+
+    def test_a_term_common_to_every_entry_does_not_erase_the_query(self, tmp_path: Path) -> None:
+        """Weighting a ubiquitous term down to nothing must not zero the rest."""
+        index, _ = _index(tmp_path)
+        entries = _entries("项目配置在 config.toml", "项目部署在 fly.io", "项目日志在 logs/")
+
+        hits = [h.handle for h in index.search("项目部署", entries)]
+
+        assert hits[:1] == ["p/1"], "the rare half of the query has to decide the order"
+
+    def test_a_single_entry_store_still_answers(self, tmp_path: Path) -> None:
+        index, _ = _index(tmp_path)
+        assert [h.handle for h in index.search("邮箱", _entries("邮箱已验证"))] == ["p/0"]

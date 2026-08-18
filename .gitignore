@@ -51,3 +51,4 @@ static/
 .claude
 .worktrees/
 benchmarks/locomo10.json
+benchmarks/locomo10_zh.json
