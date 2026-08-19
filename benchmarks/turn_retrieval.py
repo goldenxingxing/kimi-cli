@@ -148,6 +148,10 @@ async def build_store(client, sem) -> list[str]:
     return facts
 
 
+def numbered(items) -> str:
+    return "\n".join(f"{i + 1}. {x}" for i, x in enumerate(items))
+
+
 async def main() -> None:
     sem = asyncio.Semaphore(8)
     async with httpx.AsyncClient(timeout=180) as client:
@@ -213,9 +217,7 @@ async def main() -> None:
     print(f"{total} 条真实用户发言，每轮取 top-{TOP_K}\n")
     print(f"  ① 库里存在相关记忆          : {has_n:>4} / {total}  ({has_n / total * 100:.1f}%)")
     if has_n:
-        print(
-            f"  ② 其中检索捞到了            : {hit_when_exists:>4} / {has_n}  ({hit_when_exists / has_n * 100:.1f}%)"
-        )
+        print(ask(client, sem, _USEFUL.format(turn=t, hits=numbered(hits))))
     print(f"  ③ 库里没有、检索仍返回内容  : {noise_rows:>4} / {total - has_n}")
     print()
     print(
