@@ -428,3 +428,55 @@ async def test_promoting_something_that_is_gone_says_so(memory_tool: Memory) -> 
 
     assert result.is_error
     assert "deadbeef" in str(result)
+
+
+class TestTheDescriptionTeachesReading:
+    """The tool was described as a place to write, and was used that way.
+
+    Measured across real sessions: the Memory tool was called once, and that
+    once was an `add`. `search` was never called, while something in the store
+    would have helped on roughly two thirds of turns — so the retrieval work
+    was being spent on a path nothing reached.
+
+    The page is mostly about what to save, which is what a reader learns from.
+    These assertions hold the reading half in place: a trigger to act on, the
+    warning that the index is partial, and the counterweight that stops the fix
+    from turning into a search on every turn.
+    """
+
+    def _page(self) -> str:
+        from pathlib import Path
+
+        import kimi_cli.tools.memory as memory_tool
+
+        return (Path(memory_tool.__file__).parent / "description.md").read_text(encoding="utf-8")
+
+    def test_it_says_when_to_search_before_it_says_what_to_save(self) -> None:
+        """Order is instruction: whatever comes first is what the tool is for."""
+        page = self._page()
+
+        assert page.index("Looking something up") < page.index("Kinds — what to save")
+
+    def test_it_gives_a_trigger_that_can_fire(self) -> None:
+        """ "Search when relevant" is not a trigger; "before re-deriving" is."""
+        page = self._page()
+
+        assert "Before re-deriving" in page
+        assert "Before saying you do not know" in page
+
+    def test_it_says_the_index_is_not_the_store(self) -> None:
+        """The likeliest reason not to search is believing you already have it all."""
+        page = self._page()
+
+        assert "Not being listed is not" in page
+
+    def test_it_argues_against_searching_every_turn(self) -> None:
+        """Pushed one way only, the fix becomes a reflex and a cost on every turn.
+
+        Measured: roughly one in six retrieved entries helps on an arbitrary
+        turn, so an unconditional search is mostly noise.
+        """
+        page = self._page()
+
+        assert "not as a reflex" in page
+        assert "one in six" in page

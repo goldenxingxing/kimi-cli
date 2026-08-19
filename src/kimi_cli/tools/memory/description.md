@@ -24,6 +24,34 @@ or a negation** is never treated as a restatement, so correcting a date or
 flipping a rule always produces a separate entry — delete the stale one
 yourself if it should not survive.
 
+## Looking something up
+
+Most of this page is about writing, and reading is the half that gets
+forgotten: measured across real sessions, `search` was called zero times while
+something in the store would have helped on roughly two thirds of turns.
+
+Search before, not after:
+
+- **Before re-deriving.** About to read files, grep, or run a command to
+  establish how something here works, where something lives, or what was
+  decided? Search first. One call against a small store is cheaper than the
+  tool calls it saves, and the answer is the one this user already approved.
+- **When the user refers to something as settled** — "the path we agreed",
+  "like last time", "the convention for this" — search for it rather than
+  asking them to repeat it.
+- **Before saying you do not know** anything about this user's projects,
+  conventions or history.
+
+The snapshot is not the store. Behavioural entries arrive in full, but recorded
+facts arrive as an index, and past a few hundred entries that index shows a
+fraction of what exists and says so in its heading. **Not being listed is not
+evidence it was never recorded.**
+
+What not to do: searching on every turn. Most turns are instructions with
+nothing to look up, and a store this size returns something for almost any
+query — of what comes back for an arbitrary turn, roughly one in six helps.
+Search when one of the triggers above fires, not as a reflex.
+
 ## Kinds — what to save and when
 
 Pick exactly one kind per entry:
