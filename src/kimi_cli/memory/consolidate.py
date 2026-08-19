@@ -63,6 +63,36 @@ SUPERSEDED_RATIO = 0.50
 #: against more stores before it is treated as settled.
 TOPIC_OVERLAP_RATIO = 0.20
 
+#: Wording by which a newer entry announces that it replaces something.
+#:
+#: A far better signal than similarity, and it was being ignored. An entry
+#: reading "2026-05-06 起，TDI 改用 EWMA，不再维护 48 小时窗口" is not merely
+#: similar to the entry about the 48-hour window — it says outright that it
+#: supersedes it. Measured on an incremental corpus, every revision produced
+#: wording of this kind, while similarity scored the pairs too low to pair and
+#: the numeric guard vetoed them anyway.
+#:
+#: Announcement alone is not enough: an entry can announce a change to
+#: something else entirely, so it still has to be about the same subject.
+_SUPERSEDES = re.compile(
+    r"不再|已改为|改为|改成|改用|替代|取代|自\s*\d|起改|废弃|不再使用"
+    r"|no longer|replaced by|superseded|instead of|changed from|switched (?:to|from)"
+    r"|moved to|renamed to|as of \d",
+    re.I,
+)
+
+
+def announces_supersession(text: str) -> bool:
+    """Whether *text* says it replaces something, rather than merely resembling it."""
+    return _SUPERSEDES.search(text) is not None
+
+
+#: Shared subject required of an entry that announces a replacement. Lower
+#: than the silent case: the announcement carries most of the evidence, and
+#: demanding the usual overlap on top of it rejects a terse revision of a long
+#: original — which is the ordinary shape of "X 改为 Y".
+_ANNOUNCED_OVERLAP = 0.08
+
 #: Never propose retiring more than this at once. A long list invites approving
 #: it wholesale, which is the outcome this whole design exists to prevent.
 MAX_PROPOSALS = 5
@@ -89,6 +119,22 @@ def _similarity(a: str, b: str) -> float:
     if not a or not b:
         return 1.0 if a == b else 0.0
     return difflib.SequenceMatcher(None, _tokens(a), _tokens(b), autojunk=False).ratio()
+
+
+def _without_announcement(text: str) -> str:
+    """*text* with its replacement wording removed, for the negation check.
+
+    The two collide by construction. Announcing a replacement is usually done
+    by negating what it replaces — "改用 EWMA，不再维护 48 小时窗口", "switched
+    to AdaGrad, no longer uses SLSQP" — and the negation guard then reads that
+    as an inversion and refuses the pair. Two of three real revisions were lost
+    to exactly this.
+
+    The guard is still worth having: it is what stops "always run the
+    migration" being retired by "never run the migration". That pair announces
+    nothing, so removing announcement wording leaves it untouched.
+    """
+    return _SUPERSEDES.sub(" ", text)
 
 
 def _may_supersede(older: str, newer: str) -> bool:
@@ -121,6 +167,10 @@ def _may_supersede(older: str, newer: str) -> bool:
         return False
     if len(newer) < len(older) * MIN_LENGTH_RATIO:
         return False
+    if announces_supersession(newer):
+        return has_negation(_without_announcement(older)) == has_negation(
+            _without_announcement(newer)
+        )
     return has_negation(older) == has_negation(newer)
 
 
@@ -175,8 +225,17 @@ def find_superseded(entries: Sequence[MemoryEntry]) -> list[Supersession]:
 
             if not _may_supersede(a, b):
                 continue
+
+            # Three ways of being the same rule again, in descending order of
+            # how much they are guessing. A newer entry that says it replaces
+            # something, about the same subject, is stating the relationship
+            # rather than resembling it — so it needs far less overlap than a
+            # silent rewrite does.
+            announced = announces_supersession(newer.content) and overlap >= _ANNOUNCED_OVERLAP
             score = max(sequence, overlap)
-            if sequence < SUPERSEDED_RATIO and overlap < TOPIC_OVERLAP_RATIO:
+            if announced:
+                score = max(score, 1.0 - (1.0 - overlap) / 4)
+            elif sequence < SUPERSEDED_RATIO and overlap < TOPIC_OVERLAP_RATIO:
                 continue
             if best is None or score > best.score:
                 best = Supersession(

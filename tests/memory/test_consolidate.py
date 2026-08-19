@@ -361,3 +361,59 @@ class TestTheShapesRealEntriesActuallyHave:
         newer = _entry("feedback", "Write daily reports.")
 
         assert find_superseded([older, newer]) == []
+
+
+class TestAnnouncedReplacement:
+    """A newer entry that says it replaces something is stating the relationship.
+
+    Similarity can only guess at it, and guessed badly: on an incremental
+    corpus where six facts were revised, similarity paired none of them — the
+    revisions are terse and share little wording with the originals they
+    replace. The wording that announces the replacement is the evidence, and it
+    was being thrown away.
+    """
+
+    def test_a_revision_is_paired_on_what_it_says_not_what_it_resembles(self) -> None:
+        older = _entry("feedback", "截至 2026-03-04，闭环算法的求解器采用 SLSQP。")
+        newer = _entry(
+            "feedback",
+            "截至 2026-04-02，求解器已改为伴随法解析梯度加投影 AdaGrad，不再使用 SLSQP。",
+        )
+
+        found = find_superseded([older, newer])
+
+        assert len(found) == 1
+        assert found[0].older is older
+
+    def test_the_announcement_does_not_trip_the_negation_guard(self) -> None:
+        """The two collide by construction, and the guard was winning.
+
+        A replacement is usually announced by negating what it replaces —
+        "改用 EWMA，不再维护 48 小时窗口" — which the negation guard reads as an
+        inversion. Two of three real revisions were lost to exactly this.
+        """
+        older = _entry("feedback", "TDI 估计使用 48 小时滚动窗口，用 deque 存 576 个采样点。")
+        newer = _entry(
+            "feedback",
+            "2026-05-06 起，TDI 改用 EWMA，alpha=1/288，不再维护 48 小时窗口。",
+        )
+
+        assert find_superseded([older, newer]), "「不再」在这里是公告，不是反转"
+
+    def test_a_genuine_inversion_is_still_refused(self) -> None:
+        """The guard has to keep working where it was actually needed.
+
+        This pair announces nothing — no "改为", no "replaced by" — so the
+        negation stays visible and still refuses it.
+        """
+        older = _entry("feedback", "Always run the migration before deploying.")
+        newer = _entry("feedback", "Never run the migration before deploying.")
+
+        assert find_superseded([older, newer]) == []
+
+    def test_announcing_a_change_to_something_else_is_not_enough(self) -> None:
+        """Otherwise every revision retires whatever happens to be oldest."""
+        older = _entry("feedback", "Keep the changelog entry under one line.")
+        newer = _entry("feedback", "端口已从 5494 改为 8721，不再使用旧端口。")
+
+        assert find_superseded([older, newer]) == []
