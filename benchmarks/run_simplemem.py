@@ -36,7 +36,7 @@ os.environ.setdefault("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 os.environ.setdefault("EMBEDDING_DIMENSION", "384")
 os.environ.setdefault("SIMPLEMEM_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
-import simplemem
+import simplemem  # noqa: E402  (must follow the environment setup above)
 
 DATA = Path(os.environ["BENCH_DATA_PATH"])
 SAMPLES = int(os.environ.get("BENCH_SAMPLES", "2"))
