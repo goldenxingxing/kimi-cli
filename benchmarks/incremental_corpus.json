@@ -1,0 +1,261 @@
+{
+ "sessions": [
+  {
+   "id": 1,
+   "date": "2026-03-04",
+   "turns": [
+    [
+     "user",
+     "TDI 估计现在是 48 小时滚动窗口，用 deque 存 576 个采样点。"
+    ],
+    [
+     "assistant",
+     "记下了：TDI 用 48h 滚动窗口，deque 576 点。"
+    ],
+    [
+     "user",
+     "另外闭环算法的求解器用的是 SLSQP。"
+    ],
+    [
+     "assistant",
+     "好的。"
+    ]
+   ]
+  },
+  {
+   "id": 2,
+   "date": "2026-03-11",
+   "turns": [
+    [
+     "user",
+     "设计文档合并版放在 output/closed_loop_algorithm_design/ 下，文件名是 闭环控制算法设计文档_合并版.md。"
+    ],
+    [
+     "assistant",
+     "记下路径。"
+    ],
+    [
+     "user",
+     "还有，对外文档里不许出现代码里的函数名和文件名。"
+    ],
+    [
+     "assistant",
+     "明白，只保留功能化描述。"
+    ]
+   ]
+  },
+  {
+   "id": 3,
+   "date": "2026-04-02",
+   "turns": [
+    [
+     "user",
+     "求解器换掉了，现在是伴随法解析梯度加投影 AdaGrad，不再用 SLSQP。"
+    ],
+    [
+     "assistant",
+     "更新记录：求解器改为伴随法 + 投影 AdaGrad。"
+    ]
+   ]
+  },
+  {
+   "id": 4,
+   "date": "2026-04-18",
+   "turns": [
+    [
+     "user",
+     "Windows 打包的本地端口固定用 5494。"
+    ],
+    [
+     "assistant",
+     "记下。"
+    ]
+   ]
+  },
+  {
+   "id": 5,
+   "date": "2026-05-06",
+   "turns": [
+    [
+     "user",
+     "TDI 改成 EWMA 了，alpha = 1/288，每次输注完成后更新，不再维护 48 小时窗口。"
+    ],
+    [
+     "assistant",
+     "更新：TDI 用 EWMA，alpha=1/288。"
+    ],
+    [
+     "user",
+     "对应分支叫 ewma_tdi_differential。"
+    ],
+    [
+     "assistant",
+     "记下分支名。"
+    ]
+   ]
+  },
+  {
+   "id": 6,
+   "date": "2026-05-20",
+   "turns": [
+    [
+     "user",
+     "日报写在 output/reports/daily/ 下，按 D-YYYY-MM-DD.md 命名。"
+    ],
+    [
+     "assistant",
+     "记下。"
+    ]
+   ]
+  },
+  {
+   "id": 7,
+   "date": "2026-06-03",
+   "turns": [
+    [
+     "user",
+     "端口冲突了，Windows 打包的端口从 5494 改成 8721。"
+    ],
+    [
+     "assistant",
+     "更新：端口改为 8721。"
+    ]
+   ]
+  },
+  {
+   "id": 8,
+   "date": "2026-06-17",
+   "turns": [
+    [
+     "user",
+     "验证结论必须你自己重跑确认，不能只转述子代理给的结果。"
+    ],
+    [
+     "assistant",
+     "明白，我会独立复核。"
+    ]
+   ]
+  },
+  {
+   "id": 9,
+   "date": "2026-07-01",
+   "turns": [
+    [
+     "user",
+     "设计文档挪走了，合并版现在在 output/design/v2/ 下面，文件名不变。"
+    ],
+    [
+     "assistant",
+     "更新路径。"
+    ]
+   ]
+  },
+  {
+   "id": 10,
+   "date": "2026-07-15",
+   "turns": [
+    [
+     "user",
+     "CGM 语料库在 output/papers/raw/cgm_current2glucose_papers/，八个主题子类。"
+    ],
+    [
+     "assistant",
+     "记下。"
+    ]
+   ]
+  },
+  {
+   "id": 11,
+   "date": "2026-07-29",
+   "turns": [
+    [
+     "user",
+     "日报改成按月份分目录了，路径变成 output/reports/daily/26-8月/D-YYYY-MM-DD.md。"
+    ],
+    [
+     "assistant",
+     "更新日报路径。"
+    ]
+   ]
+  },
+  {
+   "id": 12,
+   "date": "2026-08-12",
+   "turns": [
+    [
+     "user",
+     "ewma_tdi_differential 已经合并进 kimo_perf_backport 了，以后以后者为准。"
+    ],
+    [
+     "assistant",
+     "更新：以 kimo_perf_backport 为准。"
+    ]
+   ]
+  }
+ ],
+ "facts": [
+  {
+   "topic": "TDI 估计方式",
+   "stale": "48 小时滚动窗口 deque 576 点",
+   "current": "EWMA，alpha=1/288",
+   "q": "TDI 现在是怎么估计的？",
+   "changed_at": 5
+  },
+  {
+   "topic": "MPC 求解器",
+   "stale": "SLSQP",
+   "current": "伴随法解析梯度 + 投影 AdaGrad",
+   "q": "闭环算法现在用的求解器是什么？",
+   "changed_at": 3
+  },
+  {
+   "topic": "Windows 端口",
+   "stale": "5494",
+   "current": "8721",
+   "q": "Windows 打包用的本地端口是多少？",
+   "changed_at": 7
+  },
+  {
+   "topic": "设计文档路径",
+   "stale": "output/closed_loop_algorithm_design/",
+   "current": "output/design/v2/",
+   "q": "闭环设计文档合并版现在放在哪个目录？",
+   "changed_at": 9
+  },
+  {
+   "topic": "日报路径",
+   "stale": "output/reports/daily/D-YYYY-MM-DD.md",
+   "current": "output/reports/daily/26-8月/",
+   "q": "日报现在写在哪个路径？",
+   "changed_at": 11
+  },
+  {
+   "topic": "TDI 分支",
+   "stale": "ewma_tdi_differential",
+   "current": "kimo_perf_backport",
+   "q": "TDI 相关工作现在以哪个分支为准？",
+   "changed_at": 12
+  },
+  {
+   "topic": "函数名禁令",
+   "stale": null,
+   "current": "对外文档不得出现代码函数名/文件名",
+   "q": "对外文档在命名上有什么禁令？",
+   "changed_at": null
+  },
+  {
+   "topic": "独立复核",
+   "stale": null,
+   "current": "验证结论必须自己重跑确认",
+   "q": "我对验证流程有什么要求？",
+   "changed_at": null
+  },
+  {
+   "topic": "CGM 语料",
+   "stale": null,
+   "current": "output/papers/raw/cgm_current2glucose_papers/",
+   "q": "CGM 文献语料库在哪里？",
+   "changed_at": null
+  }
+ ]
+}
