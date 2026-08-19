@@ -124,9 +124,11 @@ _USEFUL = """\
 
 async def build_store(client, sem) -> list[str]:
     """Extract facts from the user's own sessions with the shipped prompt."""
-    from kimi_cli.memory.archivist import _EXTRACTION_PROMPT, _parse_candidates
-    from try_extract import conversation_tail
     import time as _time
+
+    from try_extract import conversation_tail
+
+    from kimi_cli.memory.archivist import _EXTRACTION_PROMPT, _parse_candidates
 
     ids = sorted(d.name for d in SESSIONS.iterdir() if (d / "context.jsonl").is_file())
     today = _time.strftime("%Y-%m-%d", _time.localtime())
