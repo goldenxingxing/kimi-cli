@@ -480,3 +480,41 @@ class TestTheDescriptionTeachesReading:
 
         assert "not as a reflex" in page
         assert "one in six" in page
+
+
+class TestEntryLengthIsTreatedAsACost:
+    """Behavioural entries are carried into every conversation, so length is rent.
+
+    Measured on a real store: eleven entries averaging 576 characters had taken
+    79% of the space that exists, and three of them — 2,900 characters between
+    them — were versions of one procedure that already lived in a file each of
+    them named. The ceiling was not reached by having many memories; it was
+    reached by copying a document into three of them.
+    """
+
+    def _page(self) -> str:
+        from pathlib import Path
+
+        import kimi_cli.tools.memory as memory_tool
+
+        return (Path(memory_tool.__file__).parent / "description.md").read_text(encoding="utf-8")
+
+    def test_it_states_the_rule_about_procedures(self) -> None:
+        page = self._page()
+
+        assert "A procedure belongs in a file" in page
+
+    def test_it_shows_the_difference_rather_than_asserting_it(self) -> None:
+        """A length rule with no example is a rule about a number nobody has."""
+        page = self._page()
+
+        assert "1,038 characters" in page
+        assert "90 characters" in page
+
+    def test_a_long_behavioural_entry_is_told_what_it_costs(self) -> None:
+        """The decision is made on the write side, where the cost is invisible."""
+        from kimi_cli.memory.consolidate import BEHAVIOURAL_BUDGET_CHARS, LONG_ENTRY_CHARS
+
+        assert LONG_ENTRY_CHARS < BEHAVIOURAL_BUDGET_CHARS / 10, (
+            "the note has to fire well before one entry can take a tenth of the space"
+        )

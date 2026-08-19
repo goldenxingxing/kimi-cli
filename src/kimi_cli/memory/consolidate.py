@@ -48,6 +48,21 @@ from kimi_cli.memory.entry import MemoryEntry
 #: not a threshold problem and is refused by the negation guard instead.
 SUPERSEDED_RATIO = 0.50
 
+#: Shared subject matter, as a Jaccard overlap of distinctive terms.
+#:
+#: Sequence similarity was calibrated on one-sentence rules and does not survive
+#: contact with real entries: on a live store the two obviously-overlapping
+#: versions of one procedure scored 0.198 against a 0.50 floor, and the detector
+#: found nothing at all. Two long procedures about the same thing share their
+#: vocabulary and little of their wording, which is what this measures instead —
+#: the same pair scores 0.391 and 0.213, against 0.117 for the closest unrelated
+#: pair.
+#:
+#: Calibrated on one cluster in one store, which is not enough to trust the
+#: number; it is set where that cluster's gap is widest and should be revisited
+#: against more stores before it is treated as settled.
+TOPIC_OVERLAP_RATIO = 0.20
+
 #: Never propose retiring more than this at once. A long list invites approving
 #: it wholesale, which is the outcome this whole design exists to prevent.
 MAX_PROPOSALS = 5
@@ -88,17 +103,23 @@ def _may_supersede(older: str, newer: str) -> bool:
     the ordinary shape of a rule being made more precise — and the symmetric
     guard rejected exactly that case.
 
-    The other two are kept as they are. Numbers must match, so "keep the
-    changelog under 80 characters" never proposes retiring the version that
-    said 100: those are two claims, and deciding between them is not a
-    similarity question. Negation parity must match, so an instruction is never
-    proposed for retirement by its own inversion.
+    Negation parity is kept as a veto: an instruction must never be proposed
+    for retirement by its own inversion, and no amount of shared subject makes
+    that safe.
+
+    Matching numbers is *not* a veto here, which is where this parts company
+    with `dedup.may_merge`. That guard governs an automatic, destructive merge,
+    where "under 80 characters" quietly replacing "under 100" is exactly the
+    silent loss it exists to prevent. This governs a proposal the user reads,
+    so the asymmetry runs the other way: a wrong veto hides a real duplicate
+    forever, a wrong proposal costs one line to decline. Measured on a live
+    store, the veto was the whole reason nothing was ever found — the two
+    versions of one procedure differ in step numbers and section references,
+    and were refused for it. The difference is reported instead.
     """
     if not older or not newer:
         return False
     if len(newer) < len(older) * MIN_LENGTH_RATIO:
-        return False
-    if numeric_tokens(older) != numeric_tokens(newer):
         return False
     return has_negation(older) == has_negation(newer)
 
@@ -110,11 +131,17 @@ class Supersession:
     older: MemoryEntry
     newer: MemoryEntry
     score: float
+    numbers_differ: bool = False
 
     def render(self) -> str:
+        caution = (
+            " — their numbers differ, so check they are one rule and not two"
+            if self.numbers_differ
+            else ""
+        )
         return (
             f"- {self.older.handle} appears superseded by {self.newer.handle} "
-            f"({self.score:.2f}): {self.older.content[:80]}"
+            f"({self.score:.2f}){caution}: {self.older.content[:80]}"
         )
 
 
@@ -128,23 +155,64 @@ def find_superseded(entries: Sequence[MemoryEntry]) -> list[Supersession]:
     live = [e for e in entries if e.is_behavioural and e.retired_at is None and e.content.strip()]
     found: list[Supersession] = []
 
+    topics = [topic_terms(e.content) for e in live]
+
     for index, older in enumerate(live):
         best: Supersession | None = None
-        for newer in live[index + 1 :]:
+        for offset, newer in enumerate(live[index + 1 :]):
             if older.kind != newer.kind:
                 continue
             a, b = normalize_content(older.content), normalize_content(newer.content)
-            score = _similarity(a, b)
-            if score < SUPERSEDED_RATIO or not _may_supersede(a, b):
+
+            # Two ways of being the same rule, because entries come in two
+            # shapes. A one-line instruction restated more precisely is caught
+            # by sequence similarity; a multi-step procedure rewritten is not —
+            # it keeps its subject and changes its wording, so it is caught by
+            # how much vocabulary the two share.
+            sequence = _similarity(a, b)
+            ta, tb = topics[index], topics[index + 1 + offset]
+            overlap = len(ta & tb) / len(ta | tb) if ta and tb else 0.0
+
+            if not _may_supersede(a, b):
+                continue
+            score = max(sequence, overlap)
+            if sequence < SUPERSEDED_RATIO and overlap < TOPIC_OVERLAP_RATIO:
                 continue
             if best is None or score > best.score:
-                best = Supersession(older=older, newer=newer, score=score)
+                best = Supersession(
+                    older=older,
+                    newer=newer,
+                    score=score,
+                    numbers_differ=numeric_tokens(a) != numeric_tokens(b),
+                )
         if best is not None:
             found.append(best)
 
     found.sort(key=lambda s: s.score, reverse=True)
     return found[:MAX_PROPOSALS]
 
+
+#: What the injected behavioural section holds.
+#:
+#: Lives here rather than beside the renderer because the write path needs it
+#: too: an entry's cost is only meaningful as a share of the space there is,
+#: and the moment to say so is when it is being written.
+BEHAVIOURAL_BUDGET_CHARS = 8_000
+
+#: A behavioural entry above this is worth remarking on. Measured on a real
+#: store: eleven entries averaging 576 characters filled 79% of the budget, and
+#: three of them were versions of one procedure that already existed as a file.
+#: At 150 characters the same budget holds fifty-odd entries instead of
+#: fourteen, which is the difference between the ceiling being a concern and
+#: being the concern.
+LONG_ENTRY_CHARS = 400
+
+#: Warn while there is still room to act.
+#:
+#: The pressure signal fired when the store had already outgrown the budget —
+#: by which point entries were being dropped from every session. A store at 79%
+#: is where consolidation is still cheap and nothing has been lost yet.
+PRESSURE_WARN_AT = 0.75
 
 #: How long a subject has to stay away before the rule about it is worth
 #: asking about. Long enough that a quiet fortnight on one part of a project

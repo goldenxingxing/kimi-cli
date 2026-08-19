@@ -52,6 +52,32 @@ nothing to look up, and a store this size returns something for almost any
 query — of what comes back for an arbitrary turn, roughly one in six helps.
 Search when one of the triggers above fires, not as a reflex.
 
+## How long an entry should be
+
+A `user` or `feedback` entry is carried into every later conversation whether
+or not it is relevant, so its length is a standing cost. About eight thousand
+characters exist for all of them combined — at one sentence each that holds
+fifty-odd rules, at a paragraph each it holds fourteen, and past the limit the
+oldest stop arriving with nothing to show it.
+
+**A procedure belongs in a file. Memory holds the pointer and the trigger.**
+
+Measured on a real store: three entries totalling 2,900 characters — 36% of the
+whole budget — were three versions of one daily-report procedure, and each of
+them named the file where that procedure already lived. What was needed was one
+line: where the file is, and when to open it.
+
+    ✗  "Daily report SOP. (1) FIRST read /path/SOP.md. (2) Then scan
+        session-data/ for … (3) For each session, read the first user
+        message … (4) …"  — 1,038 characters, restating a file
+
+    ✓  "Daily reports follow /path/SOP.md — read it before writing one;
+        the three-scan rule in §4.0 is mandatory."  — 90 characters
+
+Write the entry so a later session knows *that this constraint exists* and
+where to look. It does not need to be able to reconstruct the procedure from
+memory alone, because the file is right there.
+
 ## Kinds — what to save and when
 
 Pick exactly one kind per entry:

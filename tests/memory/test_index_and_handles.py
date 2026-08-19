@@ -136,9 +136,14 @@ class TestBudget:
         entries = [_entry("feedback", f"rule number {i} " + "x" * 400) for i in range(60)]
 
         out = csm._render(entries, [])
+        # Only the section that states the rules. A retirement proposal quotes
+        # the entry it is proposing, so the oldest can legitimately appear
+        # further down the page — as something to decide about, not as
+        # something in force.
+        rules = out.split("## ")[1]
 
-        assert "rule number 59 " in out, "the most recent instruction must survive"
-        assert "rule number 0 " not in out, "and the oldest is what gives way"
+        assert "rule number 59 " in rules, "the most recent instruction must survive"
+        assert "rule number 0 " not in rules, "and the oldest is what gives way"
 
     def test_one_section_growing_does_not_evict_another(self) -> None:
         """A shared pool would let whichever section grows keep what it takes."""
@@ -331,3 +336,34 @@ class TestRetirement:
 
         assert "acls builds with uv" in out
         assert "used to build with poetry" not in out
+
+
+class TestPressureWarnsWhileThereIsRoom:
+    """A signal that fires at the limit fires after the loss has started.
+
+    Measured on a live store: 83% of the behavioural budget used, a quarter of
+    it duplicates, and nothing said — because the proposals were gated on the
+    store having already outgrown what fits.
+    """
+
+    def _entries(self, n: int, size: int) -> list[MemoryEntry]:
+        return [_entry("feedback", f"Rule {i}: " + "detail " * (size // 7)) for i in range(n)]
+
+    def test_a_crowded_store_is_told_before_it_overflows(self) -> None:
+        from kimi_cli.memory.consolidate import BEHAVIOURAL_BUDGET_CHARS, PRESSURE_WARN_AT
+
+        entries = self._entries(11, 600)
+        used = sum(len(e.render()) + 1 for e in entries)
+        assert PRESSURE_WARN_AT * BEHAVIOURAL_BUDGET_CHARS <= used < BEHAVIOURAL_BUDGET_CHARS, (
+            "the fixture has to sit in the window this is about"
+        )
+
+        out = csm._render(entries, [])
+
+        assert "Possibly superseded" in out
+
+    def test_a_store_with_room_is_left_alone(self) -> None:
+        """Below the mark, pruning is busywork and the section is noise."""
+        out = csm._render(self._entries(2, 300), [])
+
+        assert "Possibly superseded" not in out

@@ -297,3 +297,67 @@ class TestDormancy:
         entry = _entry("feedback", "Keep the invoice template in landscape.")
 
         assert find_dormant([entry], now=time.time()) == []
+
+
+class TestTheShapesRealEntriesActuallyHave:
+    """Calibrated on one-sentence rules, this found nothing in a real store.
+
+    Live data: eleven behavioural entries, of which three were versions of one
+    daily-report procedure at 850–1,040 characters each. Sequence similarity
+    put the clearest pair at 0.198 against a 0.50 floor, and the numeric guard
+    vetoed it anyway because one version numbers its steps. The detector
+    reported zero while a quarter of the budget sat in duplicates.
+    """
+
+    def _procedure(self, variant: str) -> str:
+        return (
+            f"{variant} daily report SOP. Canonical file: "
+            "/Users/x/output/reports/daily/SOP.md. Before writing, scan the "
+            "session directory for the day's sessions, read the first user "
+            "message and the closing summary of each, and summarise the work. "
+            "Also scan the code projects for commits and deliverables produced "
+            "that day, and cross-check both against the deliverables index so "
+            "nothing is missed. Report the absolute path when done."
+        )
+
+    def test_two_versions_of_one_procedure_are_paired(self) -> None:
+        older = _entry("feedback", self._procedure("Daily report location and writing"))
+        newer = _entry(
+            "feedback",
+            self._procedure("Updated")
+            + " Steps (1) read the SOP (2) scan sessions (3) scan code projects.",
+        )
+
+        found = find_superseded([older, newer])
+
+        assert len(found) == 1, "long procedures share vocabulary, not wording"
+        assert found[0].older is older
+
+    def test_differing_numbers_are_reported_rather_than_vetoed(self) -> None:
+        """`dedup.may_merge` vetoes on this, and must: it merges destructively.
+
+        A proposal is read by the user, so the asymmetry runs the other way —
+        a wrong veto hides a real duplicate forever, a wrong proposal costs one
+        line to decline.
+        """
+        older = _entry("feedback", self._procedure("Daily report"))
+        newer = _entry("feedback", self._procedure("Updated") + " See §4.0 and §5.1.")
+
+        found = find_superseded([older, newer])
+
+        assert found, "a step number must not be able to hide a duplicate"
+        assert found[0].numbers_differ
+        assert "numbers differ" in found[0].render()
+
+    def test_an_inversion_is_still_refused(self) -> None:
+        """Relaxing the numeric veto must not relax the one about meaning."""
+        older = _entry("feedback", "Always run the migration before deploying to staging.")
+        newer = _entry("feedback", "Never run the migration before deploying to staging.")
+
+        assert find_superseded([older, newer]) == []
+
+    def test_a_shorter_rewrite_is_still_refused(self) -> None:
+        older = _entry("feedback", self._procedure("Daily report"))
+        newer = _entry("feedback", "Write daily reports.")
+
+        assert find_superseded([older, newer]) == []

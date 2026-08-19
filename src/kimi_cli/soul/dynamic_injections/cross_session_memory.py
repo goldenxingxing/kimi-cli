@@ -11,7 +11,13 @@ from kimi_cli.memory.candidates import (
     CandidateFile,
     MemoryCandidate,
 )
-from kimi_cli.memory.consolidate import find_dormant, find_superseded, pressure
+from kimi_cli.memory.consolidate import (
+    BEHAVIOURAL_BUDGET_CHARS,
+    PRESSURE_WARN_AT,
+    find_dormant,
+    find_superseded,
+    pressure,
+)
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.recent import (
     RECENT_FILENAME,
@@ -39,7 +45,7 @@ _RECENT_INJECTION_LIMIT = 5
 # Behavioural memory gets the most room: it is small, it is instructions, and
 # dropping one changes how the agent works without saying so. If this ever
 # truncates, that is worth seeing rather than absorbing silently.
-_BEHAVIOURAL_BUDGET_CHARS = 8_000
+_BEHAVIOURAL_BUDGET_CHARS = BEHAVIOURAL_BUDGET_CHARS
 _INDEX_BUDGET_CHARS = 4_000
 _RECENT_BUDGET_CHARS = 5_000
 
@@ -279,8 +285,14 @@ def _render(
     # Only raised once the store is actually past what fits. Below that the
     # ceiling costs nothing and asking the user to prune is busywork; above it,
     # entries are being dropped from every session with no other sign.
-    superseded = find_superseded(persistent) if fit < held else []
-    dormant = find_dormant(persistent, now=time.time()) if fit < held else []
+    # Raised while there is still room to act. Waiting for the store to
+    # overflow means the first signal arrives after entries have already
+    # stopped being injected — measured on a real store at 83% of budget, where
+    # a quarter of the space was duplicates and nothing had been said.
+    used = sum(len(e.render()) + 1 for e in behavioural)
+    crowded = used >= _BEHAVIOURAL_BUDGET_CHARS * PRESSURE_WARN_AT
+    superseded = find_superseded(persistent) if crowded else []
+    dormant = find_dormant(persistent, now=time.time()) if crowded else []
     if superseded or dormant:
         sections.append(
             "\n".join(

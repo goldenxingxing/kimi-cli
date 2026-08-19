@@ -16,6 +16,8 @@ from kimi_cli.memory import (
     upsert_entry,
 )
 from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
+from kimi_cli.memory.consolidate import BEHAVIOURAL_BUDGET_CHARS, LONG_ENTRY_CHARS
+from kimi_cli.memory.entry import BEHAVIOURAL_KINDS
 from kimi_cli.memory.search import MemorySearchIndex
 from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle, set_retired
 from kimi_cli.soul.agent import Runtime
@@ -210,6 +212,20 @@ def _add_payload(result: UpsertResult, op: AddOp) -> dict[str, object]:
         payload["similarity"] = round(result.score, 3)
         if result.replaced_content is not None:
             payload["replaced"] = _preview(result.replaced_content)
+    # Behavioural entries are carried into every later conversation, so their
+    # length is a standing cost rather than a one-off one — and it is invisible
+    # from the write side, which is where the decision is made. Measured on a
+    # real store: eleven entries averaging 576 characters had taken 79% of the
+    # space there is, and three of them restated one procedure that already
+    # existed as a file.
+    if op.kind in BEHAVIOURAL_KINDS and len(op.content) >= LONG_ENTRY_CHARS:
+        share = len(op.content) / BEHAVIOURAL_BUDGET_CHARS * 100
+        payload["budget_note"] = (
+            f"{len(op.content)} chars, about {share:.0f}% of the space every future "
+            "conversation reserves for behavioural memory. If this is a procedure, "
+            "keep the procedure in a file and record the pointer and the trigger."
+        )
+
     if result.advisories:
         payload["possible_duplicates"] = [
             {"id": entry_id, "similarity": round(score, 3), "content": _preview(content)}
