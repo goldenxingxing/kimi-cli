@@ -31,6 +31,7 @@ from kimi_cli.memory.recent import (
     SummaryTrigger,
     append_summary,
 )
+from kimi_cli.memory.storage import PERSISTENT_FILENAME, stamp_relevance
 from kimi_cli.soul.compaction import CompactionResult, SimpleCompaction
 from kimi_cli.utils.logging import logger
 from kimi_cli.wire.types import TextPart
@@ -266,6 +267,7 @@ async def propose_candidates(soul: KimiSoul, history: Sequence[Message]) -> int:
         text = extract_text(list(history))
         if len(text) < 200:
             return 0
+        _note_what_came_up(soul, text[-_EXTRACTION_TAIL_CHARS:])
         raw = await _ask_for_candidates(soul, text[-_EXTRACTION_TAIL_CHARS:])
         proposals = _parse_candidates(raw, session_id=soul.runtime.session.id)
         if not proposals:
@@ -295,6 +297,24 @@ async def propose_candidates(soul: KimiSoul, history: Sequence[Message]) -> int:
     except Exception:
         logger.warning("memory candidate extraction failed", exc_info=True)
         return 0
+
+
+def _note_what_came_up(soul: KimiSoul, conversation: str) -> None:
+    """Record which behavioural entries this conversation was about.
+
+    Runs where the extraction call already runs, so it costs a pass over text
+    already in hand and no request. Failure is ignored on purpose: this feeds a
+    suggestion, and losing a stamp delays a question rather than breaking
+    anything.
+    """
+    try:
+        stamp_relevance(
+            soul.runtime.user_memory_dir / PERSISTENT_FILENAME,
+            conversation,
+            now=time.time(),
+        )
+    except Exception:
+        logger.debug("could not record topical relevance", exc_info=True)
 
 
 async def _ask_for_candidates(soul: KimiSoul, conversation: str) -> str:

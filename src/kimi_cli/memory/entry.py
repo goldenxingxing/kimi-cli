@@ -37,6 +37,22 @@ class MemoryEntry(BaseModel):
     content: str
     created_at: float = Field(default_factory=time.time)
     updated_at: float | None = None
+    last_relevant_at: float | None = None
+    """When this entry's subject last came up in a conversation.
+
+    Not when it was last obeyed — that has no trace. A rule is followed by
+    *not* doing something, so "never force-push to main" and "no function names
+    in the docs" leave exactly as much evidence when honoured as when
+    forgotten. Anything scored on compliance would retire prohibitions first,
+    which are the entries least safe to lose.
+
+    Topicality is observable where compliance is not: whether the subject came
+    up at all. A rule about documents is dormant if nobody has touched a
+    document in months, and dormant is not wrong — it is only the difference
+    between a rule that still has work to do and one that does not. Which is
+    why this decides nothing on its own and only ranks what to ask about.
+    """
+
     retired_at: float | None = None
     """When this stopped being injected, if it has.
 

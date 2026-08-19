@@ -146,6 +146,138 @@ def find_superseded(entries: Sequence[MemoryEntry]) -> list[Supersession]:
     return found[:MAX_PROPOSALS]
 
 
+#: How long a subject has to stay away before the rule about it is worth
+#: asking about. Long enough that a quiet fortnight on one part of a project
+#: means nothing, short enough to matter within the life of a store.
+DORMANT_AFTER_DAYS = 90
+
+#: A term this common says nothing about what a conversation was about.
+_TOPIC_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "with",
+        "is",
+        "are",
+        "be",
+        "not",
+        "no",
+        "do",
+        "does",
+        "use",
+        "used",
+        "using",
+        "user",
+        "should",
+        "must",
+        "always",
+        "never",
+        "when",
+        "if",
+        "it",
+        "this",
+        "that",
+        "你",
+        "我",
+        "的",
+        "了",
+        "是",
+        "在",
+        "和",
+        "要",
+        "不",
+        "有",
+        "个",
+        "这",
+        "那",
+        "会",
+        "能",
+        "就",
+        "都",
+        "把",
+        "被",
+        "给",
+        "让",
+        "用",
+    }
+)
+
+_PUNCTUATION = ".,;:!?()[]{}\"'`，。；：！？（）【】「」、…—/\\"
+
+#: Terms shared with a conversation before its subject counts as having come
+#: up. One word in common is a coincidence; two is a topic.
+_TOPIC_HITS = 2
+
+
+def topic_terms(text: str) -> set[str]:
+    """The distinctive terms of a piece of text, for judging what it is about.
+
+    Deliberately crude — this decides which entries to *ask* about, never what
+    to remove, so a wrong answer costs a question rather than a rule.
+    """
+    # Punctuation is stripped here and not in `_tokens`: supersession compares
+    # two entries, where a trailing full stop lands on both sides and cancels,
+    # while this compares an entry against a conversation, where "branch." and
+    # "branch" are the difference between a rule looking live and looking
+    # abandoned.
+    terms = set()
+    for token in _tokens(text.casefold()):
+        term = token.strip(_PUNCTUATION)
+        if len(term) > 1 and term not in _TOPIC_STOPWORDS:
+            terms.add(term)
+    return terms
+
+
+def mark_relevant(
+    entries: Sequence[MemoryEntry], conversation: str, *, now: float
+) -> list[MemoryEntry]:
+    """Stamp behavioural entries whose subject appears in *conversation*.
+
+    Returns the entries that changed, so the caller can decide whether a write
+    is worth it.
+    """
+    seen = topic_terms(conversation)
+    if not seen:
+        return []
+    touched: list[MemoryEntry] = []
+    for entry in entries:
+        if not entry.is_behavioural or entry.retired_at is not None:
+            continue
+        if len(topic_terms(entry.content) & seen) >= _TOPIC_HITS:
+            entry.last_relevant_at = now
+            touched.append(entry)
+    return touched
+
+
+def find_dormant(
+    entries: Sequence[MemoryEntry], *, now: float, after_days: int = DORMANT_AFTER_DAYS
+) -> list[MemoryEntry]:
+    """Behavioural entries whose subject has not come up in a long time.
+
+    Oldest silence first. An entry never stamped at all falls back to when it
+    was written, so a store that predates this measurement ages in rather than
+    reporting everything as dormant on the first run.
+    """
+    cutoff = now - after_days * 86_400
+    dormant = [
+        e
+        for e in entries
+        if e.is_behavioural
+        and e.retired_at is None
+        and (e.last_relevant_at or e.updated_at or e.created_at) < cutoff
+    ]
+    dormant.sort(key=lambda e: e.last_relevant_at or e.updated_at or e.created_at)
+    return dormant[:MAX_PROPOSALS]
+
+
 def pressure(entries: Sequence[MemoryEntry], budget_chars: int) -> tuple[int, int]:
     """``(entries that fit, entries there are)`` for behavioural memory.
 

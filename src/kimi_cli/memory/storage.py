@@ -93,6 +93,29 @@ def _write_atomic(path: Path, entries: list[MemoryEntry]) -> None:
         raise
 
 
+#: The store's filename, in one place. It was spelled out separately in the
+#: injection provider, which is the kind of duplication that survives until the
+#: two disagree.
+PERSISTENT_FILENAME = "persistent.jsonl"
+
+
+def stamp_relevance(path: Path, conversation: str, *, now: float) -> int:
+    """Record which behavioural entries *conversation* was about. Returns how many.
+
+    Read-modify-write under the same exclusive lock as every other mutation:
+    this runs at compaction, and a session ending while another writes a memory
+    is an ordinary thing rather than a rare one.
+    """
+    from kimi_cli.memory.consolidate import mark_relevant
+
+    with _locked(path, exclusive=True):
+        entries = _read_raw(path)
+        touched = mark_relevant(entries, conversation, now=now)
+        if touched:
+            _write_atomic(path, entries)
+        return len(touched)
+
+
 def read_entries(path: Path) -> list[MemoryEntry]:
     """Read all entries from ``path`` under a shared lock."""
     with _locked(path, exclusive=False):

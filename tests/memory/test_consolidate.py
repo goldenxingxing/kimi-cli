@@ -12,7 +12,9 @@ from __future__ import annotations
 from kimi_cli.memory.consolidate import (
     MAX_PROPOSALS,
     SUPERSEDED_RATIO,
+    find_dormant,
     find_superseded,
+    mark_relevant,
     pressure,
 )
 from kimi_cli.memory.entry import MemoryEntry
@@ -198,3 +200,100 @@ class TestTheThresholdSeparatesRealCases:
         elapsed = time.perf_counter() - started
 
         assert elapsed < 1.0, f"took {elapsed:.1f}s to scan sixty entries"
+
+
+class TestDormancy:
+    """Ranking what to ask about, on evidence that a rule cannot destroy itself by working.
+
+    The obvious signal — was this rule used — is unavailable and worse than
+    unavailable. A rule is obeyed by *not* doing something, so a prohibition
+    honoured for a year looks exactly like one nobody remembers. Scoring on
+    compliance would retire the entries least safe to lose, first.
+
+    What is observable is whether the subject came up at all.
+    """
+
+    def _aged(self, kind: str, content: str, *, days_quiet: float) -> MemoryEntry:
+        import time
+
+        entry = _entry(kind, content)
+        entry.created_at = entry.last_relevant_at = time.time() - days_quiet * 86_400
+        return entry
+
+    def test_a_rule_whose_subject_came_up_is_stamped(self) -> None:
+        import time
+
+        entries = [_entry("feedback", "Never force-push to the main branch.")]
+
+        touched = mark_relevant(
+            entries, "I rebased and had to force-push the branch again", now=time.time()
+        )
+
+        assert touched == entries
+        assert entries[0].last_relevant_at is not None
+
+    def test_an_unrelated_conversation_does_not_stamp(self) -> None:
+        import time
+
+        entries = [_entry("feedback", "Never force-push to the main branch.")]
+
+        assert (
+            mark_relevant(entries, "let's talk about the invoice template", now=time.time()) == []
+        )
+
+    def test_one_word_in_common_is_not_a_topic(self) -> None:
+        """Otherwise every rule is stamped by every conversation and none is ever quiet."""
+        import time
+
+        entries = [_entry("feedback", "Never force-push to the main branch.")]
+
+        assert mark_relevant(entries, "the main course was good", now=time.time()) == []
+
+    def test_a_prohibition_that_was_obeyed_is_still_quiet_only_when_its_subject_is(
+        self,
+    ) -> None:
+        """The failure mode this whole design avoids, asserted directly.
+
+        Obeying "never force-push" produces no force-push in the transcript.
+        What keeps the rule alive is that branches were discussed at all.
+        """
+        import time
+
+        rule = self._aged("feedback", "Never force-push to the main branch.", days_quiet=200)
+
+        mark_relevant([rule], "merged the branch into main after review", now=time.time())
+
+        assert find_dormant([rule], now=time.time()) == []
+
+    def test_a_rule_nobody_has_touched_is_proposed(self) -> None:
+        import time
+
+        old = self._aged("feedback", "Keep the invoice template in landscape.", days_quiet=200)
+        fresh = self._aged("feedback", "Never force-push to main.", days_quiet=1)
+
+        dormant = find_dormant([old, fresh], now=time.time())
+
+        assert [e.content for e in dormant] == [old.content]
+
+    def test_project_facts_are_left_alone(self) -> None:
+        import time
+
+        stale = self._aged("project", "The API base path is /v1.", days_quiet=400)
+
+        assert find_dormant([stale], now=time.time()) == []
+
+    def test_a_retired_entry_is_not_proposed_again(self) -> None:
+        import time
+
+        gone = self._aged("feedback", "Keep the invoice template in landscape.", days_quiet=400)
+        gone.retired_at = 1_700_000_000.0
+
+        assert find_dormant([gone], now=time.time()) == []
+
+    def test_a_store_written_before_any_stamping_ages_in(self) -> None:
+        """Everything unstamped must not read as dormant on the first run."""
+        import time
+
+        entry = _entry("feedback", "Keep the invoice template in landscape.")
+
+        assert find_dormant([entry], now=time.time()) == []

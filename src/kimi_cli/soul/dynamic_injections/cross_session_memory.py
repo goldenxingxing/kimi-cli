@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, override
 
@@ -10,14 +11,14 @@ from kimi_cli.memory.candidates import (
     CandidateFile,
     MemoryCandidate,
 )
-from kimi_cli.memory.consolidate import find_superseded, pressure
+from kimi_cli.memory.consolidate import find_dormant, find_superseded, pressure
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.recent import (
     RECENT_FILENAME,
     SessionSummary,
     read_recent_summaries,
 )
-from kimi_cli.memory.storage import read_entries
+from kimi_cli.memory.storage import PERSISTENT_FILENAME, read_entries
 from kimi_cli.soul.dynamic_injection import DynamicInjection, DynamicInjectionProvider
 from kimi_cli.utils.logging import logger
 
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
     from kimi_cli.soul.kimisoul import KimiSoul
 
 _INJECTION_TYPE = "cross_session_memory"
-_PERSISTENT_FILENAME = "persistent.jsonl"
 
 # How many recent summaries to surface to the LLM at startup.
 _RECENT_INJECTION_LIMIT = 5
@@ -91,7 +91,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
         self._injected = True
         try:
             user_memory_dir = soul.runtime.user_memory_dir
-            persistent = read_entries(user_memory_dir / _PERSISTENT_FILENAME)
+            persistent = read_entries(user_memory_dir / PERSISTENT_FILENAME)
             pending = CandidateFile(user_memory_dir / CANDIDATES_FILENAME).read()
             recent = read_recent_summaries(
                 user_memory_dir / RECENT_FILENAME,
@@ -163,6 +163,12 @@ def _fit_entries(
     dropped = len(rendered) - len(kept)
     note = f"… ({dropped} older entries not shown — use `search` to reach them)"
     return "\n".join([note, *(text for _, text in kept)])
+
+
+def _render_dormant(entry: MemoryEntry) -> str:
+    since = entry.last_relevant_at or entry.updated_at or entry.created_at
+    stamp = time.strftime("%Y-%m", time.localtime(since))
+    return f"- {entry.handle} (quiet since {stamp}): {entry.content[:80]}"
 
 
 def _render(
@@ -274,7 +280,8 @@ def _render(
     # ceiling costs nothing and asking the user to prune is busywork; above it,
     # entries are being dropped from every session with no other sign.
     superseded = find_superseded(persistent) if fit < held else []
-    if superseded:
+    dormant = find_dormant(persistent, now=time.time()) if fit < held else []
+    if superseded or dormant:
         sections.append(
             "\n".join(
                 [
@@ -291,6 +298,20 @@ def _render(
                     ),
                     "",
                     *(s.render() for s in superseded),
+                    *(
+                        [
+                            "",
+                            "Not superseded, only quiet — their subject has not come "
+                            "up in months. That is not evidence they are wrong; a "
+                            "rule is obeyed by *not* doing something and leaves no "
+                            "trace either way, so this ranks what to ask about and "
+                            "nothing else:",
+                            "",
+                        ]
+                        if dormant
+                        else []
+                    ),
+                    *(_render_dormant(e) for e in dormant),
                 ]
             )
         )
