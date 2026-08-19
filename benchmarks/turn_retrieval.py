@@ -124,11 +124,9 @@ _USEFUL = """\
 
 async def build_store(client, sem) -> list[str]:
     """Extract facts from the user's own sessions with the shipped prompt."""
-    import time as _time
-
-    from try_extract import conversation_tail
-
     from kimi_cli.memory.archivist import _EXTRACTION_PROMPT, _parse_candidates
+    from try_extract import conversation_tail
+    import time as _time
 
     ids = sorted(d.name for d in SESSIONS.iterdir() if (d / "context.jsonl").is_file())
     today = _time.strftime("%Y-%m-%d", _time.localtime())
@@ -148,7 +146,7 @@ async def build_store(client, sem) -> list[str]:
     return facts
 
 
-def numbered(items) -> str:
+def numbered(items: list[str]) -> str:
     return "\n".join(f"{i + 1}. {x}" for i, x in enumerate(items))
 
 
@@ -180,13 +178,7 @@ async def main() -> None:
         ]
         useful = await asyncio.gather(
             *(
-                ask(
-                    client,
-                    sem,
-                    _USEFUL.format(
-                        turn=t, hits="\n".join(f"{i + 1}. {h}" for i, h in enumerate(hits))
-                    ),
-                )
+                ask(client, sem, _USEFUL.format(turn=t, hits=numbered(hits)))
                 if hits
                 else asyncio.sleep(0, result="")
                 for t, hits in zip(turns, retrieved, strict=True)
@@ -217,7 +209,8 @@ async def main() -> None:
     print(f"{total} 条真实用户发言，每轮取 top-{TOP_K}\n")
     print(f"  ① 库里存在相关记忆          : {has_n:>4} / {total}  ({has_n / total * 100:.1f}%)")
     if has_n:
-        print(ask(client, sem, _USEFUL.format(turn=t, hits=numbered(hits))))
+        rate = hit_when_exists / has_n * 100
+        print(f"  ② 其中检索捞到了            : {hit_when_exists:>4} / {has_n}  ({rate:.1f}%)")
     print(f"  ③ 库里没有、检索仍返回内容  : {noise_rows:>4} / {total - has_n}")
     print()
     print(
