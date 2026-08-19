@@ -10,6 +10,7 @@ from kimi_cli.memory.candidates import (
     CandidateFile,
     MemoryCandidate,
 )
+from kimi_cli.memory.consolidate import find_superseded, pressure
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.recent import (
     RECENT_FILENAME,
@@ -179,6 +180,8 @@ def _render(
     lookup = [e for e in live if not e.is_behavioural]
     retired = len(persistent) - len(live)
 
+    fit, held = pressure(persistent, _BEHAVIOURAL_BUDGET_CHARS)
+
     if behavioural:
         lines = [
             "## Persistent memory",
@@ -186,6 +189,15 @@ def _render(
             "",
         ]
         body = _fit_entries(behavioural, _BEHAVIOURAL_BUDGET_CHARS, lambda e: e.render())
+        if fit < held:
+            # The ceiling is invisible from inside a session: what did not fit
+            # is simply absent, and absent instructions read as instructions
+            # that were never given. Saying so is not a fix — consolidation is
+            # — but it turns a silent loss into a visible one.
+            body += (
+                f"\n({held - fit} more not shown here; the store is past what "
+                'this section holds — reachable via `op: "search"`)'
+            )
         if retired:
             # Said once, beside the instructions it affects: an agent told a
             # rule in an earlier session and not told it here should be able to
@@ -257,6 +269,31 @@ def _render(
         ]
         lines.extend(c.render_index() for c in pending)
         sections.append("\n".join(lines))
+
+    # Only raised once the store is actually past what fits. Below that the
+    # ceiling costs nothing and asking the user to prune is busywork; above it,
+    # entries are being dropped from every session with no other sign.
+    superseded = find_superseded(persistent) if fit < held else []
+    if superseded:
+        sections.append(
+            "\n".join(
+                [
+                    "## Possibly superseded (not acted on)",
+                    (
+                        "Older instructions a later one appears to have replaced. "
+                        "Nothing has changed — raise these with the user when it "
+                        "fits, and on their word "
+                        '`Memory(operation={"op": "retire", "handle": "<handle>"})`. '
+                        "Retiring keeps the entry and its history; it only stops "
+                        "being carried into new conversations. Do not retire in "
+                        "bulk: a rule that still holds, retired, changes how you "
+                        "work with nothing to show it happened:"
+                    ),
+                    "",
+                    *(s.render() for s in superseded),
+                ]
+            )
+        )
 
     if not sections:
         return ""

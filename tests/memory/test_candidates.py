@@ -261,3 +261,69 @@ class TestTimeAnchoring:
         assert "what was done" in _EXTRACTION_PROMPT
         assert "not licence to record what happened" in _EXTRACTION_PROMPT
         assert "a wrong date is worse than none" in _EXTRACTION_PROMPT
+
+
+class TestSilentFailureIsNotSilent:
+    """ "Nothing worth keeping" and "the extractor is broken" are the same shape.
+
+    Both end as zero candidates, and that is how a prompt that never once
+    produced a usable proposal survived for the life of the feature: the
+    failure looked exactly like the common, correct answer. The evidence that
+    separates them is in the reply itself and costs nothing to keep.
+    """
+
+    def test_an_empty_array_is_a_refusal(self) -> None:
+        from kimi_cli.memory.archivist import _looks_like_refusal
+
+        assert _looks_like_refusal("[]")
+        assert _looks_like_refusal("  [ ]  ")
+        assert _looks_like_refusal(""), "no reply proposed nothing either"
+
+    def test_anything_else_that_parsed_to_nothing_is_a_fault(self) -> None:
+        from kimi_cli.memory.archivist import _looks_like_refusal
+
+        # What the model actually did when the transcript came last: it
+        # continued the conversation instead of analysing it.
+        assert not _looks_like_refusal("Sure — I'll run the tests now.")
+        assert not _looks_like_refusal('<tool_calls><invoke name="bash">')
+        assert not _looks_like_refusal('[{"kind": "project", "content":')
+
+    async def _warnings_from(self, runtime, monkeypatch, reply: str) -> list[str]:
+        """Run extraction against *reply* and return what it warned about.
+
+        The logger is loguru, so it is intercepted directly rather than through
+        `caplog`, which only sees the standard library.
+        """
+        from kosong.message import Message, TextPart
+
+        import kimi_cli.memory.archivist as archivist
+
+        async def fake_ask(soul, conversation):
+            return reply
+
+        monkeypatch.setattr(archivist, "_ask_for_candidates", fake_ask)
+
+        seen: list[str] = []
+        monkeypatch.setattr(archivist.logger, "warning", lambda message, **kw: seen.append(message))
+
+        class _Soul:
+            def __init__(self, rt):
+                self.runtime = rt
+
+        await archivist.propose_candidates(
+            _Soul(runtime), [Message(role="user", content=[TextPart(text="x" * 400)])]
+        )
+        return seen
+
+    async def test_an_unreadable_reply_is_reported(self, runtime, monkeypatch) -> None:
+        seen = await self._warnings_from(
+            runtime, monkeypatch, "I'll go ahead and check the branch."
+        )
+
+        assert any("nothing usable" in m for m in seen), (
+            "a broken extractor has to be distinguishable from a quiet one"
+        )
+
+    async def test_a_refusal_is_not_reported_as_a_fault(self, runtime, monkeypatch) -> None:
+        """Warning on the common answer would train everyone to ignore the warning."""
+        assert await self._warnings_from(runtime, monkeypatch, "[]") == []

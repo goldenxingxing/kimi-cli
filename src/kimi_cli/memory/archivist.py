@@ -269,6 +269,25 @@ async def propose_candidates(soul: KimiSoul, history: Sequence[Message]) -> int:
         raw = await _ask_for_candidates(soul, text[-_EXTRACTION_TAIL_CHARS:])
         proposals = _parse_candidates(raw, session_id=soul.runtime.session.id)
         if not proposals:
+            # Two very different things reach this line and used to look
+            # identical: the model saying there is nothing worth keeping, which
+            # is the common and correct answer, and the model answering
+            # something this cannot read, which means the feature is broken.
+            #
+            # It stayed broken for the life of the feature because both showed
+            # up as "no candidates". The distinguishing evidence is cheap — an
+            # empty array is a refusal, anything else that parsed to nothing is
+            # a fault — so it is recorded rather than inferred later.
+            if _looks_like_refusal(raw):
+                logger.debug("extraction found nothing worth proposing")
+            else:
+                logger.warning(
+                    "extraction produced nothing usable from a {n}-char reply "
+                    "starting {head!r} — the prompt or the parser is wrong, "
+                    "not the conversation",
+                    n=len(raw),
+                    head=raw[:120],
+                )
             return 0
         CandidateFile(soul.runtime.user_memory_dir / CANDIDATES_FILENAME).add(proposals)
         logger.info("queued {n} memory candidate(s) for approval", n=len(proposals))
@@ -305,6 +324,19 @@ async def _ask_for_candidates(soul: KimiSoul, conversation: str) -> str:
         ],
     )
     return extract_text([result.message])
+
+
+def _looks_like_refusal(raw: str) -> bool:
+    """Whether *raw* is the model declining rather than the parser failing.
+
+    An empty JSON array is the answer the prompt asks for when nothing
+    qualifies. Silence is too: a model that returns nothing at all has not
+    proposed anything, and there is no evidence of a fault in that either.
+    Everything else — prose, a tool call, a truncated object — means something
+    was said that could not be read.
+    """
+    stripped = (raw or "").strip()
+    return not stripped or stripped in {"[]", "[ ]"} or stripped.replace(" ", "") == "[]"
 
 
 def _parse_candidates(raw: str, *, session_id: str | None) -> list[MemoryCandidate]:

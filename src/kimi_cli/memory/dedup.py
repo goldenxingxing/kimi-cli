@@ -165,6 +165,32 @@ def similarity(a: str, b: str) -> float:
     return matcher.ratio()
 
 
+def raw_similarity(a: str, b: str, *, floor: float = 0.0) -> float:
+    """The true ratio, with the caller choosing where it stops being interesting.
+
+    `similarity` short-circuits anything below :data:`ADVISORY_RATIO` to 0.0,
+    which is sound for its callers — they only care whether a pair is close
+    enough to merge or to mention — and silently useless to a caller working at
+    a lower threshold, which then reads every pair as completely dissimilar.
+
+    `floor` is not decoration. `ratio` is quadratic in the length of both
+    strings, so a caller comparing every pair in a store pays it n² times: with
+    two hundred entries a session's opening context took nineteen seconds to
+    assemble. `quick_ratio` and `real_quick_ratio` are exact upper bounds, so
+    stopping on them cannot discard a pair that would have scored above the
+    floor — it only refuses to price the ones that were never candidates.
+    """
+    if not a or not b:
+        return 1.0 if a == b else 0.0
+    matcher = _matcher(a, b)
+    if floor > 0.0:
+        if matcher.real_quick_ratio() < floor:
+            return 0.0
+        if matcher.quick_ratio() < floor:
+            return 0.0
+    return matcher.ratio()
+
+
 def may_merge(a: str, b: str) -> bool:
     """Whether two normalized strings are allowed to merge at all.
 
