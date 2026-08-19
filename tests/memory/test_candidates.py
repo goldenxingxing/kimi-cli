@@ -202,7 +202,9 @@ class TestExtractionPromptShape:
     def test_the_conversation_is_embedded_and_the_task_stated_after_it(self) -> None:
         from kimi_cli.memory.archivist import _EXTRACTION_PROMPT
 
-        prompt = _EXTRACTION_PROMPT.format(conversation="user: hello\nassistant: hi")
+        prompt = _EXTRACTION_PROMPT.format(
+            conversation="user: hello\nassistant: hi", today="2026-03-05"
+        )
 
         assert "<transcript>\nuser: hello" in prompt
         assert prompt.index("</transcript>") < prompt.index("JSON array"), (
@@ -216,4 +218,46 @@ class TestExtractionPromptShape:
 
         assert "{conversation}" in _EXTRACTION_PROMPT
         source = inspect.getsource(archivist_module._ask_for_candidates)
-        assert "_EXTRACTION_PROMPT.format(conversation=conversation)" in source
+        assert "_EXTRACTION_PROMPT.format(" in source
+        assert "conversation=conversation" in source
+
+
+class TestTimeAnchoring:
+    """A fact anchored to a moment has to say which moment.
+
+    Measured on LoCoMo, where every question asks when something happened,
+    extraction that produced only timeless traits scored 6.7% — but the more
+    telling number came from real sessions: 28 facts extracted across six
+    conversations, not one carrying a date. Entries do have a `created_at`,
+    and it answers a different question — when the fact was *recorded*, not
+    when it was *true*.
+    """
+
+    def test_the_prompt_supplies_todays_date(self) -> None:
+        """Without it, resolving "last Tuesday" means inventing a date."""
+        from kimi_cli.memory.archivist import _EXTRACTION_PROMPT
+
+        assert "{today}" in _EXTRACTION_PROMPT
+
+        prompt = _EXTRACTION_PROMPT.format(conversation="x", today="2026-03-05")
+
+        assert "2026-03-05" in prompt
+
+    def test_the_call_passes_a_real_date(self) -> None:
+        source = inspect.getsource(archivist_module._ask_for_candidates)
+
+        assert "today=" in source, "the placeholder is useless if nothing fills it"
+        assert "time.strftime" in source
+
+    def test_dating_does_not_reopen_the_door_to_the_work_log(self) -> None:
+        """Asking for dates invites recording what happened, which is excluded.
+
+        The prompt has to hold both at once, so both are asserted: the rule
+        that a decision carries its date, and the rule that activity does not
+        become a memory just because it can be dated.
+        """
+        from kimi_cli.memory.archivist import _EXTRACTION_PROMPT
+
+        assert "what was done" in _EXTRACTION_PROMPT
+        assert "not licence to record what happened" in _EXTRACTION_PROMPT
+        assert "a wrong date is worse than none" in _EXTRACTION_PROMPT
