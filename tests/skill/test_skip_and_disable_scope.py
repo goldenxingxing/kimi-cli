@@ -85,11 +85,17 @@ def test_a_disabled_name_with_no_managed_copy_is_still_listed(
 
     Happens when an upgrade drops a built-in the user had disabled, or when the
     name only ever existed in a directory this manager does not own.
+
+    A second built-in stays in place because the rule only holds while this
+    build ships any: with none, such a name came from a catalogue that was
+    removed and cannot come back, and the row answers "skill not found" to
+    every operation. See TestTheListDoesNotFillWithDeadRows.
     """
     builtin = tmp_path / "builtin"
     builtin.mkdir()
     manager = SkillManager(builtin, managed / "skill")
     _skill(builtin, "ghost")
+    _skill(builtin, "still-shipped")
     manager.disable("ghost")
 
     (builtin / "ghost" / "SKILL.md").unlink()
@@ -345,3 +351,61 @@ class TestASkillTheRulesCannotNameIsStillAddressable:
             assert manager.is_enabled(name) is True
             manager.disable(name)
             assert manager.is_enabled(name) is False
+
+
+class TestTheListDoesNotFillWithDeadRows:
+    """A disabled name with no copy is a switch or a dead row, depending.
+
+    It is a switch when the name can still be discovered from a user or project
+    directory: the disabled entry suppresses it, and hiding the row would leave
+    it permanently off with nothing to turn on. That is why they are listed.
+
+    It is a dead row when this build ships no built-in skills, because then the
+    name came from a catalogue that was removed and cannot come back. Every
+    operation on it answers "skill not found". Measured on the first store this
+    was tried against: 298 such rows against one real skill.
+    """
+
+    def _manager(self, tmp_path: Path, builtins: bool) -> SkillManager:
+        builtin_dir = tmp_path / "builtin"
+        builtin_dir.mkdir()
+        if builtins:
+            _skill(builtin_dir, "still-shipped")
+        manager = SkillManager(builtin_dir, tmp_path / "skill")
+        manager.state_file = tmp_path / "skill-state.json"
+        manager.state_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "disabled": ["gone-one", "gone-two", "gone-three"],
+                    "deleted": [],
+                    "revision": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return manager
+
+    def test_they_are_listed_while_built_ins_still_ship(self, tmp_path: Path) -> None:
+        """The case the listing was written for: the name may live in a user dir."""
+        listed = {s.name for s in self._manager(tmp_path, builtins=True).list_skills()}
+
+        assert "gone-one" in listed
+        assert "still-shipped" in listed
+
+    def test_they_are_not_listed_when_nothing_is_bundled(self, tmp_path: Path) -> None:
+        listed = [s.name for s in self._manager(tmp_path, builtins=False).list_skills()]
+
+        assert listed == [], "rows that answer 'skill not found' to everything"
+
+    def test_a_real_installed_skill_still_shows(self, tmp_path: Path) -> None:
+        """The row that is left has to be the one that works."""
+        manager = self._manager(tmp_path, builtins=False)
+        manager.install_skill_md(
+            "---\nname: mine\ndescription: installed by me\n---\nDo the thing.\n"
+        )
+
+        listed = [s.name for s in manager.list_skills()]
+
+        assert listed == ["mine"]
+        assert manager.get("mine") is not None

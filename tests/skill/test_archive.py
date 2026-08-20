@@ -30,7 +30,9 @@ def test_extracts_one_skill_directory(tmp_path: Path) -> None:
     assert (prepared.directory / "scripts/run.py").is_file()
 
 
-@pytest.mark.parametrize("name", ["../escape", "/absolute", "demo/../../escape", "demo\\..\\escape"])
+@pytest.mark.parametrize(
+    "name", ["../escape", "/absolute", "demo/../../escape", "demo\\..\\escape"]
+)
 def test_rejects_unsafe_archive_paths(tmp_path: Path, name: str) -> None:
     with pytest.raises(ValueError, match="unsafe"):
         extract_skill_archive(_zip({name: "bad"}), tmp_path)
@@ -58,9 +60,7 @@ def test_enforces_expanded_size_limit(tmp_path: Path) -> None:
         ],
     ],
 )
-def test_rejects_normalized_target_collisions(
-    tmp_path: Path, files: list[tuple[str, str]]
-) -> None:
+def test_rejects_normalized_target_collisions(tmp_path: Path, files: list[tuple[str, str]]) -> None:
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         for name, content in files:

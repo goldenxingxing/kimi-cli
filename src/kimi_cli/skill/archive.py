@@ -61,8 +61,7 @@ def extract_skill_archive(
         for entry in entries:
             parts = _safe_parts(entry.filename)
             normalized_target = "/".join(
-                unicodedata.normalize("NFC", part).casefold().rstrip(" .")
-                for part in parts
+                unicodedata.normalize("NFC", part).casefold().rstrip(" .") for part in parts
             )
             if not normalized_target or normalized_target in normalized_targets:
                 raise ValueError("archive contains duplicate normalized paths")

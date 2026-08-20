@@ -377,14 +377,23 @@ class SkillManager:
                 )
             )
 
-        # A disabled name with no managed copy left — the built-in was dropped
-        # by an upgrade, or the name only ever existed in a directory this
-        # manager does not own. It still suppresses discovery, so leaving it
-        # off the list would make it permanently off with nothing to switch.
+        # A disabled name with no managed copy left — the name may still exist
+        # in a user or project skills directory, where a disabled entry keeps
+        # suppressing it. Leaving those off the list would make them permanently
+        # off with nothing to switch, so they are shown.
+        #
+        # Not when this build ships no built-in skills, though. Then every such
+        # name came from a catalogue that was removed and cannot come back, and
+        # the panel fills with rows that answer "skill not found" to everything
+        # — 298 of them on the first store this was tried against. A name that
+        # refers to nothing is not a switch, it is a dead row.
         #
         # Keyed by directory name, collected above: a skill's frontmatter name
         # is free-form and need not be a valid managed-skill key, so
         # re-normalising it here would raise on perfectly good skills.
+        if not builtins:
+            return result
+
         for key in sorted(disabled - listed):
             result.append(
                 ManagedSkill(
