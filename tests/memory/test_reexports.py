@@ -128,3 +128,27 @@ class TestTheAdvertisedActionsExist:
         declared = self._declared_ops()
 
         assert {"retire", "affirm"} <= declared
+
+
+class TestEveryOperationUpstreamIsOffered:
+    """A verb this package can perform and this tool does not expose is one the
+    agent cannot reach.
+
+    Found this way: amem gained `consolidate` — replace several entries with one
+    that keeps what all of them said — and the tool did not, so the answer that
+    is right more often than retiring had to be done by hand outside the agent.
+    """
+
+    def test_the_tool_exposes_what_amem_can_do(self) -> None:
+        from amem.operations import OPERATION_NAMES
+
+        import kimi_cli.tools.memory as tool
+
+        exposed: set[str] = set()
+        for value in vars(tool).values():
+            annotations = getattr(value, "__annotations__", None)
+            if isinstance(annotations, dict):
+                exposed.update(get_args(annotations.get("op")))
+
+        missing = sorted(set(OPERATION_NAMES) - exposed)
+        assert not missing, f"amem performs {missing} and this tool offers no way to ask for it"

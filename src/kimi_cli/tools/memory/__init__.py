@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from typing import Literal, cast, override
 
+from amem import Store, execute
+from amem.operations import ConsolidateOp as ConsolidateOperation
 from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolReturnValue
 from pydantic import BaseModel, Field, field_validator
 
@@ -145,6 +147,38 @@ class RestoreOp(BaseModel):
     handle: str
 
 
+class ConsolidateOp(BaseModel):
+    """Replace several persistent entries with one that keeps what all of them said.
+
+    The right answer more often than `retire` is, and the one that used to have
+    no operation: a later instruction usually *adds* to an earlier one rather
+    than replacing it, and what it leaves out is still required. Retiring the
+    older entry then drops those requirements with nothing to show it happened.
+
+    Read every entry named in `replacing` in full first. If the merged text does
+    not carry something one of them said, that requirement is being deleted.
+    """
+
+    op: Literal["consolidate"]
+    content: str = Field(
+        min_length=1,
+        description=(
+            "The merged entry. Must carry every requirement from every entry "
+            "being replaced — check each one against the originals."
+        ),
+    )
+    replacing: list[str] = Field(
+        min_length=1,
+        description="Handles or ids of the entries this replaces. They are retired, not deleted.",
+    )
+    key: str | None = Field(default=None, description="Handle for the merged entry.")
+
+    @field_validator("key")
+    @classmethod
+    def _check_key(cls, value: str | None) -> str | None:
+        return _validate_key(value)
+
+
 class AffirmOp(BaseModel):
     """Record that an entry was raised with the user and still holds.
 
@@ -184,6 +218,7 @@ class Params(BaseModel):
         | RetireOp
         | RestoreOp
         | AffirmOp
+        | ConsolidateOp
         | DeleteOp
     ) = Field(
         discriminator="op",
@@ -331,6 +366,8 @@ class Memory(CallableTool2[Params]):
             return await self._set_retired(op)
         if isinstance(op, AffirmOp):
             return await self._affirm(op)
+        if isinstance(op, ConsolidateOp):
+            return await self._consolidate(op)
         if isinstance(op, UpdateOp):
             return await self._update(op)
         return await self._delete(op)
@@ -560,6 +597,42 @@ class Memory(CallableTool2[Params]):
         return _ok(
             output=json.dumps({"id": op.id, "scope": "persistent"}),
             brief="Memory updated",
+        )
+
+    async def _consolidate(self, op: ConsolidateOp) -> ToolReturnValue:
+        """Merge several entries into one, through the same approval as any write.
+
+        The execution is amem's: it writes the merged entry before retiring the
+        others, and refuses to touch anything if a handle does not resolve —
+        consolidating onto the wrong set is worse than not consolidating. What
+        is this application's is asking first and saying what happened.
+        """
+        rejection = await self._request_persistent_approval(
+            "consolidate",
+            f"Merge {len(op.replacing)} persistent memory entries into one",
+        )
+        if rejection is not None:
+            return rejection
+
+        store = Store(self._persistent_file.parent)
+        result = execute(
+            store,
+            ConsolidateOperation(
+                op="consolidate", content=op.content, replacing=op.replacing, key=op.key
+            ),
+        )
+        if not result.found:
+            return ToolError(
+                message=f"One of {op.replacing} does not resolve; nothing was changed.",
+                brief="Not found",
+            )
+        assert result.entry is not None
+        return _ok(
+            output=json.dumps(
+                {"handle": result.entry.handle, "retired": op.replacing},
+                ensure_ascii=False,
+            ),
+            brief=f"Merged {len(op.replacing)} memories",
         )
 
     async def _affirm(self, op: AffirmOp) -> ToolReturnValue:

@@ -201,4 +201,14 @@ opaque id fragment.
 - `update(id, content)` → replace the body of an existing entry
 - `retire(handle)` → stop injecting an entry, without losing it
 - `restore(handle)` → put a retired entry back into force
+- `affirm(handle)` → record that an entry was raised and still holds
+- `consolidate(content, replacing)` → replace several entries with one merged
 - `delete(id)` → remove an entry by id
+
+When the opening context suggests one entry has superseded another, read both in
+full before proposing anything. A later instruction usually *adds* to an earlier
+one rather than replacing it, and what it leaves out is still required — so the
+answer is more often `consolidate` (one entry carrying every requirement) or
+`affirm` (both still hold) than `retire`. Retiring an older entry whose
+requirements the newer one dropped removes them with nothing to show it
+happened, which is what the entry being retired was usually written to prevent.
