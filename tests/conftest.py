@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import tempfile
@@ -340,3 +341,25 @@ def outside_file() -> Generator[Path]:
     """Return a path to a file outside the working directory."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir) / "outside_file.txt"
+
+
+@pytest.fixture(autouse=True)
+def _skill_state_from_before_the_default_flipped(tmp_path_factory, monkeypatch):
+    """Put skill state in its pre-default-flip shape for the suite.
+
+    Skills are off until asked for, and installing one switches it on. Almost
+    every test here is about something else — which copy of a same-named skill
+    wins, how a prompt renders, what a scope resolves to — and creates its
+    skills directly on disk rather than through the installer, so under the
+    live default they would all discover nothing and stop testing their
+    subject.
+
+    Tests that *are* about the default build their own manager and write their
+    own state, so this does not reach them.
+    """
+    state_dir = tmp_path_factory.mktemp("skill-state")
+    monkeypatch.setenv("OPENKIMO_SKILL_DIR", str(state_dir / "skill"))
+    (state_dir / "skill-state.json").write_text(
+        json.dumps({"version": 1, "disabled": [], "deleted": [], "revision": 0}),
+        encoding="utf-8",
+    )

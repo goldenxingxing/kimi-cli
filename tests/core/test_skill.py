@@ -1,6 +1,5 @@
 """Tests for skill discovery and formatting behavior."""
 
-import platform
 import sys
 from pathlib import Path
 
@@ -211,21 +210,31 @@ runtime-platforms:
 
 
 @pytest.mark.asyncio
-async def test_all_bundled_skills_are_discoverable():
+async def test_no_skill_is_bundled():
+    """Nothing ships. Skills arrive because someone installed one.
+
+    Three hundred of them used to, costing 274 MB in the app and a few hundred
+    characters of context per skill on every request — for a catalogue nobody
+    chose and few would use. The install path in the admin panel is the way in
+    now, and a skill installed that way is switched on by the act of installing
+    it.
+
+    Asserted rather than left implied: a bundled skill would come back the
+    moment someone drops a directory here, and the cost would not be visible
+    from anywhere except the size of the download.
+    """
     from kimi_cli.skill import get_builtin_skills_dir
 
     builtin_dir = get_builtin_skills_dir()
+
+    assert not builtin_dir.exists() or not any(builtin_dir.iterdir())
+
     skills = await discover_skills(
         KaosPath.unsafe_from_local_path(builtin_dir),
         scope="builtin",
     )
 
-    expected = 300 if sys.platform.startswith("linux") and (
-        platform.machine().casefold() in {"x86_64", "amd64"}
-        and sys.version_info[:2] == (3, 12)
-    ) else 299
-    assert len(skills) == expected
-    assert len({skill.name.casefold() for skill in skills}) == expected
+    assert skills == []
 
 
 @pytest.mark.asyncio
