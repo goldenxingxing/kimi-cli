@@ -1,0 +1,3 @@
+[submodule "packages/amem"]
+	path = packages/amem
+	url = https://github.com/goldenxingxing/Amem.git

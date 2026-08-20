@@ -3,26 +3,19 @@ from __future__ import annotations
 import random
 import re
 import string
-import unicodedata
+
+from amem import fold_text as fold_text
 
 _NEWLINE_RE = re.compile(r"[\r\n]+")
 
 
-def fold_text(raw: str) -> str:
-    """Fold Unicode width, whitespace, and case without dropping any content.
-
-    Exactly three axes, chosen so the folded string still stands for the same
-    statement: fullwidth and compatibility forms collapse to their canonical
-    equivalents, runs of whitespace become single spaces, and case is removed.
-    Punctuation, diacritics, and word order survive untouched.
-
-    Shared by the Wiki's intent hashing and by memory deduplication. It lives
-    here rather than in either caller because ``kimi_cli.memory`` is on the CLI
-    startup path and must not pull in the Wiki package to fold a string.
-    """
-    return " ".join(unicodedata.normalize("NFKC", raw).split()).casefold()
-
-
+#: Re-exported from :mod:`amem.text`, not reimplemented here.
+#:
+#: The Wiki's intent hashing is an authorization boundary and memory
+#: deduplication decides whether two statements are the same. Both fold the
+#: same three axes, and while there were two copies of that, one of them lost
+#: two axes and nothing noticed. There is now one, in the package that also
+#: uses it.
 def shorten(text: str, *, width: int, placeholder: str = "…") -> str:
     """Shorten text to at most *width* characters.
 

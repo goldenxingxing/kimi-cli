@@ -1,316 +1,56 @@
-from __future__ import annotations
+"""Reading and writing the store file.
 
-import contextlib
-import errno
-import os
-import sys
-import tempfile
-import time
-from collections.abc import Iterator
-from dataclasses import dataclass
-from pathlib import Path
+Re-exported from :mod:`amem.storage`. The implementation lives in the Amem
+package — a workspace member under ``packages/amem`` — because none of it is
+specific to this application, and it was kept in step here only by copying.
+That copying had already cost something: a hand-carried ``fold_text`` lost two
+of its three normalisation axes and nothing noticed until a test was written.
 
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
+Kept as a module rather than importing ``amem`` at each call site, so that
+:mod:`kimi_cli.memory` stays the one seam between this application and whatever
+provides its memory. Changing the provider is an edit in this package.
+"""
 
-from collections.abc import Sequence
+from amem.storage import (
+    PERSISTENT_FILENAME as PERSISTENT_FILENAME,
+)
+from amem.storage import (
+    AmbiguousHandleError as AmbiguousHandleError,
+)
+from amem.storage import (
+    UpsertResult as UpsertResult,
+)
+from amem.storage import (
+    delete_entry as delete_entry,
+)
+from amem.storage import (
+    read_entries as read_entries,
+)
+from amem.storage import (
+    resolve_handle as resolve_handle,
+)
+from amem.storage import (
+    set_retired as set_retired,
+)
+from amem.storage import (
+    stamp_relevance as stamp_relevance,
+)
+from amem.storage import (
+    update_entry as update_entry,
+)
+from amem.storage import (
+    upsert_entry as upsert_entry,
+)
 
-from kimi_cli.memory.dedup import classify_entry, compact_entries, merge_entry
-from kimi_cli.memory.entry import MemoryEntry
-from kimi_cli.utils.logging import logger
-
-
-@contextlib.contextmanager
-def _locked(path: Path, exclusive: bool) -> Iterator[None]:
-    """Acquire an advisory lock on a sidecar file.
-
-    The lock is held on a ``<path>.lock`` file rather than on the data file
-    itself so the data file can be replaced atomically while the lock is held.
-    POSIX uses ``fcntl.flock`` (shared or exclusive); Windows uses
-    ``msvcrt.locking``, which has no shared mode, so every lock is exclusive.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    flag = os.O_RDWR | os.O_CREAT
-    fd = os.open(lock_path, flag, 0o644)
-    try:
-        if sys.platform == "win32":
-            # msvcrt.locking requires bytes to exist at the lock position.
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            if sys.platform == "win32":
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def _read_raw(path: Path) -> list[MemoryEntry]:
-    if not path.exists():
-        return []
-    out: list[MemoryEntry] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(MemoryEntry.model_validate_json(line))
-                except Exception as e:
-                    logger.warning("Skipping malformed memory line in {p}: {e}", p=path, e=e)
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            return []
-        raise
-    return out
-
-
-def _write_atomic(path: Path, entries: list[MemoryEntry]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            for entry in entries:
-                f.write(entry.model_dump_json())
-                f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-        raise
-
-
-#: The store's filename, in one place. It was spelled out separately in the
-#: injection provider, which is the kind of duplication that survives until the
-#: two disagree.
-PERSISTENT_FILENAME = "persistent.jsonl"
-
-
-def stamp_relevance(path: Path, conversation: str, *, now: float) -> int:
-    """Record which behavioural entries *conversation* was about. Returns how many.
-
-    Read-modify-write under the same exclusive lock as every other mutation:
-    this runs at compaction, and a session ending while another writes a memory
-    is an ordinary thing rather than a rare one.
-    """
-    from kimi_cli.memory.consolidate import mark_relevant
-
-    with _locked(path, exclusive=True):
-        entries = _read_raw(path)
-        touched = mark_relevant(entries, conversation, now=now)
-        if touched:
-            _write_atomic(path, entries)
-        return len(touched)
-
-
-def read_entries(path: Path) -> list[MemoryEntry]:
-    """Read all entries from ``path`` under a shared lock."""
-    with _locked(path, exclusive=False):
-        return _read_raw(path)
-
-
-def _append_line(path: Path, entry: MemoryEntry) -> None:
-    """Append one record. Caller must already hold the exclusive lock."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(entry.model_dump_json())
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-
-@dataclass(frozen=True, slots=True)
-class UpsertResult:
-    """What a write actually did, as opposed to what it was asked to do."""
-
-    entry: MemoryEntry
-    """The record now on disk — the merge target when ``merged``, else the new one."""
-    merged: bool
-    replaced_content: str | None
-    """The older wording a merge overwrote, so the caller can put it back."""
-    score: float
-    advisories: tuple[tuple[str, str, float], ...]
-    compacted: int
-    """Pre-existing exact duplicates folded away by this write."""
-
-
-def upsert_entry(
-    path: Path,
-    entry: MemoryEntry,
-    *,
-    dedup: bool = True,
-    expect_target_id: str | None = None,
-) -> UpsertResult:
-    """Write ``entry``, folding it into a near-identical existing entry if one exists.
-
-    The append-only fast path survives for the common case: when nothing merged
-    and nothing was compacted, the file on disk is already correct and is
-    extended in place rather than rewritten.
-
-    ``expect_target_id`` pins the merge to an entry the caller has already shown
-    someone. A caller that must classify before asking for approval and write
-    afterwards leaves a window in which another process — the web API, a second
-    CLI — can change the file. If the pinned target is gone or is no longer the
-    best match, the write degrades to a create rather than quietly merging into
-    an entry nobody approved.
-    """
-    with _locked(path, exclusive=True):
-        if not dedup:
-            _append_line(path, entry)
-            return UpsertResult(
-                entry=entry,
-                merged=False,
-                replaced_content=None,
-                score=0.0,
-                advisories=(),
-                compacted=0,
-            )
-
-        kept, compacted = compact_entries(_read_raw(path))
-        verdict = classify_entry(entry.content, entry.kind, kept)
-        pinned = expect_target_id is None or verdict.target_id == expect_target_id
-
-        if verdict.action == "merge" and verdict.target_id is not None and pinned:
-            for index, existing in enumerate(kept):
-                if existing.id != verdict.target_id:
-                    continue
-                merged = merge_entry(existing, entry.content, now=time.time(), newer_key=entry.key)
-                kept[index] = merged
-                _write_atomic(path, kept)
-                return UpsertResult(
-                    entry=merged,
-                    merged=True,
-                    replaced_content=existing.content,
-                    score=verdict.score,
-                    advisories=verdict.advisories,
-                    compacted=compacted,
-                )
-
-        kept.append(entry)
-        if compacted:
-            _write_atomic(path, kept)
-        else:
-            _append_line(path, entry)
-        return UpsertResult(
-            entry=entry,
-            merged=False,
-            replaced_content=None,
-            score=0.0,
-            advisories=verdict.advisories,
-            compacted=compacted,
-        )
-
-
-def set_retired(path: Path, handle: str, *, retired: bool) -> MemoryEntry | None:
-    """Mark an entry retired, or put it back. Returns the entry, or ``None``.
-
-    Rewrites in place rather than removing: a retired entry is still a record
-    of what was once true, and something that can be un-retired has to still be
-    there to un-retire.
-    """
-    with _locked(path, exclusive=True):
-        entries = _read_raw(path)
-        target = resolve_handle(entries, handle)
-        if target is None:
-            return None
-        for index, existing in enumerate(entries):
-            if existing.id != target.id:
-                continue
-            updated = existing.model_copy(
-                update={
-                    "retired_at": time.time() if retired else None,
-                    "updated_at": time.time(),
-                }
-            )
-            entries[index] = updated
-            _write_atomic(path, entries)
-            return updated
-    return None
-
-
-class AmbiguousHandleError(ValueError):
-    """A handle matched more than one entry. Caller must disambiguate."""
-
-    def __init__(self, handle: str, matches: Sequence[MemoryEntry]) -> None:
-        self.matches = list(matches)
-        super().__init__(
-            f"{handle!r} matches {len(self.matches)} entries: "
-            + ", ".join(m.id[:12] for m in self.matches)
-        )
-
-
-def resolve_handle(entries: Sequence[MemoryEntry], handle: str) -> MemoryEntry | None:
-    """Find the entry a handle refers to, or ``None``.
-
-    Accepts a ``key``, a full id, or an id prefix — because those are the three
-    forms an entry is ever *shown* as, and requiring a different one to act on
-    it is how the agent ended up unable to revise anything. The snapshot
-    renders ``id[:8]``, so an exact-id-only lookup meant every handle the model
-    could see was one it could not use: it could add, never amend, and said so
-    by writing "supersedes the older record" into the prose instead.
-
-    An ambiguous prefix raises rather than picking one — silently editing the
-    wrong memory is worse than saying which ones matched.
-    """
-    wanted = handle.strip().lower()
-    if not wanted:
-        return None
-    for entry in entries:
-        if (entry.key or "").lower() == wanted or entry.id.lower() == wanted:
-            return entry
-    prefixed = [e for e in entries if e.id.lower().startswith(wanted)]
-    if len(prefixed) > 1:
-        raise AmbiguousHandleError(handle, prefixed)
-    return prefixed[0] if prefixed else None
-
-
-def update_entry(path: Path, entry_id: str, content: str) -> MemoryEntry | None:
-    """Replace the ``content`` of the entry with the given handle.
-
-    ``entry_id`` is any form :func:`resolve_handle` accepts. Returns the
-    updated entry, or ``None`` if nothing matched.
-    """
-    with _locked(path, exclusive=True):
-        entries = _read_raw(path)
-        target = resolve_handle(entries, entry_id)
-        if target is None:
-            return None
-        updated: MemoryEntry | None = None
-        for i, e in enumerate(entries):
-            if e.id == target.id:
-                entries[i] = e.model_copy(update={"content": content, "updated_at": time.time()})
-                updated = entries[i]
-                break
-        if updated is not None:
-            _write_atomic(path, entries)
-        return updated
-
-
-def delete_entry(path: Path, entry_id: str) -> bool:
-    """Remove the entry with the given handle. ``True`` if a row was deleted.
-
-    ``entry_id`` is any form :func:`resolve_handle` accepts.
-    """
-    with _locked(path, exclusive=True):
-        entries = _read_raw(path)
-        target = resolve_handle(entries, entry_id)
-        if target is None:
-            return False
-        kept = [e for e in entries if e.id != target.id]
-        if len(kept) == len(entries):
-            return False
-        _write_atomic(path, kept)
-        return True
+__all__ = [
+    "AmbiguousHandleError",
+    "PERSISTENT_FILENAME",
+    "UpsertResult",
+    "delete_entry",
+    "read_entries",
+    "resolve_handle",
+    "set_retired",
+    "stamp_relevance",
+    "update_entry",
+    "upsert_entry",
+]

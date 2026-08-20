@@ -1,190 +1,48 @@
-from __future__ import annotations
+"""Recent session summaries.
 
-import contextlib
-import errno
-import os
-import tempfile
-import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal
-from uuid import uuid4
+Re-exported from :mod:`amem.recent`. The implementation lives in the Amem
+package — a workspace member under ``packages/amem`` — because none of it is
+specific to this application, and it was kept in step here only by copying.
+That copying had already cost something: a hand-carried ``fold_text`` lost two
+of its three normalisation axes and nothing noticed until a test was written.
 
-from pydantic import BaseModel, Field
+Kept as a module rather than importing ``amem`` at each call site, so that
+:mod:`kimi_cli.memory` stays the one seam between this application and whatever
+provides its memory. Changing the provider is an edit in this package.
+"""
 
-from kimi_cli.memory.condense import condense_summary
-from kimi_cli.memory.dedup import SummaryPolicy, compact_summaries, place_summary
-from kimi_cli.memory.storage import _locked
-from kimi_cli.utils.logging import logger
+from amem.recent import (
+    DEFAULT_MAX_SUMMARIES as DEFAULT_MAX_SUMMARIES,
+)
+from amem.recent import (
+    RECENT_FILENAME as RECENT_FILENAME,
+)
+from amem.recent import (
+    SessionSummary as SessionSummary,
+)
+from amem.recent import (
+    SummaryAppendResult as SummaryAppendResult,
+)
+from amem.recent import (
+    SummaryTrigger as SummaryTrigger,
+)
+from amem.recent import (
+    append_summary as append_summary,
+)
+from amem.recent import (
+    read_recent_summaries as read_recent_summaries,
+)
+from amem.recent import (
+    trim_old_summaries as trim_old_summaries,
+)
 
-RECENT_FILENAME = "recent.jsonl"
-
-# Cap kept summaries per user. Cross-session injection only reads the tail —
-# everything beyond this is dropped on append.
-DEFAULT_MAX_SUMMARIES = 20
-
-SummaryTrigger = Literal["compaction", "session_end", "manual"]
-
-
-class SessionSummary(BaseModel):
-    """A condensed record of a past conversation.
-
-    Written by the archivist whenever context is compacted or a session ends.
-    Read back by ``CrossSessionMemoryInjectionProvider`` to give the agent a
-    short reminder of what happened in prior conversations.
-    """
-
-    id: str = Field(default_factory=lambda: uuid4().hex)
-    session_id: str
-    created_at: float = Field(default_factory=time.time)
-    trigger: SummaryTrigger
-    summary: str
-    # Optional: short title hint or work-dir tag for future filtering.
-    work_dir: str | None = None
-
-    def render(self) -> str:
-        """Render for cross-session injection.
-
-        Condensed rather than verbatim: the stored text is a handover written
-        for the session being compacted, and most of it — file states, absolute
-        paths — is noise to anyone else. See :mod:`kimi_cli.memory.condense`.
-        The full text stays on disk; only what is shown is reduced.
-        """
-        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
-        head = f"[{ts}] (session {self.session_id[:8]}, {self.trigger})"
-        return f"{head}\n{condense_summary(self.summary)}"
-
-
-def _read_raw(path: Path) -> list[SessionSummary]:
-    if not path.exists():
-        return []
-    out: list[SessionSummary] = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(SessionSummary.model_validate_json(line))
-                except Exception as e:
-                    logger.warning("Skipping malformed summary line in {p}: {e}", p=path, e=e)
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            return []
-        raise
-    return out
-
-
-def _write_atomic(path: Path, items: list[SessionSummary]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            for s in items:
-                f.write(s.model_dump_json())
-                f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-        raise
-
-
-def _append_line(path: Path, summary: SessionSummary) -> None:
-    """Append one record. Caller must already hold the exclusive lock."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(summary.model_dump_json())
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def read_recent_summaries(path: Path, *, limit: int | None = None) -> list[SessionSummary]:
-    """Return summaries (oldest first). Pass ``limit`` to take only the tail."""
-    with _locked(path, exclusive=False):
-        items = _read_raw(path)
-    if limit is not None and limit > 0:
-        items = items[-limit:]
-    return items
-
-
-@dataclass(frozen=True, slots=True)
-class SummaryAppendResult:
-    """What an append actually did."""
-
-    stored: SessionSummary | None
-    """``None`` when the incoming summary added nothing and was dropped."""
-    superseded_id: str | None
-    compacted: int
-    """Pre-existing redundant summaries folded away by this write."""
-
-
-def append_summary(
-    path: Path,
-    summary: SessionSummary,
-    *,
-    max_kept: int = DEFAULT_MAX_SUMMARIES,
-    dedup: bool = True,
-    policy: SummaryPolicy = "supersede",
-) -> SummaryAppendResult:
-    """Append ``summary``, superseding this session's previous record, then trim.
-
-    A session writes one summary per compaction plus one at session end, and
-    compaction summaries are cumulative — each one re-summarizes a history that
-    begins with the previous summary. So a session's later record subsumes its
-    earlier ones, and keeping all of them spends the small tail window that the
-    cross-session injection reads on a single conversation.
-
-    ``policy="skip_if_session_present"`` is for a degraded summary (the raw
-    conversation tail, written when the summarizer was unavailable). Both paths
-    record ``trigger="session_end"``, so nothing in the record itself
-    distinguishes them and superseding blindly would let a transcript dump
-    overwrite a real summary of the same session.
-
-    The whole file is read either way — the trim check already required it — so
-    deduplicating here costs no additional I/O.
-    """
-    with _locked(path, exclusive=True):
-        items = _read_raw(path)
-        if not dedup:
-            _append_line(path, summary)
-            return SummaryAppendResult(stored=summary, superseded_id=None, compacted=0)
-
-        kept, compacted = compact_summaries(items)
-        placement = place_summary(kept, summary, policy=policy)
-        result_items = placement.items
-
-        if placement.stored is None and not compacted:
-            # Nothing to add and nothing to fix: leave the file untouched.
-            return SummaryAppendResult(stored=None, superseded_id=None, compacted=0)
-
-        rewrite = compacted > 0 or placement.superseded_id is not None
-        if len(result_items) > max_kept:
-            result_items = result_items[-max_kept:]
-            rewrite = True
-
-        if rewrite:
-            _write_atomic(path, result_items)
-        else:
-            _append_line(path, summary)
-
-        return SummaryAppendResult(
-            stored=placement.stored,
-            superseded_id=placement.superseded_id,
-            compacted=compacted,
-        )
-
-
-def trim_old_summaries(path: Path, *, max_kept: int = DEFAULT_MAX_SUMMARIES) -> int:
-    """Trim ``path`` so it holds at most ``max_kept`` summaries. Returns dropped count."""
-    with _locked(path, exclusive=True):
-        items = _read_raw(path)
-        if len(items) <= max_kept:
-            return 0
-        dropped = len(items) - max_kept
-        _write_atomic(path, items[-max_kept:])
-        return dropped
+__all__ = [
+    "DEFAULT_MAX_SUMMARIES",
+    "RECENT_FILENAME",
+    "SessionSummary",
+    "SummaryAppendResult",
+    "SummaryTrigger",
+    "append_summary",
+    "read_recent_summaries",
+    "trim_old_summaries",
+]
