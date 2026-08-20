@@ -19,7 +19,12 @@ from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
 from kimi_cli.memory.consolidate import BEHAVIOURAL_BUDGET_CHARS, LONG_ENTRY_CHARS
 from kimi_cli.memory.entry import BEHAVIOURAL_KINDS
 from kimi_cli.memory.search import MemorySearchIndex
-from kimi_cli.memory.storage import AmbiguousHandleError, resolve_handle, set_retired
+from kimi_cli.memory.storage import (
+    AmbiguousHandleError,
+    resolve_handle,
+    set_affirmed,
+    set_retired,
+)
 from kimi_cli.soul.agent import Runtime
 from kimi_cli.tools.utils import load_desc
 
@@ -140,6 +145,23 @@ class RestoreOp(BaseModel):
     handle: str
 
 
+class AffirmOp(BaseModel):
+    """Record that an entry was raised with the user and still holds.
+
+    The answer to a supersession suggestion that is not "retire it", and more
+    often the right one: a later instruction usually adds to an earlier one
+    rather than replacing it, and what it leaves out is still required.
+
+    Without somewhere to put that answer the same pair is suggested again next
+    session and the one after, which teaches the user to stop reading the
+    suggestion. Affirming settles the question as it stands; an entry written
+    later reopens it.
+    """
+
+    op: Literal["affirm"]
+    handle: str
+
+
 class DeleteOp(BaseModel):
     op: Literal["delete"] = "delete"
     id: str = Field(
@@ -161,6 +183,7 @@ class Params(BaseModel):
         | UpdateOp
         | RetireOp
         | RestoreOp
+        | AffirmOp
         | DeleteOp
     ) = Field(
         discriminator="op",
@@ -306,6 +329,8 @@ class Memory(CallableTool2[Params]):
             return self._list(op)
         if isinstance(op, RetireOp | RestoreOp):
             return await self._set_retired(op)
+        if isinstance(op, AffirmOp):
+            return await self._affirm(op)
         if isinstance(op, UpdateOp):
             return await self._update(op)
         return await self._delete(op)
@@ -535,6 +560,28 @@ class Memory(CallableTool2[Params]):
         return _ok(
             output=json.dumps({"id": op.id, "scope": "persistent"}),
             brief="Memory updated",
+        )
+
+    async def _affirm(self, op: AffirmOp) -> ToolReturnValue:
+        """Record that a suggested supersession was raised and declined.
+
+        Not put through persistent approval, unlike retiring. Retiring changes
+        what every later session is told without being asked; this changes only
+        whether the same question is asked again, and the thing it records *is*
+        the user's answer — asking them to approve the storing of their own
+        answer is a loop with nothing at the end of it.
+        """
+        try:
+            entry = set_affirmed(self._persistent_file, op.handle)
+        except AmbiguousHandleError as exc:
+            return ToolError(message=str(exc), brief="Ambiguous handle")
+        if entry is None:
+            return ToolError(
+                message=f"No memory entry with handle={op.handle!r}.", brief="Not found"
+            )
+        return _ok(
+            output=json.dumps({"handle": entry.handle, "affirmed": True}),
+            brief="Memory affirmed",
         )
 
     async def _set_retired(self, op: RetireOp | RestoreOp) -> ToolReturnValue:

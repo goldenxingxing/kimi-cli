@@ -30,6 +30,9 @@ from amem.storage import (
     resolve_handle as resolve_handle,
 )
 from amem.storage import (
+    set_affirmed as set_affirmed,
+)
+from amem.storage import (
     set_retired as set_retired,
 )
 from amem.storage import (
@@ -49,6 +52,7 @@ __all__ = [
     "delete_entry",
     "read_entries",
     "resolve_handle",
+    "set_affirmed",
     "set_retired",
     "stamp_relevance",
     "update_entry",

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, override
 
-from amem import render
+from amem import Actions, render
 from kosong.message import Message
 
 from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
@@ -16,6 +16,22 @@ if TYPE_CHECKING:
     from kimi_cli.soul.kimisoul import KimiSoul
 
 _INJECTION_TYPE = "cross_session_memory"
+
+#: How this application spells the operations the preamble refers to.
+#:
+#: Amem describes what to do and leaves the calling convention to the host,
+#: because it used to carry this application's and was wrong in every other.
+#: These must stay in step with the Memory tool's `op` values — the preamble is
+#: read as authoritative, so a stale name here is an agent confidently calling
+#: something that no longer exists.
+_ACTIONS = Actions(
+    search='`Memory(operation={"op": "search", "query": "<query>"})`',
+    get='`Memory(operation={"op": "get", "handle": "<handle>"})`',
+    promote='`Memory(operation={"op": "promote", "id": "<id>"})`',
+    dismiss='`Memory(operation={"op": "dismiss", "id": "<id>"})`',
+    retire='`Memory(operation={"op": "retire", "handle": "<handle>"})`',
+    affirm='`Memory(operation={"op": "affirm", "handle": "<handle>"})`',
+)
 
 # How many recent summaries to surface to the LLM at startup.
 _RECENT_INJECTION_LIMIT = 5
@@ -84,7 +100,7 @@ class CrossSessionMemoryInjectionProvider(DynamicInjectionProvider):
             logger.warning("cross-session memory read failed", exc_info=True)
             return []
 
-        rendered = render(persistent, recent, pending)
+        rendered = render(persistent, recent, pending, actions=_ACTIONS)
         if not rendered:
             return []
 

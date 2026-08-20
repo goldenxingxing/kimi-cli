@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import ast
 import importlib
+from dataclasses import fields
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -78,3 +80,51 @@ def test_the_forwarded_object_is_the_upstream_one(name: str) -> None:
         assert getattr(local, exported) is getattr(upstream, exported), (
             f"kimi_cli.memory.{name}.{exported} is a different object from amem.{name}.{exported}"
         )
+
+
+class TestTheAdvertisedActionsExist:
+    """The preamble tells an agent what to call, and it is read as authoritative.
+
+    Amem describes what to do and leaves the calling convention to the host,
+    because it used to carry this application's and was wrong in every other
+    one. The cost of holding it here is that it can go stale against the tool —
+    which happened immediately: the first version named an `affirm` op the tool
+    did not have.
+    """
+
+    def _declared_ops(self) -> set[str]:
+        import re
+
+        from kimi_cli.soul.dynamic_injections.cross_session_memory import _ACTIONS
+
+        spelled = " ".join(getattr(_ACTIONS, f.name) for f in fields(_ACTIONS))
+        return set(re.findall(r'"op":\s*"(\w+)"', spelled))
+
+    def _tool_ops(self) -> set[str]:
+        """Every `op` the Memory tool's operation union accepts."""
+        import kimi_cli.tools.memory as tool
+
+        found: set[str] = set()
+        for value in vars(tool).values():
+            annotations = getattr(value, "__annotations__", None)
+            if not isinstance(annotations, dict):
+                continue
+            op = annotations.get("op")
+            found.update(get_args(op))
+        return found
+
+    def test_every_action_named_in_the_preamble_is_a_real_operation(self) -> None:
+        declared = self._declared_ops()
+
+        assert declared, "the preamble names no operations at all"
+        assert declared <= self._tool_ops(), (
+            f"the preamble tells the agent to call {sorted(declared - self._tool_ops())}, "
+            "which the Memory tool does not accept"
+        )
+
+    def test_the_consolidation_answers_are_both_offered(self) -> None:
+        """Retiring without affirming is the shape that nags: the only recordable
+        answer is yes, so a no comes back every session."""
+        declared = self._declared_ops()
+
+        assert {"retire", "affirm"} <= declared
