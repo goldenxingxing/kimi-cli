@@ -99,6 +99,63 @@ def test_a_disabled_name_with_no_managed_copy_is_still_listed(
     assert listed["ghost"].enabled is False
 
 
+async def test_a_name_the_manager_cannot_normalize_does_not_kill_discovery(
+    tmp_path: Path, managed: Path
+) -> None:
+    """Discovery accepts any name; the manager's rules accept far fewer.
+
+    `discover_skills_from_roots` asks `is_enabled` about every skill it found,
+    and that used to normalize the name under the managed-skill rules — which
+    reject a non-ASCII letter by raising. One such folder in any skills
+    directory meant `KimiCLI.create` raised, so the session worker died at
+    startup, every time, with an exit code and nothing on its stderr.
+
+    `my_skill` is here to pin the other side of the line: an underscore is
+    inside the managed rules, and widening them is not what this fix does.
+    """
+    user = tmp_path / "user"
+    for name in ("写作助手", "my_skill", "ok-skill"):
+        _skill(user, name)
+
+    roots = [ScopedSkillsRoot(root=KaosPath(str(user)), scope="user")]
+    names = sorted(s.name for s in await discover_skills_from_roots(roots))
+
+    assert names == ["my_skill", "ok-skill", "写作助手"]
+
+
+async def test_unmanageable_names_survive_while_a_disabled_one_is_still_dropped(
+    tmp_path: Path, managed: Path
+) -> None:
+    """Tolerating the names the manager cannot address must not tolerate the
+    ones it can: a disabled skill stays disabled."""
+    builtin = tmp_path / "builtin"
+    user = tmp_path / "user"
+    _skill(builtin, "docx")
+    _skill(user, "写作助手")
+    _skill(user, "docx")
+    SkillManager(builtin, managed / "skill").disable("docx")
+
+    roots = [ScopedSkillsRoot(root=KaosPath(str(user)), scope="user")]
+    names = [s.name for s in await discover_skills_from_roots(roots)]
+
+    assert names == ["写作助手"]
+
+
+def test_listing_skips_a_directory_it_cannot_manage(tmp_path: Path, managed: Path) -> None:
+    """The writable root is a folder people drop skills into by hand, so a name
+    outside the managed rules lands there. Listing must pass over it rather than
+    fail, which would take every manageable skill beside it out of the panel."""
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    writable = managed / "skill"
+    _skill(writable, "写作助手")
+    _skill(writable, "usable")
+
+    listed = [s.name for s in SkillManager(builtin, writable).list_skills()]
+
+    assert listed == ["usable"]
+
+
 async def test_skip_skill_dirs_drops_an_auto_discovered_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

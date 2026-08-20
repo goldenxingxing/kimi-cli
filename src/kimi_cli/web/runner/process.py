@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - degraded mode if pillow-heif missing
     logger.debug("pillow-heif not available; uploaded HEIC/HEIF will fail to decode")
 from kimi_cli.config import LLMModel, load_config
 from kimi_cli.llm import ModelCapability, derive_model_capabilities
+from kimi_cli.share import get_share_dir
 from kimi_cli.utils.subprocess_env import get_clean_env
 from kimi_cli.web.models import (
     SessionNoticeEvent,
@@ -57,6 +58,23 @@ from kimi_cli.wire.jsonrpc import (
 from kimi_cli.wire.serde import deserialize_wire_message
 
 JSONRPCOutMessageAdapter = TypeAdapter[JSONRPCOutMessage](JSONRPCOutMessage)
+
+
+def worker_log_path() -> Path | None:
+    """Path of the log file a crashing worker's traceback ends up in.
+
+    The worker calls ``enable_logging``, which swaps its process-level ``fd=2``
+    into loguru. So when it dies there is nothing on the stderr pipe we read
+    here, and the whole traceback is in this file instead. Name it in the error
+    rather than saying "check the logs", which does not say which ones.
+
+    Returns ``None`` if the share directory cannot be resolved, so that
+    reporting one failure never raises a second one.
+    """
+    try:
+        return get_share_dir() / "logs" / "kimi.log"
+    except OSError:
+        return None
 
 
 class SessionProcess:
@@ -318,10 +336,17 @@ class SessionProcess:
                         if self._process.returncode is None:
                             await self._process.wait()
                         if not stderr:
+                            log_path = worker_log_path()
+                            where = (
+                                f"Its stderr is redirected into {log_path} —"
+                                " the traceback is there."
+                                if log_path is not None
+                                else "Check logs for details."
+                            )
                             err_msg = (
                                 "Worker process exited unexpectedly"
                                 f" (exit code {self._process.returncode}). "
-                                "Check logs for details."
+                                f"{where}"
                             )
                             stderr = err_msg.encode()
                         # Clear in-flight IDs before broadcasting so that

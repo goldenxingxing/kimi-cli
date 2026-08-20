@@ -24,6 +24,9 @@ from amem.consolidate import (
     MAX_PROPOSALS as MAX_PROPOSALS,
 )
 from amem.consolidate import (
+    PRESSURE_ACT_AT as PRESSURE_ACT_AT,
+)
+from amem.consolidate import (
     PRESSURE_WARN_AT as PRESSURE_WARN_AT,
 )
 from amem.consolidate import (
@@ -59,6 +62,7 @@ __all__ = [
     "DORMANT_AFTER_DAYS",
     "LONG_ENTRY_CHARS",
     "MAX_PROPOSALS",
+    "PRESSURE_ACT_AT",
     "PRESSURE_WARN_AT",
     "SUPERSEDED_RATIO",
     "Supersession",

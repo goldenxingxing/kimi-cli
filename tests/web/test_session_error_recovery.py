@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -127,6 +128,54 @@ async def test_read_loop_eof_clears_in_flight_before_broadcast() -> None:
     # At the time broadcast was called, is_busy should already be False
     assert busy_at_broadcast[0] is False
     assert sp.status.state == "error"
+
+
+# ---------------------------------------------------------------------------
+# Tests: a silent worker exit names the log file holding the traceback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_loop_silent_exit_names_log_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that dies after `enable_logging` leaves an empty stderr pipe:
+    its fd=2 is redirected into loguru. The substituted message must say which
+    file the traceback landed in, not just "check the logs".
+    """
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(tmp_path))
+
+    sp = SessionProcess(uuid4())
+
+    broadcast: list[str] = []
+
+    async def capture(msg: str) -> None:
+        broadcast.append(msg)
+
+    sp._broadcast = capture  # type: ignore[assignment]
+
+    mock_stdout = asyncio.StreamReader()
+    mock_stdout.feed_eof()
+
+    mock_stderr = asyncio.StreamReader()
+    mock_stderr.feed_eof()  # nothing on the pipe: the traceback went to the log
+
+    mock_process = MagicMock()
+    mock_process.stdout = mock_stdout
+    mock_process.stderr = mock_stderr
+    mock_process.returncode = 1
+
+    sp._process = mock_process
+    sp._expecting_exit = False
+
+    await sp._read_loop()
+
+    expected = str(tmp_path / "logs" / "kimi.log")
+    assert expected in broadcast[0]
+    assert "exit code 1" in broadcast[0]
+    assert sp.status.detail is not None
+    assert expected in sp.status.detail
 
 
 # ---------------------------------------------------------------------------

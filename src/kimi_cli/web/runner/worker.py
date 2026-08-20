@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -21,6 +22,7 @@ from kimi_cli import logger
 from kimi_cli.app import KimiCLI, enable_logging
 from kimi_cli.cli.mcp import get_global_mcp_config_file
 from kimi_cli.exception import MCPConfigError
+from kimi_cli.utils.logging import open_original_stderr
 from kimi_cli.web.store.sessions import load_session_by_id
 
 
@@ -113,6 +115,23 @@ async def run_worker(session_id: UUID) -> None:
         await kimi_cli.close()
 
 
+def report_fatal(text: str) -> None:
+    """Get a crash traceback out of the worker before the process dies.
+
+    ``enable_logging`` redirects fd=2 into loguru, drained by a daemon thread
+    that the interpreter kills during shutdown — so a traceback printed by the
+    default excepthook usually loses everything after its first line, in the
+    log as well as on the pipe. Write it ourselves instead, synchronously:
+    to the stderr saved before the redirect, which is the pipe ``SessionProcess``
+    reads and surfaces in the UI, and to the log for anyone reading it later.
+    """
+    logger.error("Worker crashed:\n{text}", text=text)
+    with open_original_stderr() as stream:
+        if stream is not None:
+            stream.write(text.encode("utf-8", errors="replace"))
+            stream.flush()
+
+
 def main() -> None:
     """Entry point for the worker subprocess."""
     from kimi_cli.utils.proctitle import set_process_title
@@ -135,7 +154,11 @@ def main() -> None:
     enable_logging(debug=False)
 
     # Run the async worker
-    asyncio.run(run_worker(session_id))
+    try:
+        asyncio.run(run_worker(session_id))
+    except Exception:
+        report_fatal(traceback.format_exc())
+        sys.exit(1)
 
 
 if __name__ == "__main__":

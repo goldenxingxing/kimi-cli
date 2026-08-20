@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
+from kimi_cli import logger
 from kimi_cli.skill import get_builtin_skills_dir
 from kimi_cli.utils.frontmatter import parse_frontmatter
 
@@ -216,18 +217,55 @@ class SkillManager:
         return int(self._load_state()["revision"])
 
     def is_enabled(self, name: str) -> bool:
-        key = normalize_managed_skill_name(name)
+        """Whether *name* is on neither the disabled nor the deleted list.
+
+        Called once per discovered skill, with whatever name its SKILL.md
+        declares — and discovery normalizes with a bare casefold, so it accepts
+        names these managed-name rules reject: a non-ASCII letter, a space, a
+        leading symbol. Such a name cannot be on either list, because
+        both hold names this same validator produced. "Enabled" is therefore
+        the truthful answer, and the only one that does not take the app down:
+        this runs inside agent creation, in the session worker, before there is
+        any UI to report an error to. One `写作助手/` in a skills directory used
+        to mean every session died at startup with an exit code and no visible
+        reason.
+        """
+        try:
+            key = normalize_managed_skill_name(name)
+        except ValueError:
+            return True
         state = self._load_state()
         return key not in state["disabled"] and key not in state["deleted"]
 
     @staticmethod
     def _directories(root: Path) -> dict[str, Path]:
+        """Managed skill directories under *root*, keyed by normalized name.
+
+        The writable root is a folder in Application Support that people open
+        and drop skills into by hand, so a directory name the managed-name
+        rules reject is a thing that happens, not a thing that cannot. Skip it:
+        the panel has no way to act on a name it cannot address, and raising
+        here would fail the whole listing — every manageable skill made
+        unreachable by one folder beside them. The agent still discovers and
+        loads it; only management passes it over.
+        """
         if not root.is_dir():
             return {}
         result: dict[str, Path] = {}
         for child in root.iterdir():
             if child.is_dir() and (child / "SKILL.md").is_file():
-                result.setdefault(normalize_managed_skill_name(child.name), child)
+                try:
+                    key = normalize_managed_skill_name(child.name)
+                except ValueError:
+                    logger.warning(
+                        "Skill directory {path} cannot be managed: its name is"
+                        " not a valid managed skill name. It is still"
+                        " discovered and loaded, but the skills panel cannot"
+                        " show or toggle it.",
+                        path=child,
+                    )
+                    continue
+                result.setdefault(key, child)
         return result
 
     @staticmethod
