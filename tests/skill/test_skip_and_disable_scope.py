@@ -6,6 +6,7 @@ user asked to be left alone should be left alone.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,22 @@ def test_a_disabled_name_with_no_managed_copy_is_still_listed(
     assert listed["ghost"].enabled is False
 
 
+def _legacy_state(managed: Path) -> None:
+    """A state file written before skills defaulted to off.
+
+    Under that rule everything discovered is on unless named. Tests about
+    discovery use it so they keep exercising discovery rather than the default.
+    """
+    import json
+
+    state = SkillManager().state_file
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"version": 1, "disabled": [], "deleted": [], "revision": 0}),
+        encoding="utf-8",
+    )
+
+
 async def test_a_name_the_manager_cannot_normalize_does_not_kill_discovery(
     tmp_path: Path, managed: Path
 ) -> None:
@@ -112,10 +129,16 @@ async def test_a_name_the_manager_cannot_normalize_does_not_kill_discovery(
 
     `my_skill` is here to pin the other side of the line: an underscore is
     inside the managed rules, and widening them is not what this fix does.
+
+    The state is written as a pre-default-flip one on purpose: what is being
+    checked is that an unmanageable name survives discovery, not what the
+    default is, and a test that stops exercising its subject when a default
+    changes was not testing the subject.
     """
     user = tmp_path / "user"
     for name in ("写作助手", "my_skill", "ok-skill"):
         _skill(user, name)
+    _legacy_state(managed)
 
     roots = [ScopedSkillsRoot(root=KaosPath(str(user)), scope="user")]
     names = sorted(s.name for s in await discover_skills_from_roots(roots))
@@ -133,6 +156,7 @@ async def test_unmanageable_names_survive_while_a_disabled_one_is_still_dropped(
     _skill(builtin, "docx")
     _skill(user, "写作助手")
     _skill(user, "docx")
+    _legacy_state(managed)
     SkillManager(builtin, managed / "skill").disable("docx")
 
     roots = [ScopedSkillsRoot(root=KaosPath(str(user)), scope="user")]
@@ -204,3 +228,120 @@ async def test_skip_entries_that_match_nothing_are_harmless(
 
 async def _no_user_dirs(*, merge_brands: bool = False) -> list[KaosPath]:
     return []
+
+
+class TestSkillsAreOffUntilAskedFor:
+    """Every discovered skill costs a few hundred characters of context on every
+    request, whether or not it is ever used, so a fresh install carries none.
+
+    The state used to be a list of what was off, which made "on" the answer to
+    every question nobody had answered — including for a skill that arrived
+    yesterday from a directory the user forgot they had.
+    """
+
+    def _manager(self, tmp_path: Path, state: dict | None = None) -> SkillManager:
+        manager = SkillManager()
+        manager.state_file = tmp_path / "skill-state.json"
+        if state is not None:
+            manager.state_file.write_text(json.dumps(state), encoding="utf-8")
+        return manager
+
+    def test_a_fresh_install_carries_nothing(self, tmp_path: Path) -> None:
+        assert self._manager(tmp_path).is_enabled("pdf") is False
+
+    def test_an_existing_catalogue_is_not_emptied_by_upgrading(self, tmp_path: Path) -> None:
+        """The one thing this change must not do.
+
+        A state file written before the default flipped records what its owner
+        turned *off*. Reading it under the new rule would turn everything off,
+        and the first sign would be an agent that no longer knows how to do
+        something it did last week.
+        """
+        manager = self._manager(
+            tmp_path, {"version": 1, "disabled": ["docx"], "deleted": [], "revision": 3}
+        )
+
+        assert manager.is_enabled("pdf") is True
+        assert manager.is_enabled("docx") is False, "and the choice they made is kept"
+
+    def test_once_the_list_exists_it_is_the_answer(self, tmp_path: Path) -> None:
+        manager = self._manager(
+            tmp_path,
+            {"version": 1, "disabled": [], "deleted": [], "revision": 1, "enabled": ["pdf"]},
+        )
+
+        assert manager.is_enabled("pdf") is True
+        assert manager.is_enabled("docx") is False
+
+    def test_the_switches_move_the_name_between_lists(self, tmp_path: Path) -> None:
+        manager = self._manager(
+            tmp_path,
+            {"version": 1, "disabled": [], "deleted": [], "revision": 1, "enabled": []},
+        )
+
+        manager.enable("docx")
+        assert manager.is_enabled("docx") is True
+
+        manager.disable("docx")
+        assert manager.is_enabled("docx") is False
+
+    def test_a_corrupt_state_does_not_switch_everything_back_on(self, tmp_path: Path) -> None:
+        """An unreadable file is not evidence that someone chose to carry every skill."""
+        manager = self._manager(tmp_path)
+        manager.state_file.write_text("{ not json", encoding="utf-8")
+
+        assert manager.is_enabled("pdf") is False
+
+    def test_a_name_that_cannot_be_normalised_is_off_and_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """This runs inside agent creation, before there is any UI to report to.
+
+        One `写作助手/` in a skills directory used to end every session at startup
+        with an exit code and no visible reason. The answer changed with the
+        default; that it must not raise did not.
+        """
+        assert self._manager(tmp_path).is_enabled("写作助手") is False
+
+
+class TestASkillTheRulesCannotNameIsStillAddressable:
+    """`写作助手/` has no managed name, and both defaults would strand it.
+
+    Under "on unless listed" it was permanently on and could not be switched
+    off. Reversing the default without this would have made it permanently off
+    and unable to be switched on, which is a deletion nobody performed and
+    nothing reports.
+    """
+
+    def _manager(self, tmp_path: Path) -> SkillManager:
+        manager = SkillManager()
+        manager.state_file = tmp_path / "skill-state.json"
+        return manager
+
+    def test_it_starts_off_like_everything_else(self, tmp_path: Path) -> None:
+        assert self._manager(tmp_path).is_enabled("写作助手") is False
+
+    def test_it_can_be_switched_on(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+
+        manager.enable("写作助手")
+
+        assert manager.is_enabled("写作助手") is True
+
+    def test_and_off_again(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+        manager.enable("写作助手")
+
+        manager.disable("写作助手")
+
+        assert manager.is_enabled("写作助手") is False
+
+    def test_switching_it_never_raises(self, tmp_path: Path) -> None:
+        """This runs inside agent creation, before there is any UI to report to."""
+        manager = self._manager(tmp_path)
+
+        for name in ("写作助手", " leading space", "-leading-symbol", "with space"):
+            manager.enable(name)
+            assert manager.is_enabled(name) is True
+            manager.disable(name)
+            assert manager.is_enabled(name) is False

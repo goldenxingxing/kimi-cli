@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -11,10 +12,10 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 from kimi_cli import logger
-from kimi_cli.skill import get_builtin_skills_dir
+from kimi_cli.skill import get_builtin_skills_dir, normalize_skill_name
 from kimi_cli.utils.frontmatter import parse_frontmatter
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -45,6 +46,18 @@ class SkillState(TypedDict):
     disabled: list[str]
     deleted: list[str]
     revision: int
+    enabled: NotRequired[list[str]]
+    """Which skills are on, when the answer is not "all of them".
+
+    Absent means a state file written before skills defaulted to off, and is
+    read as the old behaviour — everything discovered is on unless disabled.
+    Upgrading must not silently empty a catalogue someone curated.
+
+    Present, including empty, means the list is the answer. A fresh install
+    starts there: every discovered skill costs a few hundred characters of
+    context on every request whether or not it is ever used, so the default is
+    to carry none of them and let someone choose.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +85,26 @@ class BulkSkillResult:
 
     applied: tuple[str, ...]
     missing: tuple[str, ...]
+
+
+def state_key(name: str) -> str:
+    """The name under which a skill's on/off state is recorded.
+
+    The managed-skill rules reject names discovery accepts — a non-ASCII
+    letter, a space, a leading symbol — so a folder called `写作助手/` has no
+    managed name at all. It still has to be addressable: while the default was
+    "on unless listed", such a skill was permanently on and could not be turned
+    off; with the default reversed it would be permanently off and could not be
+    turned on, which is a silent deletion.
+
+    So the state falls back to the same normalization discovery uses. Both
+    switches and the check go through here, which is what makes the panel able
+    to address a skill it cannot otherwise manage.
+    """
+    try:
+        return normalize_managed_skill_name(name)
+    except ValueError:
+        return normalize_skill_name(name)
 
 
 class SkillManager:
@@ -142,7 +175,7 @@ class SkillManager:
         for backup in self.writable_dir.glob(".*.backup"):
             if not backup.is_dir():
                 continue
-            destination_name = backup.name[1:-len(".backup")]
+            destination_name = backup.name[1 : -len(".backup")]
             try:
                 key = normalize_managed_skill_name(destination_name)
             except ValueError:
@@ -156,7 +189,10 @@ class SkillManager:
 
     def _load_state(self) -> SkillState:
         if not self.state_file.is_file():
-            return {"version": 1, "disabled": [], "deleted": [], "revision": 0}
+            # No file at all is a fresh install, and a fresh install carries
+            # nothing until asked. An existing file without "enabled" is a
+            # different thing entirely and is handled below.
+            return {"version": 1, "disabled": [], "deleted": [], "revision": 0, "enabled": []}
         try:
             raw = json.loads(self.state_file.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
@@ -165,35 +201,37 @@ class SkillManager:
             disabled_raw = raw_state.get("disabled", [])
             deleted_raw = raw_state.get("deleted", [])
             revision_raw = raw_state.get("revision", 0)
-            return {
+            enabled_raw = raw_state.get("enabled")
+            enabled: list[str] | None = (
+                [item for item in cast(list[object], enabled_raw) if isinstance(item, str)]
+                if isinstance(enabled_raw, list)
+                else None
+            )
+            state: SkillState = {
                 "version": 1,
                 "disabled": (
-                    [
-                        item
-                        for item in cast(list[object], disabled_raw)
-                        if isinstance(item, str)
-                    ]
+                    [item for item in cast(list[object], disabled_raw) if isinstance(item, str)]
                     if isinstance(disabled_raw, list)
                     else []
                 ),
                 "deleted": (
-                    [
-                        item
-                        for item in cast(list[object], deleted_raw)
-                        if isinstance(item, str)
-                    ]
+                    [item for item in cast(list[object], deleted_raw) if isinstance(item, str)]
                     if isinstance(deleted_raw, list)
                     else []
                 ),
                 "revision": revision_raw if isinstance(revision_raw, int) else 0,
             }
+            if enabled is not None:
+                state["enabled"] = enabled
+            return state
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             quarantine = self.state_file.with_suffix(".corrupt")
-            try:
+            with contextlib.suppress(OSError):
                 os.replace(self.state_file, quarantine)
-            except OSError:
-                pass
-            return {"version": 1, "disabled": [], "deleted": [], "revision": 0}
+            # Fresh-install semantics, not legacy. An unreadable file is not
+            # evidence that someone chose to carry every skill; reading it that
+            # way would mean a corrupt state turns the whole catalogue back on.
+            return {"version": 1, "disabled": [], "deleted": [], "revision": 0, "enabled": []}
 
     def _save_state(self, state: SkillState) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -217,25 +255,33 @@ class SkillManager:
         return int(self._load_state()["revision"])
 
     def is_enabled(self, name: str) -> bool:
-        """Whether *name* is on neither the disabled nor the deleted list.
+        """Whether *name* is switched on.
 
         Called once per discovered skill, with whatever name its SKILL.md
         declares — and discovery normalizes with a bare casefold, so it accepts
         names these managed-name rules reject: a non-ASCII letter, a space, a
-        leading symbol. Such a name cannot be on either list, because
-        both hold names this same validator produced. "Enabled" is therefore
-        the truthful answer, and the only one that does not take the app down:
-        this runs inside agent creation, in the session worker, before there is
-        any UI to report an error to. One `写作助手/` in a skills directory used
-        to mean every session died at startup with an exit code and no visible
-        reason.
+        leading symbol. Such a name cannot appear on any of these lists, since
+        they hold names this same validator produced.
+
+        A name that cannot be normalized is answered "off" rather than "on".
+        That is the reverse of what it used to be, and follows the default: a
+        skill nobody could switch on is not one to carry into every request.
+        What has not changed is that it must not raise — this runs inside agent
+        creation, in the session worker, before there is any UI to report to,
+        and one `写作助手/` in a skills directory used to end every session at
+        startup with an exit code and no visible reason.
         """
-        try:
-            key = normalize_managed_skill_name(name)
-        except ValueError:
-            return True
         state = self._load_state()
-        return key not in state["disabled"] and key not in state["deleted"]
+        key = state_key(name)
+        if key in state["deleted"] or key in state["disabled"]:
+            return False
+        enabled = state.get("enabled")
+        if enabled is None:
+            # A state file from before skills defaulted to off. Its owner
+            # curated a catalogue under the old rule; upgrading is not the
+            # moment to empty it.
+            return True
+        return key in enabled
 
     @staticmethod
     def _directories(root: Path) -> dict[str, Path]:
@@ -404,9 +450,7 @@ class SkillManager:
             raise ValueError("Invalid skill file")
         return target.read_text(encoding="utf-8")
 
-    def _change_set(
-        self, field: Literal["disabled", "deleted"], name: str, present: bool
-    ) -> None:
+    def _change_set(self, field: Literal["disabled", "deleted"], name: str, present: bool) -> None:
         key = normalize_managed_skill_name(name)
         self.get(name)
         with self._mutation_lock("state"):
@@ -420,14 +464,24 @@ class SkillManager:
             self._save_state(state)
 
     def disable(self, name: str) -> None:
-        self._change_set("disabled", name, True)
+        key = state_key(name)
+        with self._mutation_lock("state"):
+            state = self._load_state()
+            state["disabled"] = sorted(set(state["disabled"]) | {key})
+            enabled = state.get("enabled")
+            if enabled is not None:
+                state["enabled"] = sorted(set(enabled) - {key})
+            self._save_state(state)
 
     def enable(self, name: str) -> None:
-        key = normalize_managed_skill_name(name)
+        key = state_key(name)
         with self._mutation_lock("state"):
             state = self._load_state()
             state["disabled"] = sorted(set(state["disabled"]) - {key})
             state["deleted"] = sorted(set(state["deleted"]) - {key})
+            enabled = state.get("enabled")
+            if enabled is not None:
+                state["enabled"] = sorted(set(enabled) | {key})
             self._save_state(state)
 
     def delete(self, name: str) -> None:
@@ -523,8 +577,7 @@ class SkillManager:
         frontmatter = parse_frontmatter(content) or {}
         edited_name = frontmatter.get("name")
         if edited_name is not None and (
-            not isinstance(edited_name, str)
-            or normalize_managed_skill_name(edited_name) != key
+            not isinstance(edited_name, str) or normalize_managed_skill_name(edited_name) != key
         ):
             raise ValueError("Editing SKILL.md cannot change the skill name")
         builtins = self._directories(self.builtin_dir)

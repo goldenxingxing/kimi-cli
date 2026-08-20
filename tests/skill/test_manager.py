@@ -1,5 +1,7 @@
-from pathlib import Path
+import json
 import os
+from pathlib import Path
+
 import pytest
 
 from kimi_cli.skill.manager import SkillManager
@@ -33,14 +35,20 @@ def test_manager_merges_builtin_and_writable_layers(tmp_path: Path) -> None:
     assert skills["custom"].origin == "user"
 
 
-def test_enabled_lookup_does_not_scan_all_skill_files(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_enabled_lookup_does_not_scan_all_skill_files(monkeypatch, tmp_path: Path) -> None:
     manager = SkillManager(tmp_path / "builtin", tmp_path / "skill")
     monkeypatch.setattr(
         manager,
         "list_skills",
         lambda: (_ for _ in ()).throw(AssertionError("full scan")),
+    )
+
+    # A pre-default-flip state, because the subject here is that the check does
+    # not scan the catalogue — not what an unanswered question defaults to.
+    manager.state_file.parent.mkdir(parents=True, exist_ok=True)
+    manager.state_file.write_text(
+        json.dumps({"version": 1, "disabled": [], "deleted": [], "revision": 0}),
+        encoding="utf-8",
     )
 
     assert manager.is_enabled("any-valid-name") is True
@@ -105,9 +113,7 @@ def test_edit_rejects_logical_rename_without_changing_skill(tmp_path: Path) -> N
     assert manager.get("factory").description == "description"
 
 
-def test_failed_replacement_restores_previous_skill(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_failed_replacement_restores_previous_skill(monkeypatch, tmp_path: Path) -> None:
     builtin = tmp_path / "builtin"
     writable = tmp_path / "skill"
     builtin.mkdir()
@@ -153,9 +159,7 @@ def test_manager_recovers_orphaned_backup_on_startup(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("installer", ["markdown", "archive"])
-def test_replacement_reuses_existing_directory_casing(
-    installer: str, tmp_path: Path
-) -> None:
+def test_replacement_reuses_existing_directory_casing(installer: str, tmp_path: Path) -> None:
     builtin = tmp_path / "builtin"
     writable = tmp_path / "skill"
     builtin.mkdir()
