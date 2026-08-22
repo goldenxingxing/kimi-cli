@@ -964,6 +964,10 @@ class TestCompactionTracking:
 
         loop_control = MagicMock()
         loop_control.max_retries_per_step = 1
+        # Compared against a byte count before compaction runs, so it has to be
+        # a number; a bare MagicMock raises TypeError instead of the event this
+        # test is here to observe.
+        loop_control.max_request_bytes = 1_800_000
         soul._loop_control = loop_control
 
         soul._checkpoint = AsyncMock()

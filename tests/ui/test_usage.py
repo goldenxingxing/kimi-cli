@@ -20,8 +20,19 @@ def _plain_text(segments: list[Segment]) -> str:
     return "".join(segment.text for segment in segments).rstrip()
 
 
+#: What `_ratio_color` can return, and so what a filled bar is drawn in.
+_BAR_COLOURS = frozenset({"green", "yellow", "red"})
+
+
 def _filled_bar_segments(segments: list[Segment]) -> list[Segment]:
-    return [segment for segment in segments if "━" in segment.text]
+    """The coloured part of the bar, without the track behind it.
+
+    Rich draws the unfilled remainder as its own segment in the bar.back
+    style, and that track is made of the same ━. Matching on the character
+    alone counted it as filled, so a row with no quota left looked full and a
+    partly used row looked like two bars.
+    """
+    return [seg for seg in segments if "━" in seg.text and str(seg.style) in _BAR_COLOURS]
 
 
 @pytest.mark.parametrize(

@@ -252,11 +252,27 @@ def start_shell_pty(
 
 
 def find_session_dir(home_dir: Path, work_dir: Path) -> Path:
+    """The session a run under *work_dir* wrote.
+
+    Two locations, because sessions moved into the work directory and the
+    share directory still holds the ones written before that. Looking in only
+    the old one raised FileNotFoundError on every run of these tests, which
+    reads as a broken harness rather than as the move it actually was.
+    """
     path_md5 = hashlib.md5(str(work_dir.resolve()).encode("utf-8")).hexdigest()
-    sessions_root = home_dir / ".kimi" / "sessions" / path_md5
-    session_dirs = [path for path in sessions_root.iterdir() if path.is_dir()]
+    roots = [
+        work_dir / "session-data",
+        home_dir / ".kimi" / "sessions" / path_md5,
+    ]
+
+    session_dirs = [
+        path for root in roots if root.is_dir() for path in root.iterdir() if path.is_dir()
+    ]
     if len(session_dirs) != 1:
-        raise AssertionError(f"Expected exactly one session dir, got {session_dirs!r}")
+        raise AssertionError(
+            f"Expected exactly one session dir under {[str(r) for r in roots]}, "
+            f"got {session_dirs!r}"
+        )
     return session_dirs[0]
 
 
@@ -369,6 +385,21 @@ def read_until_prompt_ready(
     timeout: float = DEFAULT_TIMEOUT,
     quiet_period: float = 0.2,
 ) -> str:
-    shell.read_until_contains(PROMPT_SYMBOL, after=after, timeout=timeout)
+    """Wait until the shell has stopped drawing and is showing an input prompt.
+
+    The prompt is deliberately not required to appear *after* the caller's
+    mark. The shell redraws its input box while a turn runs, so whether the
+    redraw that follows the turn lands before or after the caller takes its
+    mark is a race the caller cannot win — and it started losing consistently
+    once `wait_for_wire_message_count` stopped timing out on a session path
+    that no longer existed and began returning in milliseconds.
+
+    What this gives up: with no position requirement, a shell that hung
+    silently mid-turn would satisfy this, because an earlier prompt is still
+    in the transcript and silence reads as settled. The proof that the shell
+    is really ready is the next thing each caller does — send a line and wait
+    for its output — so what is checked here is the weaker, race-free claim.
+    """
+    shell.read_until_contains(PROMPT_SYMBOL, timeout=timeout)
     shell.wait_for_quiet(timeout=timeout, quiet_period=quiet_period, after=after)
     return shell.normalized_text()

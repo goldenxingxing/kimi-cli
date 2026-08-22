@@ -14,7 +14,6 @@ def test_pyinstaller_datas():
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     site_packages = f".venv/lib/python{python_version}/site-packages"
     rg_binary = "rg.exe" if platform.system() == "Windows" else "rg"
-    has_rg_binary = (project_root / "src/kimi_cli/deps/bin" / rg_binary).exists()
     datas = [
         (
             Path(path)
@@ -73,14 +72,6 @@ def test_pyinstaller_datas():
         ("src/kimi_cli/agents/okabe/agent.yaml", "kimi_cli/agents/okabe"),
         ("src/kimi_cli/prompts/compact.md", "kimi_cli/prompts"),
         ("src/kimi_cli/prompts/init.md", "kimi_cli/prompts"),
-        (
-            "src/kimi_cli/skills/kimi-cli-help/SKILL.md",
-            "kimi_cli/skills/kimi-cli-help",
-        ),
-        (
-            "src/kimi_cli/skills/skill-creator/SKILL.md",
-            "kimi_cli/skills/skill-creator",
-        ),
         ("src/kimi_cli/tools/agent/description.md", "kimi_cli/tools/agent"),
         ("src/kimi_cli/tools/ask_user/description.md", "kimi_cli/tools/ask_user"),
         (
@@ -114,6 +105,7 @@ def test_pyinstaller_datas():
             "src/kimi_cli/tools/file/write.md",
             "kimi_cli/tools/file",
         ),
+        ("src/kimi_cli/tools/memory/description.md", "kimi_cli/tools/memory"),
         ("src/kimi_cli/tools/plan/description.md", "kimi_cli/tools/plan"),
         ("src/kimi_cli/tools/plan/enter_description.md", "kimi_cli/tools/plan"),
         ("src/kimi_cli/tools/shell/bash.md", "kimi_cli/tools/shell"),
@@ -133,9 +125,18 @@ def test_pyinstaller_datas():
             "src/kimi_cli/tools/web/search.md",
             "kimi_cli/tools/web",
         ),
+        ("src/kimi_cli/wiki/templates/index.md", "kimi_cli/wiki/templates"),
+        ("src/kimi_cli/wiki/templates/log.md", "kimi_cli/wiki/templates"),
+        ("src/kimi_cli/wiki/templates/manifest.json", "kimi_cli/wiki/templates"),
+        ("src/kimi_cli/wiki/templates/overview.md", "kimi_cli/wiki/templates"),
+        ("src/kimi_cli/wiki/templates/schema.md", "kimi_cli/wiki/templates"),
     ]
-    if has_rg_binary:
-        expected_datas.append((f"src/kimi_cli/deps/bin/{rg_binary}", "kimi_cli/deps/bin"))
+    # Bundled binaries are listed only when they are actually in the tree, the
+    # same way the ripgrep one is: which of them a checkout has depends on how
+    # it was set up, and a hard list turns that into a failing test.
+    for binary in (rg_binary, "sh.exe"):
+        if (project_root / "src/kimi_cli/deps/bin" / binary).exists():
+            expected_datas.append((f"src/kimi_cli/deps/bin/{binary}", "kimi_cli/deps/bin"))
 
     assert sorted(datas) == sorted(expected_datas)
 
@@ -160,25 +161,21 @@ def test_pyinstaller_hiddenimports():
             "kimi_cli.tools.dmail",
             "kimi_cli.tools.file",
             "kimi_cli.tools.file.glob",
-            "kimi_cli.tools.file.grep_local",
-            "kimi_cli.tools.file.plan_mode",
+            "kimi_cli.tools.file.grep_local", "kimi_cli.tools.file.managed_wiki", "kimi_cli.tools.file.plan_mode",
             "kimi_cli.tools.file.read",
             "kimi_cli.tools.file.read_media",
             "kimi_cli.tools.file.replace",
             "kimi_cli.tools.file.utils",
-            "kimi_cli.tools.file.write",
-            "kimi_cli.tools.plan",
+            "kimi_cli.tools.file.write", "kimi_cli.tools.memory", "kimi_cli.tools.plan",
             "kimi_cli.tools.plan.enter",
             "kimi_cli.tools.plan.heroes",
-            "kimi_cli.tools.shell",
-            "kimi_cli.tools.test",
+            "kimi_cli.tools.shell", "kimi_cli.tools.skill_install", "kimi_cli.tools.test",
             "kimi_cli.tools.think",
             "kimi_cli.tools.todo",
             "kimi_cli.tools.utils",
             "kimi_cli.tools.web",
             "kimi_cli.tools.web.fetch",
-            "kimi_cli.tools.web.search",
-            "setproctitle",
+            "kimi_cli.tools.web.search", "kimi_cli.tools.wiki", "setproctitle",
         ]
     )
 

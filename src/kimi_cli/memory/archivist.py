@@ -213,7 +213,9 @@ async def propose_candidates(soul: KimiSoul, history: Sequence[Message]) -> int:
     try:
         text = extract_text(list(history))
         _note_what_came_up(soul, text[-TAIL_CHARS:])
-        proposals = await carryover_propose(_completer(soul), text, session_id=soul.runtime.session.id)
+        proposals = await carryover_propose(
+            _completer(soul), text, session_id=soul.runtime.session.id
+        )
         if not proposals:
             # carryover.propose already distinguishes "nothing worth keeping" from
             # "the reply could not be read" and logs which one happened. That

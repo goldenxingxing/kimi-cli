@@ -9,8 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from kimi_cli.share import get_share_dir
-from kimi_cli.vis.api.sessions import collect_events, get_work_dir_for_hash
+from kimi_cli.vis.api.sessions import collect_events, iter_session_dirs
 from kimi_cli.wire.file import WireFileMetadata, parse_wire_file_line
 
 router = APIRouter(prefix="/api/vis", tags=["vis"])
@@ -29,8 +28,8 @@ def get_statistics() -> dict[str, Any]:
     if cached and (now - cached[1]) < _CACHE_TTL:
         return cached[0]
 
-    sessions_root = get_share_dir() / "sessions"
-    if not sessions_root.exists():
+    session_dirs = list(iter_session_dirs())
+    if not session_dirs:
         empty: dict[str, Any] = {
             "total_sessions": 0,
             "total_turns": 0,
@@ -58,107 +57,101 @@ def get_statistics() -> dict[str, Any]:
     # work_dir -> { sessions, turns }
     project_stats: dict[str, dict[str, int]] = defaultdict(lambda: {"sessions": 0, "turns": 0})
 
-    for work_dir_hash_dir in sessions_root.iterdir():
-        if not work_dir_hash_dir.is_dir():
+    for session_dir, work_dir_hash, work_dir_path in session_dirs:
+        work_dir = work_dir_path or work_dir_hash
+
+        wire_path = session_dir / "wire.jsonl"
+        if not wire_path.exists():
             continue
-        work_dir = get_work_dir_for_hash(work_dir_hash_dir.name) or work_dir_hash_dir.name
 
-        for session_dir in work_dir_hash_dir.iterdir():
-            if not session_dir.is_dir():
-                continue
+        total_sessions += 1
+        session_turns = 0
+        session_input_tokens = 0
+        session_output_tokens = 0
+        first_ts = 0.0
+        last_ts = 0.0
+        session_date: str | None = None
 
-            wire_path = session_dir / "wire.jsonl"
-            if not wire_path.exists():
-                continue
+        # Track pending tool calls for error attribution
+        pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
 
-            total_sessions += 1
-            session_turns = 0
-            session_input_tokens = 0
-            session_output_tokens = 0
-            first_ts = 0.0
-            last_ts = 0.0
-            session_date: str | None = None
+        try:
+            with wire_path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = parse_wire_file_line(line)
+                    except Exception:
+                        continue
+                    if isinstance(parsed, WireFileMetadata):
+                        continue
 
-            # Track pending tool calls for error attribution
-            pending_tools: dict[str, str] = {}  # tool_call_id -> tool_name
+                    ts = parsed.timestamp
+                    msg_type = parsed.message.type
+                    payload = parsed.message.payload
 
-            try:
-                with wire_path.open(encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
+                    if first_ts == 0:
+                        first_ts = ts
+                        # Determine date from first timestamp
                         try:
-                            parsed = parse_wire_file_line(line)
+                            dt = datetime.fromtimestamp(ts, tz=UTC)
+                            session_date = dt.strftime("%Y-%m-%d")
                         except Exception:
-                            continue
-                        if isinstance(parsed, WireFileMetadata):
-                            continue
+                            pass
+                    last_ts = ts
 
-                        ts = parsed.timestamp
-                        msg_type = parsed.message.type
-                        payload = parsed.message.payload
+                    # Collect (type, payload) pairs, unwrapping SubagentEvent recursively
+                    events_to_process: list[tuple[str, dict[str, Any]]] = []
+                    collect_events(msg_type, payload, events_to_process)
 
-                        if first_ts == 0:
-                            first_ts = ts
-                            # Determine date from first timestamp
-                            try:
-                                dt = datetime.fromtimestamp(ts, tz=UTC)
-                                session_date = dt.strftime("%Y-%m-%d")
-                            except Exception:
-                                pass
-                        last_ts = ts
+                    for ev_type, ev_payload in events_to_process:
+                        if ev_type == "TurnBegin":
+                            session_turns += 1
+                        elif ev_type == "ToolCall":
+                            fn: dict[str, Any] | None = ev_payload.get("function")
+                            tool_id: str = ev_payload.get("id", "")
+                            if isinstance(fn, dict):
+                                name: str = fn.get("name", "unknown")
+                                tool_stats[name]["count"] += 1
+                                if tool_id:
+                                    pending_tools[tool_id] = name
+                        elif ev_type == "ToolResult":
+                            tool_call_id: str = ev_payload.get("tool_call_id", "")
+                            rv: dict[str, Any] | None = ev_payload.get("return_value")
+                            if isinstance(rv, dict) and rv.get("is_error"):
+                                tool_name = pending_tools.get(tool_call_id)
+                                if tool_name:
+                                    tool_stats[tool_name]["error_count"] += 1
+                            pending_tools.pop(tool_call_id, None)
+                        elif ev_type == "StatusUpdate":
+                            tu: dict[str, Any] | None = ev_payload.get("token_usage")
+                            if isinstance(tu, dict):
+                                session_input_tokens += (
+                                    int(tu.get("input_other", 0))
+                                    + int(tu.get("input_cache_read", 0))
+                                    + int(tu.get("input_cache_creation", 0))
+                                )
+                                session_output_tokens += int(tu.get("output", 0))
+        except Exception:
+            continue
 
-                        # Collect (type, payload) pairs, unwrapping SubagentEvent recursively
-                        events_to_process: list[tuple[str, dict[str, Any]]] = []
-                        collect_events(msg_type, payload, events_to_process)
+        total_turns += session_turns
+        total_input_tokens += session_input_tokens
+        total_output_tokens += session_output_tokens
 
-                        for ev_type, ev_payload in events_to_process:
-                            if ev_type == "TurnBegin":
-                                session_turns += 1
-                            elif ev_type == "ToolCall":
-                                fn: dict[str, Any] | None = ev_payload.get("function")
-                                tool_id: str = ev_payload.get("id", "")
-                                if isinstance(fn, dict):
-                                    name: str = fn.get("name", "unknown")
-                                    tool_stats[name]["count"] += 1
-                                    if tool_id:
-                                        pending_tools[tool_id] = name
-                            elif ev_type == "ToolResult":
-                                tool_call_id: str = ev_payload.get("tool_call_id", "")
-                                rv: dict[str, Any] | None = ev_payload.get("return_value")
-                                if isinstance(rv, dict) and rv.get("is_error"):
-                                    tool_name = pending_tools.get(tool_call_id)
-                                    if tool_name:
-                                        tool_stats[tool_name]["error_count"] += 1
-                                pending_tools.pop(tool_call_id, None)
-                            elif ev_type == "StatusUpdate":
-                                tu: dict[str, Any] | None = ev_payload.get("token_usage")
-                                if isinstance(tu, dict):
-                                    session_input_tokens += (
-                                        int(tu.get("input_other", 0))
-                                        + int(tu.get("input_cache_read", 0))
-                                        + int(tu.get("input_cache_creation", 0))
-                                    )
-                                    session_output_tokens += int(tu.get("output", 0))
-            except Exception:
-                continue
+        duration = last_ts - first_ts if last_ts > first_ts else 0
+        total_duration_sec += duration
 
-            total_turns += session_turns
-            total_input_tokens += session_input_tokens
-            total_output_tokens += session_output_tokens
+        # Aggregate daily
+        if session_date:
+            daily_stats[session_date]["sessions"] += 1
+            daily_stats[session_date]["turns"] += session_turns
 
-            duration = last_ts - first_ts if last_ts > first_ts else 0
-            total_duration_sec += duration
-
-            # Aggregate daily
-            if session_date:
-                daily_stats[session_date]["sessions"] += 1
-                daily_stats[session_date]["turns"] += session_turns
-
-            # Aggregate per project
-            project_stats[work_dir]["sessions"] += 1
-            project_stats[work_dir]["turns"] += session_turns
+        # Aggregate per project
+        project_stats[work_dir]["sessions"] += 1
+        project_stats[work_dir]["turns"] += session_turns
 
     # Build tool_usage: top 20 by count
     tool_usage = sorted(

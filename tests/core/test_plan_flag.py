@@ -323,7 +323,7 @@ class TestWebWorkerResumedDetection:
             create_calls.append(kwargs)
             raise _StopWorker  # abort after capturing args
 
-        fake_session = SimpleNamespace(dir=session_dir)
+        fake_session = SimpleNamespace(dir=session_dir, work_dir=tmp_path)
         fake_joint = SimpleNamespace(kimi_cli_session=fake_session)
 
         with (
@@ -357,7 +357,7 @@ class TestWebWorkerResumedDetection:
             create_calls.append(kwargs)
             raise _StopWorker
 
-        fake_session = SimpleNamespace(dir=session_dir)
+        fake_session = SimpleNamespace(dir=session_dir, work_dir=tmp_path)
         fake_joint = SimpleNamespace(kimi_cli_session=fake_session)
 
         with (

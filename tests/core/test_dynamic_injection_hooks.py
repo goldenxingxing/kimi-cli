@@ -90,6 +90,9 @@ def _make_compactable_soul() -> Any:
 
     loop_control = MagicMock()
     loop_control.max_retries_per_step = 1
+    # Compared against a byte count on the way into compaction, so it has to be
+    # a number rather than the MagicMock the rest of this stands in for.
+    loop_control.max_request_bytes = 1_800_000
     soul._loop_control = loop_control
 
     soul._checkpoint = AsyncMock()

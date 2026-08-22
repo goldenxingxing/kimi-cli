@@ -120,7 +120,13 @@ Todo list is a simple yet powerful tool to help you get things done. You typical
 
 This is the only todo list tool available to you. That said, each time you want to update the todo list, you need to provide the whole list. Make sure to maintain the todo items and their statuses properly.
 
-Once you finished a subtask/milestone, remember to update the todo list to reflect the progress. Also, you can give yourself a self-encouragement to keep you motivated.
+The list is shown to the user as live progress, so it has to match reality at every moment, not just at the end. Keep it honest by updating it *at each transition* rather than in batches:
+
+- Mark an item `in_progress` before you begin it, and keep exactly one item `in_progress` at a time.
+- The moment an item is finished, mark it `done` — in the same call that marks the next item `in_progress`, so one transition is one call.
+- Never leave a finished item sitting at `pending` or `in_progress` while you work on something else. A stale list is worse than no list: the user reads it as your current state and cannot tell that you have already moved on.
+
+That rhythm is one call per completed item, which is real progress between calls. Also, you can give yourself a self-encouragement to keep you motivated.
 
 Abusing this tool to track too small steps will just waste your time and make your context messy. For example, here are some cases you should not use this tool:
 

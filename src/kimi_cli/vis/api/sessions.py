@@ -9,6 +9,8 @@ import logging
 import re
 import shutil
 import zipfile
+from collections.abc import Iterator
+from hashlib import md5
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,8 +18,9 @@ from uuid import uuid4
 import aiofiles
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from kaos.local import local_kaos
 
-from kimi_cli.metadata import load_metadata
+from kimi_cli.metadata import WorkDirMeta, load_metadata
 from kimi_cli.share import get_share_dir
 from kimi_cli.wire.events import collect_events
 from kimi_cli.wire.file import WireFileMetadata, parse_wire_file_line
@@ -57,22 +60,73 @@ def _find_session_dir(work_dir_hash: str, session_id: str) -> Path | None:
     return None
 
 
+def _work_dir_hash(work_dir: WorkDirMeta) -> str:
+    """The name a work directory's sessions are filed under.
+
+    Still derived from the path even for work directories that now keep their
+    sessions inside themselves, because it is the id the API reports and the
+    UI holds on to; changing it would orphan every reference to a session
+    written before the move.
+    """
+    path_md5 = md5(work_dir.path.encode(encoding="utf-8")).hexdigest()
+    return path_md5 if work_dir.kaos == local_kaos.name else f"{work_dir.kaos}_{path_md5}"
+
+
 def get_work_dir_for_hash(hash_dir_name: str) -> str | None:
     """Look up the work directory path from metadata for a given hash directory name."""
     try:
         metadata = load_metadata()
     except Exception:
         return None
-    from hashlib import md5
-
-    from kaos.local import local_kaos
 
     for wd in metadata.work_dirs:
-        path_md5 = md5(wd.path.encode(encoding="utf-8")).hexdigest()
-        dir_basename = path_md5 if wd.kaos == local_kaos.name else f"{wd.kaos}_{path_md5}"
-        if dir_basename == hash_dir_name:
+        if _work_dir_hash(wd) == hash_dir_name:
             return wd.path
     return None
+
+
+def iter_session_dirs() -> Iterator[tuple[Path, str, str | None]]:
+    """Every session directory on disk, as (dir, work-dir hash, work-dir path).
+
+    Sessions live under their own work directory since they were moved there,
+    and under the share directory before that. Both are read: a scan of one
+    location alone silently reports a partial history, which is worse than an
+    error because the page still renders.
+    """
+    seen: set[Path] = set()
+
+    def emit(session_dir: Path, work_dir_hash: str, work_dir: str | None):
+        resolved = session_dir.resolve()
+        if session_dir.is_dir() and resolved not in seen:
+            seen.add(resolved)
+            return (session_dir, work_dir_hash, work_dir)
+        return None
+
+    try:
+        work_dirs = load_metadata().work_dirs
+    except Exception:
+        work_dirs = []
+
+    for wd in work_dirs:
+        if not wd.sessions_dir.is_dir():
+            continue
+        for session_dir in wd.sessions_dir.iterdir():
+            found = emit(session_dir, _work_dir_hash(wd), wd.path)
+            if found:
+                yield found
+
+    # The pre-move location. Kept in the same pass rather than behind a flag:
+    # an install that has both is the normal state after an upgrade.
+    sessions_root = get_share_dir() / "sessions"
+    if sessions_root.is_dir():
+        for hash_dir in sessions_root.iterdir():
+            if not hash_dir.is_dir():
+                continue
+            work_dir = get_work_dir_for_hash(hash_dir.name)
+            for session_dir in hash_dir.iterdir():
+                found = emit(session_dir, hash_dir.name, work_dir)
+                if found:
+                    yield found
 
 
 def _extract_title_from_wire(wire_path: Path, max_bytes: int = 8192) -> tuple[str, int]:
@@ -194,16 +248,10 @@ def _list_sessions_sync() -> list[dict[str, Any]]:
     """Synchronous session scanning — called from a thread pool."""
     results: list[dict[str, Any]] = []
 
-    sessions_root = get_share_dir() / "sessions"
-    if sessions_root.exists():
-        for work_dir_hash_dir in sessions_root.iterdir():
-            if not work_dir_hash_dir.is_dir():
-                continue
-            work_dir = get_work_dir_for_hash(work_dir_hash_dir.name)
-            for session_dir in work_dir_hash_dir.iterdir():
-                info = _scan_session_dir(session_dir, work_dir_hash_dir.name, work_dir)
-                if info:
-                    results.append(info)
+    for session_dir, work_dir_hash, work_dir in iter_session_dirs():
+        info = _scan_session_dir(session_dir, work_dir_hash, work_dir)
+        if info:
+            results.append(info)
 
     imported_root = _get_imported_root()
     if imported_root.exists():

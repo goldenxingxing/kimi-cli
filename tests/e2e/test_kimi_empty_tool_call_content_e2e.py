@@ -35,10 +35,35 @@ class MockKimiCompatServer(Protocol):
     requests: list[dict[str, Any]]
 
 
+#: The first line of the agent's system prompt. What separates a request that
+#: belongs to the conversation from the summarisation the session-end memory
+#: archival makes on its way out, which arrives on the same endpoint.
+_AGENT_SYSTEM_PREFIX = "You are Kimi Code CLI"
+
+
+def _is_turn_request(body: dict[str, Any]) -> bool:
+    messages = body.get("messages") or []
+    if not messages:
+        return False
+    content = messages[0].get("content")
+    return isinstance(content, str) and content.startswith(_AGENT_SYSTEM_PREFIX)
+
+
 class _MockKimiCompatServer:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
         self.requests: list[dict[str, Any]] = []
+
+    @property
+    def turn_requests(self) -> list[dict[str, Any]]:
+        """Only what the conversation itself sent.
+
+        Asserted on instead of every request: session-end archival summarises
+        the transcript through the same endpoint, so a count over all requests
+        measures how many background features exist rather than what the turn
+        did.
+        """
+        return [body for body in self.requests if _is_turn_request(body)]
 
 
 async def _write_sse_event(response: web.StreamResponse, payload: dict[str, Any]) -> None:
@@ -147,7 +172,20 @@ async def mock_kimi_compat_server() -> AsyncIterator[MockKimiCompatServer]:
         body = cast(dict[str, Any], await request.json())
         server_holder.requests.append(body)
 
-        if len(server_holder.requests) == 1:
+        if not _is_turn_request(body):
+            # Session-end archival, not the conversation. Answered plainly:
+            # raising here became a 500, the client retried it three times, and
+            # the retries were then counted as conversation turns.
+            response = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+            )
+            await response.prepare(request)
+            await _write_sse_event(response, _final_stream_chunk())
+            await _write_sse_done(response)
+            return response
+
+        if len(server_holder.turn_requests) == 1:
             response = web.StreamResponse(
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
@@ -273,9 +311,16 @@ def _assert_thinking_request_body(body: dict[str, Any], *, expected_type: str) -
     assert body["thinking"] == {"type": expected_type}
 
 
-def _assert_session_artifacts(share_dir: Path) -> None:
-    context_files = list((share_dir / "sessions").rglob("context.jsonl"))
-    wire_files = list((share_dir / "sessions").rglob("wire.jsonl"))
+def _assert_session_artifacts(share_dir: Path, work_dir: Path) -> None:
+    """The run left a session on disk, wherever sessions are kept.
+
+    Two roots: sessions moved into the work directory, and the share directory
+    holds the ones written before that. Looking only in the share directory
+    found nothing and read as "the run wrote no session".
+    """
+    roots = [work_dir / "session-data", share_dir / "sessions"]
+    context_files = [p for root in roots for p in root.rglob("context.jsonl")]
+    wire_files = [p for root in roots for p in root.rglob("wire.jsonl")]
     assert len(context_files) == 1
     assert len(wire_files) == 1
     assert context_files[0].stat().st_size > 0
@@ -308,13 +353,13 @@ async def test_kimi_compat_endpoint_accepts_tool_call_history_without_empty_cont
         "content": "Read finished.",
     }
 
-    assert len(mock_kimi_compat_server.requests) == 2
-    for body in mock_kimi_compat_server.requests:
+    assert len(mock_kimi_compat_server.turn_requests) == 2
+    for body in mock_kimi_compat_server.turn_requests:
         _assert_thinking_request_body(body, expected_type="disabled")
-    assistant_message = _find_assistant_tool_call_message(mock_kimi_compat_server.requests[1])
+    assistant_message = _find_assistant_tool_call_message(mock_kimi_compat_server.turn_requests[1])
     assert assistant_message is not None
     assert "content" not in assistant_message
-    _assert_session_artifacts(share_dir)
+    _assert_session_artifacts(share_dir, work_dir)
 
 
 async def test_kimi_thinking_uses_type_without_legacy_reasoning_effort(
@@ -343,7 +388,7 @@ async def test_kimi_thinking_uses_type_without_legacy_reasoning_effort(
         "role": "assistant",
         "content": "Read finished.",
     }
-    assert len(mock_kimi_compat_server.requests) == 2
-    for body in mock_kimi_compat_server.requests:
+    assert len(mock_kimi_compat_server.turn_requests) == 2
+    for body in mock_kimi_compat_server.turn_requests:
         _assert_thinking_request_body(body, expected_type="enabled")
-    _assert_session_artifacts(share_dir)
+    _assert_session_artifacts(share_dir, work_dir)

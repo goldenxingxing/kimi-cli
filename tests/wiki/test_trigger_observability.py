@@ -141,7 +141,7 @@ def test_fields_outside_the_allowlist_are_dropped(captured_events) -> None:
         evidence_count=2,
         raw_prompt="the user's actual words",
         page_body="the whole page",
-        absolute_path="/Users/qunwei/secret/notes.md",
+        absolute_path="/Users/someone/secret/notes.md",
     )
 
     assert len(captured_events) == 1

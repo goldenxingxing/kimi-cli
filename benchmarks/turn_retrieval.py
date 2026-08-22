@@ -39,8 +39,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.search import MemorySearchIndex
 
-PROJECTS = Path.home() / ".claude" / "projects"
-SESSIONS = Path("/Users/qunwei/Documents/local_agent_work/session-data")
+# Both are somebody's own transcripts, so both are inputs rather than
+# constants. SESSIONS was one machine's absolute path, which made this
+# benchmark produce an empty store on every other machine — and an empty store
+# reads as "retrieval found nothing", not as "there was nothing to search".
+PROJECTS = Path(os.environ.get("BENCH_PROJECTS") or Path.home() / ".claude" / "projects")
+SESSIONS = Path(os.environ.get("BENCH_SESSIONS") or Path.cwd() / "session-data")
 TURNS = int(os.environ.get("TURN_SAMPLE", "120"))
 TOP_K = 3
 
@@ -130,6 +134,11 @@ async def build_store(client, sem) -> list[str]:
 
     from kimi_cli.memory.archivist import _EXTRACTION_PROMPT, _parse_candidates
 
+    if not SESSIONS.is_dir():
+        raise SystemExit(
+            f"No sessions at {SESSIONS}. Point BENCH_SESSIONS at a directory of "
+            "session directories (each holding a context.jsonl)."
+        )
     ids = sorted(d.name for d in SESSIONS.iterdir() if (d / "context.jsonl").is_file())
     today = _time.strftime("%Y-%m-%d", _time.localtime())
     replies = await asyncio.gather(

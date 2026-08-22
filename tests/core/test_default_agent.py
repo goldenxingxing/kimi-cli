@@ -148,6 +148,7 @@ When working on files in subdirectories, always check whether those directories 
 If you modified any files/styles/structures/configurations/workflows/... mentioned in `AGENTS.md` files, you MUST update the corresponding `AGENTS.md` files to keep them up-to-date.
 
 
+
 # Skills
 
 Skills are reusable, composable capabilities that enhance your abilities. Each skill is a self-contained directory with a `SKILL.md` file that contains instructions, examples, and/or reference material.
@@ -280,7 +281,7 @@ async def test_default_agent_background_bash_guardrails(runtime: Runtime):
         [
             "Agent",
             "AskUserQuestion",
-            "SetTodoList", "Memory", "Shell",
+            "SetTodoList", "Memory", "Wiki", "InstallSkill", "Shell",
             "TaskList",
             "TaskOutput",
             "TaskStop",
