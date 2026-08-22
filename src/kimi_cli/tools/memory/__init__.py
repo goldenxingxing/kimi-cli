@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 from typing import Literal, cast, override
 
-from amem import Store, execute
-from amem.operations import ConsolidateOp as ConsolidateOperation
+from carryover import Store, execute
+from carryover.operations import ConsolidateOp as ConsolidateOperation
 from kosong.tooling import BriefDisplayBlock, CallableTool2, ToolError, ToolReturnValue
 from pydantic import BaseModel, Field, field_validator
 
@@ -602,7 +602,7 @@ class Memory(CallableTool2[Params]):
     async def _consolidate(self, op: ConsolidateOp) -> ToolReturnValue:
         """Merge several entries into one, through the same approval as any write.
 
-        The execution is amem's: it writes the merged entry before retiring the
+        The execution is carryover's: it writes the merged entry before retiring the
         others, and refuses to touch anything if a handle does not resolve —
         consolidating onto the wrong set is worse than not consolidating. What
         is this application's is asking first and saying what happened.

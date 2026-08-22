@@ -1,6 +1,6 @@
 """One constraint this application places on the memory package.
 
-The matching rules themselves are tested in Amem, where they live. What cannot
+The matching rules themselves are tested in Carryover, where they live. What cannot
 be tested there is this: the Wiki's intent hashing is an authorization
 boundary, and it folds strings with the same function memory uses to decide
 whether two statements are the same. The two must not drift apart, and they
@@ -10,7 +10,7 @@ now sit in different repositories, so the assertion belongs here.
 from __future__ import annotations
 
 import pytest
-from amem import fold_text
+from carryover import fold_text
 
 from kimi_cli.wiki.intent import normalize_intent_text
 

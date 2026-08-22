@@ -2,7 +2,7 @@
 
 `kimi_cli.memory` names every symbol it forwards, which keeps the seam visible
 — reading the module tells you what this application uses. The cost is that a
-symbol added to Amem is not forwarded until someone regenerates the list, and
+symbol added to Carryover is not forwarded until someone regenerates the list, and
 nothing says so: the import fails much later, in whatever first needs it. That
 happened within a day of the split, on a threshold added upstream.
 
@@ -49,14 +49,14 @@ def _public_names(module_file: Path) -> set[str]:
 
 @pytest.mark.parametrize("name", FORWARDED)
 def test_everything_public_upstream_is_forwarded(name: str) -> None:
-    upstream = importlib.import_module(f"amem.{name}")
+    upstream = importlib.import_module(f"carryover.{name}")
     local = importlib.import_module(f"kimi_cli.memory.{name}")
 
     expected = _public_names(Path(upstream.__file__))
     missing = sorted(n for n in expected if not hasattr(local, n))
 
     assert not missing, (
-        f"amem.{name} defines {missing} and kimi_cli.memory.{name} does not forward them — "
+        f"carryover.{name} defines {missing} and kimi_cli.memory.{name} does not forward them — "
         "regenerate the re-export list"
     )
 
@@ -73,19 +73,19 @@ def test_nothing_is_forwarded_that_upstream_no_longer_has(name: str) -> None:
 @pytest.mark.parametrize("name", FORWARDED)
 def test_the_forwarded_object_is_the_upstream_one(name: str) -> None:
     """Re-export, not reimplementation — the thing this split exists to guarantee."""
-    upstream = importlib.import_module(f"amem.{name}")
+    upstream = importlib.import_module(f"carryover.{name}")
     local = importlib.import_module(f"kimi_cli.memory.{name}")
 
     for exported in getattr(local, "__all__", []):
         assert getattr(local, exported) is getattr(upstream, exported), (
-            f"kimi_cli.memory.{name}.{exported} is a different object from amem.{name}.{exported}"
+            f"kimi_cli.memory.{name}.{exported} is a different object from carryover.{name}.{exported}"
         )
 
 
 class TestTheAdvertisedActionsExist:
     """The preamble tells an agent what to call, and it is read as authoritative.
 
-    Amem describes what to do and leaves the calling convention to the host,
+    Carryover describes what to do and leaves the calling convention to the host,
     because it used to carry this application's and was wrong in every other
     one. The cost of holding it here is that it can go stale against the tool —
     which happened immediately: the first version named an `affirm` op the tool
@@ -134,13 +134,13 @@ class TestEveryOperationUpstreamIsOffered:
     """A verb this package can perform and this tool does not expose is one the
     agent cannot reach.
 
-    Found this way: amem gained `consolidate` — replace several entries with one
+    Found this way: carryover gained `consolidate` — replace several entries with one
     that keeps what all of them said — and the tool did not, so the answer that
     is right more often than retiring had to be done by hand outside the agent.
     """
 
-    def test_the_tool_exposes_what_amem_can_do(self) -> None:
-        from amem.operations import OPERATION_NAMES
+    def test_the_tool_exposes_what_carryover_can_do(self) -> None:
+        from carryover.operations import OPERATION_NAMES
 
         import kimi_cli.tools.memory as tool
 
@@ -151,4 +151,4 @@ class TestEveryOperationUpstreamIsOffered:
                 exposed.update(get_args(annotations.get("op")))
 
         missing = sorted(set(OPERATION_NAMES) - exposed)
-        assert not missing, f"amem performs {missing} and this tool offers no way to ask for it"
+        assert not missing, f"carryover performs {missing} and this tool offers no way to ask for it"

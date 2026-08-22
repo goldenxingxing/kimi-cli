@@ -1,11 +1,11 @@
 """The seam between this application and the memory package.
 
 What extraction proposes, how the prompt is shaped, and how a queue expires
-are tested in Amem, where that code lives — carrying copies here would put the
+are tested in Carryover, where that code lives — carrying copies here would put the
 same assertions in two places and let them disagree, which is how the copy of
 the implementation drifted in the first place.
 
-What is tested here is the part Amem cannot see: turning kosong ``Message``
+What is tested here is the part Carryover cannot see: turning kosong ``Message``
 objects into text, handing over a completer built from this soul's own model,
 and writing the result where this application keeps it.
 """
@@ -87,7 +87,7 @@ class TestTheAdapter:
     ) -> None:
         """The one thing only this side can get wrong.
 
-        Amem is handed a string; turning a list of kosong messages into that
+        Carryover is handed a string; turning a list of kosong messages into that
         string is this application's job, and passing the wrong thing would
         surface as an extractor that proposes nothing.
         """
@@ -113,7 +113,7 @@ class TestTheAdapter:
 
 
 class TestTheProviderStaysOnThisSide:
-    """Amem must not learn about kosong, and this is where that could slip.
+    """Carryover must not learn about kosong, and this is where that could slip.
 
     The package imports no model client and reads no environment — that is why
     it installs anywhere. The coupling lives in ``_completer``, and keeping it

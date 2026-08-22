@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, override
 
-from amem import Actions, render
+from carryover import Actions, render
 from kosong.message import Message
 
 from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
@@ -19,7 +19,7 @@ _INJECTION_TYPE = "cross_session_memory"
 
 #: How this application spells the operations the preamble refers to.
 #:
-#: Amem describes what to do and leaves the calling convention to the host,
+#: Carryover describes what to do and leaves the calling convention to the host,
 #: because it used to carry this application's and was wrong in every other.
 #: These must stay in step with the Memory tool's `op` values — the preamble is
 #: read as authoritative, so a stale name here is an agent confidently calling
@@ -37,7 +37,7 @@ _ACTIONS = Actions(
 _RECENT_INJECTION_LIMIT = 5
 
 # The per-section ceilings, the ordering, and the wording of every section live
-# in :func:`amem.render`. They were a second copy here — identical line for
+# in :func:`carryover.render`. They were a second copy here — identical line for
 # line apart from the function's name — which is the same duplication that had
 # already let a shared helper drift, in a file that happens not to sit under
 # kimi_cli/memory and so survived the first pass.

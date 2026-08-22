@@ -4,12 +4,12 @@ import random
 import re
 import string
 
-from amem import fold_text as fold_text
+from carryover import fold_text as fold_text
 
 _NEWLINE_RE = re.compile(r"[\r\n]+")
 
 
-#: Re-exported from :mod:`amem.text`, not reimplemented here.
+#: Re-exported from :mod:`carryover.text`, not reimplemented here.
 #:
 #: The Wiki's intent hashing is an authorization boundary and memory
 #: deduplication decides whether two statements are the same. Both fold the

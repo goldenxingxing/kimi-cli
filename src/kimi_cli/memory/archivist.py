@@ -14,7 +14,7 @@ Both write to ``{user_memory_dir}/recent.jsonl`` with file locking.
 What stays here is what is bound to this application: turning kosong ``Message``
 objects into text, the compaction and shutdown hooks, and where the files live.
 The extraction itself — the prompt, the parser, the refusal/fault distinction —
-is :func:`amem.propose`, reached through a ``Completer`` built from this soul's
+is :func:`carryover.propose`, reached through a ``Completer`` built from this soul's
 own model. Nothing about the provider is configured; it is passed in.
 """
 
@@ -24,8 +24,8 @@ import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from amem.extract import TAIL_CHARS, Completer
-from amem.extract import propose as amem_propose
+from carryover.extract import TAIL_CHARS, Completer
+from carryover.extract import propose as carryover_propose
 from kosong.message import Message
 
 from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
@@ -213,9 +213,9 @@ async def propose_candidates(soul: KimiSoul, history: Sequence[Message]) -> int:
     try:
         text = extract_text(list(history))
         _note_what_came_up(soul, text[-TAIL_CHARS:])
-        proposals = await amem_propose(_completer(soul), text, session_id=soul.runtime.session.id)
+        proposals = await carryover_propose(_completer(soul), text, session_id=soul.runtime.session.id)
         if not proposals:
-            # amem.propose already distinguishes "nothing worth keeping" from
+            # carryover.propose already distinguishes "nothing worth keeping" from
             # "the reply could not be read" and logs which one happened. That
             # distinction is the reason this feature was broken for its whole
             # life once: both showed up here as no candidates.
@@ -247,9 +247,9 @@ def _note_what_came_up(soul: KimiSoul, conversation: str) -> None:
 
 
 def _completer(soul: KimiSoul) -> Completer:
-    """This soul's model, in the shape :func:`amem.propose` asks for.
+    """This soul's model, in the shape :func:`carryover.propose` asks for.
 
-    The whole coupling to a provider is these fifteen lines. amem imports no
+    The whole coupling to a provider is these fifteen lines. carryover imports no
     client and reads no environment: it is handed something that takes a system
     prompt and a user prompt and returns text, which is all it needs and all
     this has to promise.

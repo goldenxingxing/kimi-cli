@@ -13,7 +13,7 @@ dependencies = [
     # Cross-session memory. A workspace member rather than a vendored copy:
     # the two were byte-identical apart from import lines, and a hand-carried
     # copy had already lost two of fold_text's three normalisation axes once.
-    "amem",
+    "carryover",
     # loguru stays >=0.6.0 because notify-py (via batrachian-toad) caps it at <=0.6.0 on 3.14+.
     "loguru>=0.6.0,<0.8",
     "prompt-toolkit==3.0.52",
@@ -65,7 +65,7 @@ include = ["src/kimi_cli/wiki/templates/**"]
 
 [tool.uv.workspace]
 members = [
-    "packages/amem",
+    "packages/carryover",
     "packages/kosong",
     "packages/kaos",
     "packages/kimi-code",
@@ -73,7 +73,7 @@ members = [
 ]
 
 [tool.uv.sources]
-amem = { workspace = true }
+carryover = { workspace = true }
 kosong = { workspace = true }
 pykaos = { workspace = true }
 kimi-cli = { workspace = true }
