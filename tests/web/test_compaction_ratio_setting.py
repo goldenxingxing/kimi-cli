@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from kimi_cli.wire.jsonrpc import (
     JSONRPCInMessageAdapter,
@@ -67,8 +68,13 @@ def test_an_out_of_range_ratio_is_refused_at_the_wire(ratio: float) -> None:
         }
     )
 
-    with pytest.raises(Exception):
+    # Named rather than bare Exception: a blind raises() also passes when the
+    # message never reaches validation at all — a renamed method, a typo in the
+    # payload — which is the opposite of what this test claims to show.
+    with pytest.raises(ValidationError) as refused:
         JSONRPCInMessageAdapter.validate_json(raw)
+
+    assert any("ratio" in str(error["loc"]) for error in refused.value.errors())
 
 
 # ---------------------------------------------------------------------------

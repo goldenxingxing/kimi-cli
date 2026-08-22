@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
 from kimi_cli.analytics.skill_usage import build_skill_usage
+from kimi_cli.skill.manager import ManagedSkill, SkillManager
 from kimi_cli.web.db.crud import (
     create_user,
     delete_user,
@@ -18,7 +19,6 @@ from kimi_cli.web.db.crud import (
 )
 from kimi_cli.web.db.database import get_db
 from kimi_cli.web.user_auth import require_admin
-from kimi_cli.skill.manager import ManagedSkill, SkillManager
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -318,9 +318,7 @@ async def restore_managed_skill(
 
 
 @router.delete("/skills/{name}", status_code=204)
-async def delete_managed_skill(
-    name: str, admin: dict[str, Any] = Depends(require_admin)
-) -> None:
+async def delete_managed_skill(name: str, admin: dict[str, Any] = Depends(require_admin)) -> None:
     try:
         _skill_manager().delete(name)
     except KeyError as exc:

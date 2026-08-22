@@ -245,10 +245,9 @@ class SkillManager:
                 os.fsync(stream.fileno())
             os.replace(temp_name, self.state_file)
         finally:
-            try:
+            # Gone already on the success path, where os.replace moved it.
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
 
     @property
     def revision(self) -> int:

@@ -128,7 +128,6 @@ async def test_flow_slash_run_does_not_auto_generate_session_title(
     assert runtime.session.state.custom_title is None
 
 
-
 @pytest.mark.asyncio
 async def test_slash_command_does_not_start_wiki_retrieval(
     runtime: Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

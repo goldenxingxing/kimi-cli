@@ -59,9 +59,7 @@ async def test_a_completion_while_idle_starts_a_turn(runtime: Runtime, tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_nothing_happens_before_the_user_has_spoken(
-    runtime: Runtime, tmp_path: Path
-) -> None:
+async def test_nothing_happens_before_the_user_has_spoken(runtime: Runtime, tmp_path: Path) -> None:
     """Reopening a session with old notifications must not start it talking."""
     server = WireServer(_make_soul(runtime, tmp_path))
     server._followup_armed = False
@@ -80,9 +78,7 @@ async def test_nothing_happens_when_there_is_nothing_to_report(
 
 
 @pytest.mark.asyncio
-async def test_a_running_turn_is_left_to_read_it_itself(
-    runtime: Runtime, tmp_path: Path
-) -> None:
+async def test_a_running_turn_is_left_to_read_it_itself(runtime: Runtime, tmp_path: Path) -> None:
     """A turn in flight already picks the notification up; two would collide."""
     server = WireServer(_make_soul(runtime, tmp_path))
     server._followup_armed = True

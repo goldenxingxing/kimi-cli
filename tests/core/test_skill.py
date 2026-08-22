@@ -181,9 +181,7 @@ type: capability
 
 
 @pytest.mark.asyncio
-async def test_discover_skills_skips_unsupported_runtime(
-    monkeypatch, tmp_path
-):
+async def test_discover_skills_skips_unsupported_runtime(monkeypatch, tmp_path):
     root = tmp_path / "skills"
     root.mkdir()
     _write_skill(

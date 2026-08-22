@@ -22,11 +22,7 @@ def _texts(sent: list[WireMessage]) -> list[str]:
 
 
 def _status_yolo(sent: list[WireMessage]) -> list[bool]:
-    return [
-        msg.yolo
-        for msg in sent
-        if isinstance(msg, StatusUpdate) and msg.yolo is not None
-    ]
+    return [msg.yolo for msg in sent if isinstance(msg, StatusUpdate) and msg.yolo is not None]
 
 
 def _make_soul(runtime: Runtime, tmp_path: Path) -> KimiSoul:

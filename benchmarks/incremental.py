@@ -30,13 +30,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+import httpx
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 for _extra in filter(None, os.environ.get("BENCH_SYS_PATH", "").split(":")):
     sys.path.append(_extra)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import httpx
-from judge import Model
+from judge import Model  # noqa: E402  (must follow the sys.path setup above)
 
 CORPUS = Path(__file__).with_name("incremental_corpus.json")
 TOP_K = 5

@@ -151,4 +151,6 @@ class TestEveryOperationUpstreamIsOffered:
                 exposed.update(get_args(annotations.get("op")))
 
         missing = sorted(set(OPERATION_NAMES) - exposed)
-        assert not missing, f"carryover performs {missing} and this tool offers no way to ask for it"
+        assert not missing, (
+            f"carryover performs {missing} and this tool offers no way to ask for it"
+        )

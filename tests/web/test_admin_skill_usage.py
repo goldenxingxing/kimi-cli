@@ -37,7 +37,9 @@ def _wire(path: Path, records: list[tuple[float, str, dict[str, Any]]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"type": "metadata", "protocol_version": "1"})]
     for ts, msg_type, payload in records:
-        lines.append(json.dumps({"timestamp": ts, "message": {"type": msg_type, "payload": payload}}))
+        lines.append(
+            json.dumps({"timestamp": ts, "message": {"type": msg_type, "payload": payload}})
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -143,9 +145,7 @@ def test_top_level_skill_md_read_is_counted(monkeypatch, tmp_path: Path) -> None
     assert report["totals"]["invocations"] == 1
 
 
-def test_read_nested_two_levels_in_subagent_events_is_counted(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_read_nested_two_levels_in_subagent_events_is_counted(monkeypatch, tmp_path: Path) -> None:
     """69% of real tool calls happen inside subagents; missing the recursion
     would silently drop the majority of usage."""
     sessions, manager = _make_env(monkeypatch, tmp_path, builtin_skills={"alpha": "alpha"})
@@ -277,9 +277,7 @@ def test_resource_reads_tracked_separately_from_count(monkeypatch, tmp_path: Pat
 
 def test_builtin_dir_classifies_as_builtin(monkeypatch, tmp_path: Path) -> None:
     sessions, manager = _make_env(monkeypatch, tmp_path, builtin_skills={"alpha": "alpha"})
-    monkeypatch.setattr(
-        "kimi_cli.skill.get_builtin_skills_dir", lambda: tmp_path / "builtin"
-    )
+    monkeypatch.setattr("kimi_cli.skill.get_builtin_skills_dir", lambda: tmp_path / "builtin")
     now = time.time()
     _wire(
         sessions / "s1" / "wire.jsonl",
@@ -317,9 +315,7 @@ def test_extra_wins_over_builtin_when_both_match(monkeypatch, tmp_path: Path) ->
     sessions, manager = _make_env(monkeypatch, tmp_path, builtin_skills={"alpha": "alpha"})
     global_dir = tmp_path / "global-skills"
     monkeypatch.setenv("CUSTOM_SKILLS_HOST_PATH", str(global_dir))
-    monkeypatch.setattr(
-        "kimi_cli.skill.get_builtin_skills_dir", lambda: tmp_path / "builtin"
-    )
+    monkeypatch.setattr("kimi_cli.skill.get_builtin_skills_dir", lambda: tmp_path / "builtin")
     now = time.time()
     _wire(
         sessions / "s1" / "wire.jsonl",
@@ -366,12 +362,21 @@ def test_origin_separates_main_from_subagents(monkeypatch, tmp_path: Path) -> No
         sessions / "s1" / "wire.jsonl",
         [
             (now, "ToolCall", _read_file("c1", "/skills/alpha/SKILL.md")),
-            (now, "SubagentEvent",
-             _sub("ToolCall", _read_file("c2", "/skills/alpha/SKILL.md"), "explore")),
-            (now, "SubagentEvent",
-             _sub("ToolCall", _read_file("c3", "/skills/alpha/SKILL.md"), "explore")),
-            (now, "SubagentEvent",
-             _sub("ToolCall", _read_file("c4", "/skills/alpha/SKILL.md"), "coder")),
+            (
+                now,
+                "SubagentEvent",
+                _sub("ToolCall", _read_file("c2", "/skills/alpha/SKILL.md"), "explore"),
+            ),
+            (
+                now,
+                "SubagentEvent",
+                _sub("ToolCall", _read_file("c3", "/skills/alpha/SKILL.md"), "explore"),
+            ),
+            (
+                now,
+                "SubagentEvent",
+                _sub("ToolCall", _read_file("c4", "/skills/alpha/SKILL.md"), "coder"),
+            ),
         ],
     )
 
@@ -403,9 +408,7 @@ def test_nested_subagent_attributes_to_innermost(monkeypatch, tmp_path: Path) ->
     assert entry["by_origin"] == {"coder": 1}
 
 
-def test_subagent_without_type_falls_back_to_generic_label(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_subagent_without_type_falls_back_to_generic_label(monkeypatch, tmp_path: Path) -> None:
     sessions, manager = _make_env(monkeypatch, tmp_path, builtin_skills={"alpha": "alpha"})
     now = time.time()
     _wire(
@@ -463,8 +466,11 @@ def test_origin_respects_the_window(monkeypatch, tmp_path: Path) -> None:
         sessions / "s1" / "wire.jsonl",
         [
             (now, "ToolCall", _read_file("c1", "/skills/alpha/SKILL.md")),
-            (now - 10 * DAY, "SubagentEvent",
-             _sub("ToolCall", _read_file("c2", "/skills/alpha/SKILL.md"), "explore")),
+            (
+                now - 10 * DAY,
+                "SubagentEvent",
+                _sub("ToolCall", _read_file("c2", "/skills/alpha/SKILL.md"), "explore"),
+            ),
         ],
     )
 
@@ -660,12 +666,33 @@ def test_bad_tool_arguments_are_skipped(monkeypatch, tmp_path: Path) -> None:
     _wire(
         sessions / "s1" / "wire.jsonl",
         [
-            (now, "ToolCall", {"type": "function", "id": "c1",
-                               "function": {"name": "ReadFile", "arguments": "{broken"}}),
-            (now, "ToolCall", {"type": "function", "id": "c2",
-                               "function": {"name": "ReadFile", "arguments": "{}"}}),
-            (now, "ToolCall", {"type": "function", "id": "c3",
-                               "function": {"name": "ReadFile", "arguments": '{"path": 42}'}}),
+            (
+                now,
+                "ToolCall",
+                {
+                    "type": "function",
+                    "id": "c1",
+                    "function": {"name": "ReadFile", "arguments": "{broken"},
+                },
+            ),
+            (
+                now,
+                "ToolCall",
+                {
+                    "type": "function",
+                    "id": "c2",
+                    "function": {"name": "ReadFile", "arguments": "{}"},
+                },
+            ),
+            (
+                now,
+                "ToolCall",
+                {
+                    "type": "function",
+                    "id": "c3",
+                    "function": {"name": "ReadFile", "arguments": '{"path": 42}'},
+                },
+            ),
             # Single-segment path is unattributable.
             (now, "ToolCall", _read_file("c4", "SKILL.md")),
         ],
@@ -680,7 +707,9 @@ def test_owner_id_drives_user_attribution(monkeypatch, tmp_path: Path) -> None:
     sessions, manager = _make_env(monkeypatch, tmp_path, builtin_skills={"alpha": "alpha"})
     now = time.time()
     session_dir = sessions / "s1"
-    _wire(session_dir / "wire.jsonl", [(now, "ToolCall", _read_file("c1", "/skills/alpha/SKILL.md"))])
+    _wire(
+        session_dir / "wire.jsonl", [(now, "ToolCall", _read_file("c1", "/skills/alpha/SKILL.md"))]
+    )
     (session_dir / "state.json").write_text(json.dumps({"owner_id": "user-42"}), encoding="utf-8")
 
     report = skill_usage.build_skill_usage(days=30, manager=manager)
@@ -732,9 +761,7 @@ def test_endpoint_clamps_days_and_caches(monkeypatch, tmp_path: Path) -> None:
         assert refreshed["generated_at"] >= first["generated_at"]
 
 
-def test_usage_route_is_not_shadowed_by_the_skill_name_route(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_usage_route_is_not_shadowed_by_the_skill_name_route(monkeypatch, tmp_path: Path) -> None:
     """`/skills/usage` must resolve to the stats endpoint, not be parsed as a
     skill named "usage"."""
     _make_env(monkeypatch, tmp_path)

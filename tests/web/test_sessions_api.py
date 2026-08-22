@@ -3,8 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from uuid import UUID
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from kaos.path import KaosPath

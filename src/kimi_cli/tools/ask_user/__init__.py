@@ -59,9 +59,7 @@ class Params(BaseModel):
     )
 
 
-def _echo_typed_answers(
-    questions: list[QuestionItem], answers: dict[str, str]
-) -> None:
+def _echo_typed_answers(questions: list[QuestionItem], answers: dict[str, str]) -> None:
     """Put anything the user typed into the transcript, as theirs.
 
     Only free text. Picking a listed option is a choice rather than something

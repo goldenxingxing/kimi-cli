@@ -34,9 +34,7 @@ def test_approval_feedback_is_echoed_as_the_user_speaking(
 
     approval_module._echo_user_reply("  use a migration instead  ", "approval_feedback")
 
-    assert [(m.text, m.source) for m in sent] == [
-        ("use a migration instead", "approval_feedback")
-    ]
+    assert [(m.text, m.source) for m in sent] == [("use a migration instead", "approval_feedback")]
 
 
 def test_an_empty_or_absent_reply_is_not_echoed(monkeypatch: pytest.MonkeyPatch) -> None:

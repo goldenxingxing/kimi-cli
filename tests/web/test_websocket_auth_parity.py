@@ -46,9 +46,7 @@ def app_with_token(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
 
 def _logged_in(monkeypatch: pytest.MonkeyPatch, user: dict[str, Any] | None) -> None:
-    monkeypatch.setattr(
-        "kimi_cli.web.user_auth.user_from_connection", lambda connection: user
-    )
+    monkeypatch.setattr("kimi_cli.web.user_auth.user_from_connection", lambda connection: user)
 
 
 def test_session_token_in_the_query_still_works(
