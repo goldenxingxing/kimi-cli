@@ -12,14 +12,27 @@ def test_pyinstaller_datas():
 
     project_root = Path(__file__).parent.parent.parent
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    site_packages = f".venv/lib/python{python_version}/site-packages"
     rg_binary = "rg.exe" if platform.system() == "Windows" else "rg"
+
+    def shown(path: Path) -> str:
+        """Project-relative where that means anything, absolute otherwise.
+
+        The environment is usually `.venv` beside the project, but it does not
+        have to be: a run against another Python version, or CI pointing
+        UV_PROJECT_ENVIRONMENT elsewhere, puts site-packages outside the tree
+        entirely. Assuming `.venv` made this the one test that failed there,
+        and assuming the environment is *under* the root made it raise instead.
+        """
+        try:
+            return path.relative_to(project_root).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    venv_dir = shown(Path(sys.prefix))
+    site_packages = f"{venv_dir}/lib/python{python_version}/site-packages"
     datas = [
         (
-            Path(path)
-            .relative_to(project_root)
-            .as_posix()
-            .replace(".venv/Lib/site-packages", site_packages),
+            shown(Path(path)).replace(f"{venv_dir}/Lib/site-packages", site_packages),
             Path(dst).as_posix(),
         )
         for path, dst in datas
