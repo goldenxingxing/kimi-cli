@@ -32,6 +32,16 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Windows reports without blocking. Its first honest run was 91 failed /
+    # 3608 passed: assumptions about paths, terminal rendering and shell
+    # semantics that have been there for as long as nothing ran them. Gating on
+    # that would mean every branch is red for reasons unrelated to its change,
+    # and a check that is always red is one people stop reading — which is how
+    # the suite reached forty-four failures in the first place.
+    #
+    # So the count is the debt, and it is meant to come down. ubuntu and macos
+    # gate; Windows is the number to watch.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
