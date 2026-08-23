@@ -16,6 +16,8 @@ import { AdminPluginsPanel } from "./admin-plugins-panel";
 import { AdminBrandingPanel } from "./admin-branding-panel";
 import { AdminKnowledgePanel } from "./admin-knowledge-panel";
 import { AdminSkillsPanel } from "./admin-skills-panel";
+import { MemoryPanel } from "../memory/memory-panel";
+import { useCandidates } from "@/hooks/useMemory";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -45,12 +47,19 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, BookOpen, Cpu, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette, WandSparkles } from "lucide-react";
+import { ArrowLeft, BookOpen, Cpu, Loader2, Plus, RefreshCw, Trash2, KeyRound, ToggleLeft, ToggleRight, Users, Puzzle, Palette, WandSparkles, Brain } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/apiClient";
 import type { ConfigModel, ConfigToml } from "@/lib/api/models";
 
-type AdminTab = "users" | "models" | "plugins" | "skills" | "branding" | "knowledge";
+type AdminTab =
+  | "users"
+  | "models"
+  | "plugins"
+  | "skills"
+  | "branding"
+  | "knowledge"
+  | "memory";
 
 type AdminPageProps = {
   currentUser: UserInfo;
@@ -277,6 +286,10 @@ function ResetPasswordDialog({ user, onOpenChange, onUpdated }: ResetPasswordDia
 
 export function AdminPage({ currentUser }: AdminPageProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>("users");
+  // Read here so the count sits on the tab itself. Suggestions expire after a
+  // fortnight and the agent raises one only when its subject comes up, so a
+  // number you must open a tab to discover is the state this replaces.
+  const { candidates } = useCandidates();
 
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -522,6 +535,24 @@ export function AdminPage({ currentUser }: AdminPageProps) {
             <BookOpen className="size-3.5" />
             Knowledge
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("memory")}
+            className={[
+              "inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+              activeTab === "memory"
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+          >
+            <Brain className="size-3.5" />
+            Memory
+            {candidates.length > 0 && (
+              <span className="rounded-full bg-primary/15 px-1.5 text-xs font-medium">
+                {candidates.length}
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Plugins tab */}
@@ -535,6 +566,9 @@ export function AdminPage({ currentUser }: AdminPageProps) {
 
         {/* Knowledge tab */}
         {activeTab === "knowledge" && <AdminKnowledgePanel />}
+
+        {/* Memory tab */}
+        {activeTab === "memory" && <MemoryPanel sessionId={null} />}
 
         {/* Models tab */}
         {activeTab === "models" && (
