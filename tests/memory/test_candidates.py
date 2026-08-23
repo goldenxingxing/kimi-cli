@@ -31,6 +31,21 @@ def _history(text: str):
     return [Message(role="user", content=[TextPart(text=text)])]
 
 
+def _compaction_result(summary: str):
+    """What compaction hands the archivist.
+
+    The summary is not a field on the result — it is the text of the first
+    synthesized message, which is what `summary_from_compaction_result` reads.
+    """
+    from kosong.message import Message, TextPart
+
+    from kimi_cli.soul.compaction import CompactionResult
+
+    return CompactionResult(
+        messages=[Message(role="user", content=[TextPart(text=summary)])], usage=None
+    )
+
+
 class TestTheAdapter:
     """`propose_candidates` swallows every exception by design.
 
@@ -130,3 +145,77 @@ class TestTheProviderStaysOnThisSide:
         outside = source.replace(inspect.getsource(archivist._completer), "")
 
         assert "chat_provider" not in outside
+
+
+class TestWhereWritingIsWiredIn:
+    """The adapter above is tested; being called is not the same thing.
+
+    A real store showed nine session summaries, every one of them triggered by
+    compaction and none by a session ending, and one proposal queued across
+    nine sessions. That is the shape these tests pin: which paths reach
+    extraction, and which do not reach it at all.
+    """
+
+    async def test_compaction_queues_a_proposal_on_disk(self, runtime, monkeypatch) -> None:
+        """The path that does work, end to end through the file."""
+
+        def completer(_soul):
+            async def complete(system: str, user: str) -> str:
+                return (
+                    '[{"kind": "feedback", "content": "Ask before emailing a client", "key": null}]'
+                )
+
+            return complete
+
+        monkeypatch.setattr(archivist, "_completer", completer)
+        soul = _Soul(runtime)
+        soul.context = None  # not read on this path
+
+        await archivist.archive_compaction(
+            soul,
+            _compaction_result("a summary of the conversation"),
+            history_before=_history("x" * 400),
+        )
+
+        queued = CandidateFile(runtime.user_memory_dir / CANDIDATES_FILENAME).read()
+        assert [c.content for c in queued] == ["Ask before emailing a client"]
+
+    def test_a_session_ending_does_not_extract(self) -> None:
+        """Pinning the behaviour, which its own docstring contradicts.
+
+        `propose_candidates` says it "costs one extra call at compaction and
+        session end". It is called from one place, and that place is
+        compaction. A session that never compacts proposes nothing — the
+        common case for short ones, which is most of them.
+
+        Asserted rather than fixed because fixing it buys an LLM call on every
+        session end, including the ones where nothing happened, and that is a
+        decision about cost rather than correctness.
+        """
+        source = inspect.getsource(archivist.archive_on_session_end)
+
+        assert "propose_candidates" not in source
+        assert "propose_candidates" in inspect.getsource(archivist.archive_compaction)
+
+    def test_the_worker_never_archives_at_all(self) -> None:
+        """The desktop app runs the worker, and the worker's shutdown does not.
+
+        `archive_on_session_end` is reached from the terminal CLI's `finally`
+        and from nowhere else, so in the app a session that does not compact
+        leaves neither a summary nor a proposal. It is why every summary in a
+        real store came from compaction.
+
+        This test fails the day someone wires it up, which is the point: the
+        gap is recorded rather than remembered.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src" / "kimi_cli"
+        callers = [
+            path.relative_to(src).as_posix()
+            for path in src.rglob("*.py")
+            if "archive_on_session_end" in path.read_text(encoding="utf-8")
+            and path.name != "archivist.py"
+        ]
+
+        assert callers == ["cli/__init__.py"]
