@@ -51,6 +51,34 @@ from kimi_cli.tools.web.search import SearchWeb
 from kimi_cli.utils.environment import Environment
 from kimi_cli.wire.file import WireFile
 
+_GIT_ENV_PREFIX = "GIT_"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _drop_inherited_git_context() -> Generator[None, None, None]:
+    """Remove GIT_* from the environment for the whole run.
+
+    Four test modules shell out to git with ``cwd=`` a temporary directory and
+    assume that decides which repository they touch. It does not — GIT_DIR and
+    GIT_WORK_TREE win over cwd — and git exports them to every hook it runs.
+
+    Run from a pre-push hook, `git init` inside a tmpdir therefore
+    reinitialised the real repository: core.bare=true, after which no git
+    command in that checkout worked, and the fixture's own `git config
+    user.email t@t.com` landed in the developer's config, where the next commit
+    would have used it.
+
+    Session-scoped and autouse because the hazard belongs to the whole suite,
+    not to the four modules that happen to shell out today.
+    """
+    saved = {k: v for k, v in os.environ.items() if k.startswith(_GIT_ENV_PREFIX)}
+    for key in saved:
+        del os.environ[key]
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
 
 @pytest.fixture
 def config() -> Config:
