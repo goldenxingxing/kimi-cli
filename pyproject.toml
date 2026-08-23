@@ -8,7 +8,7 @@ dependencies = [
     "agent-client-protocol==0.8.0",
     "aiofiles>=24.0,<26.0",
     "aiohttp==3.13.3",
-    "typer==0.21.1",
+    "typer==0.27.0",
     "kosong[contrib]==0.55.0",
     # Cross-session memory. A workspace member rather than a vendored copy:
     # the two were byte-identical apart from import lines, and a hand-carried
