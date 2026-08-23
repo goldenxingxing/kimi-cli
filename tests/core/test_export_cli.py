@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import zipfile
 from pathlib import Path
 
@@ -172,9 +173,23 @@ def test_export_previous_session_errors_when_missing(
     assert "Error: no previous session found for the working directory." in result.output
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _unstyled(output: str) -> str:
+    """Help text with the styling taken back out.
+
+    Typer renders help through Rich, which threads escape sequences through
+    the line when colour is on. The usage line is intact either way, but the
+    substring is not: with FORCE_COLOR set, as CI has it, the assertion below
+    failed on output that reads identically to a person.
+    """
+    return " ".join(_ANSI.sub("", output).split())
+
+
 def test_export_help_is_leaf_command() -> None:
     result = CliRunner().invoke(cli, ["export", "--help"])
 
     assert result.exit_code == 0, result.output
-    assert "Usage: root export [OPTIONS] [SESSION_ID]" in result.output
-    assert "COMMAND [ARGS]..." not in result.output
+    assert "Usage: root export [OPTIONS] [SESSION_ID]" in _unstyled(result.output)
+    assert "COMMAND [ARGS]..." not in _unstyled(result.output)

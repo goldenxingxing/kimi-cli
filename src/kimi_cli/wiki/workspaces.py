@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import stat
+import threading
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,22 @@ from kimi_cli.wiki.schema import content_hash
 WORKSPACE_IDENTITY_MARKER = ".openkimo-workspace.json"
 WORKSPACE_IDENTITY_SCHEMA_VERSION = 1
 WORKSPACE_REGISTRY_SCHEMA_VERSION = 1
+
+
+#: One per lock file, consulted only on Windows. `msvcrt.locking` holds for the
+#: whole process, so a second thread asking for a range this process already
+#: has is refused with "Resource deadlock avoided" instead of being made to
+#: wait. `fcntl.flock` binds to the open file description and needs none of
+#: this; taking a mutex on that path would serialise holders allowed to run.
+#: The same defect was found in carryover by its own cross-platform CI, after
+#: it had shipped — nothing here had ever executed a Windows branch.
+_WINDOWS_LOCKS: dict[Path, threading.Lock] = {}
+_WINDOWS_LOCKS_GUARD = threading.Lock()
+
+
+def _windows_lock(lock_path: Path) -> threading.Lock:
+    with _WINDOWS_LOCKS_GUARD:
+        return _WINDOWS_LOCKS.setdefault(lock_path, threading.Lock())
 
 
 class WorkspaceRecord(TypedDict):
@@ -146,16 +163,21 @@ class WorkspaceRegistry:
             if os.name == "nt":
                 import msvcrt
 
-                if lock_file.tell() == 0:
-                    lock_file.write(b"\0")
-                    lock_file.flush()
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-                try:
-                    yield
-                finally:
+                # Held across the whole critical section, not just the
+                # acquire: releasing it before the yield would let a second
+                # thread reach msvcrt.locking while this one still holds the
+                # range, which is the case that fails.
+                with _windows_lock(lock_path):
+                    if lock_file.tell() == 0:
+                        lock_file.write(b"\0")
+                        lock_file.flush()
                     lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                    try:
+                        yield
+                    finally:
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
 
