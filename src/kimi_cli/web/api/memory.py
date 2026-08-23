@@ -47,6 +47,7 @@ from kimi_cli.memory.archivist import (
     raw_tail_summary,
     summary_from_compaction_result,
 )
+from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile
 from kimi_cli.memory.entry import MemoryKind
 from kimi_cli.utils.logging import logger
 from kimi_cli.web.store.sessions import load_session_by_id
@@ -317,6 +318,106 @@ async def delete_persistent(
     path = get_persistent_memory_file(_caller_owner_id(user))
     if not delete_entry(path, entry_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+
+# --------------------------- suggested memories ----------------------------
+#
+# Extraction proposes; a person decides. The agent has had `promote` and
+# `dismiss` since the tool existed, and the preamble lists what is waiting —
+# but it raises a suggestion only when the subject comes up, which is the
+# right default and leaves anything off-topic queued until it expires. Five
+# proposals sat here for two days for exactly that reason, and there was no
+# way for their owner to see them without asking the agent first.
+
+
+class CandidateView(BaseModel):
+    id: str
+    kind: MemoryKind
+    content: str
+    key: str | None = None
+    created_at: float
+    session_id: str | None = None
+
+
+def _candidate_file(user: dict[str, Any] | None) -> CandidateFile:
+    return CandidateFile(get_user_memory_dir(_caller_owner_id(user)) / CANDIDATES_FILENAME)
+
+
+@router.get("/candidates", summary="List memories awaiting the caller's decision")
+async def list_candidates(
+    user: dict[str, Any] | None = Depends(get_current_user),  # noqa: B008
+) -> list[CandidateView]:
+    return [CandidateView(**c.model_dump()) for c in _candidate_file(user).read()]
+
+
+@router.post(
+    "/candidates/{candidate_id}/promote",
+    summary="Keep a suggested memory",
+    status_code=status.HTTP_201_CREATED,
+)
+async def promote_candidate(
+    candidate_id: str,
+    response: Response,
+    user: dict[str, Any] | None = Depends(get_current_user),  # noqa: B008
+) -> PersistentWriteResult:
+    """Move a suggestion into persistent memory.
+
+    Written first and taken off the queue second, as on the tool path: if the
+    write fails the suggestion is still there to decide on again, where the
+    other order would drop it silently.
+
+    No separate confirmation. The caller is the owner acting on their own data
+    and pressing the button is the decision — the gate this package cares about
+    is that nothing arrives here without one.
+    """
+    queue = _candidate_file(user)
+    wanted = candidate_id.strip().lower()
+    candidate = next((c for c in queue.read() if c.id.lower() == wanted), None)
+    if candidate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No such suggestion. It may have been promoted, dismissed, or expired.",
+        )
+
+    result = upsert_entry(
+        get_persistent_memory_file(_caller_owner_id(user)),
+        MemoryEntry(
+            kind=candidate.kind,
+            scope="persistent",
+            content=candidate.content,
+            key=candidate.key,
+        ),
+    )
+    queue.take(candidate.id)
+    if result.merged:
+        response.status_code = status.HTTP_200_OK
+    return PersistentWriteResult(
+        **PersistentEntry.from_entry(result.entry).model_dump(),
+        merged=result.merged,
+        replaced=result.replaced_content,
+        similarity=result.score if result.merged else None,
+        possible_duplicates=[
+            PossibleDuplicate(id=entry_id, content=content, similarity=score)
+            for entry_id, content, score in result.advisories
+        ],
+    )
+
+
+@router.delete(
+    "/candidates/{candidate_id}",
+    summary="Discard a suggested memory",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dismiss_candidate(
+    candidate_id: str,
+    user: dict[str, Any] | None = Depends(get_current_user),  # noqa: B008
+) -> None:
+    """Nothing was stored, so nothing is lost — the suggestion just stops being offered."""
+    wanted = candidate_id.strip().lower()
+    queue = _candidate_file(user)
+    match = next((c for c in queue.read() if c.id.lower() == wanted), None)
+    if match is None or queue.take(match.id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such suggestion")
 
 
 # ----------------------- recent summaries (read-only) -----------------------

@@ -17,9 +17,10 @@ import {
   useRecentSummaries,
   writeKnowledge,
   deleteKnowledge,
+  useCandidates,
 } from "@/hooks/useMemory";
 
-type Tab = "knowledge" | "persistent" | "recent";
+type Tab = "knowledge" | "persistent" | "recent" | "suggested";
 
 const KIND_LABELS: Record<MemoryKind, string> = {
   user: "User",
@@ -34,6 +35,9 @@ function fmtTime(ts: number): string {
 
 export function MemoryPanel({ sessionId }: { sessionId: string | null }) {
   const [tab, setTab] = useState<Tab>("persistent");
+  // Counted here rather than inside the tab so the number shows while another
+  // tab is open. A queue nobody is told about is the reason this tab exists.
+  const { candidates } = useCandidates();
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -44,6 +48,18 @@ export function MemoryPanel({ sessionId }: { sessionId: string | null }) {
           onClick={() => setTab("persistent")}
         >
           Persistent
+        </Button>
+        <Button
+          size="sm"
+          variant={tab === "suggested" ? "default" : "outline"}
+          onClick={() => setTab("suggested")}
+        >
+          Suggested
+          {candidates.length > 0 && (
+            <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 text-xs font-medium">
+              {candidates.length}
+            </span>
+          )}
         </Button>
         <Button
           size="sm"
@@ -61,8 +77,62 @@ export function MemoryPanel({ sessionId }: { sessionId: string | null }) {
         </Button>
       </div>
       {tab === "persistent" && <PersistentTab />}
+      {tab === "suggested" && <SuggestedTab />}
       {tab === "recent" && <RecentTab />}
       {tab === "knowledge" && <KnowledgeTab sessionId={sessionId} />}
+    </div>
+  );
+}
+
+function SuggestedTab() {
+  const { candidates, loading, error, promote, dismiss } = useCandidates();
+
+  const decide = async (action: () => Promise<void>, done: string) => {
+    try {
+      await action();
+      toast.success(done);
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
+
+  if (loading) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  if (error) return <p className="text-sm text-destructive">{error}</p>;
+  if (candidates.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Nothing waiting. Facts noticed at the end of a session appear here until you
+        keep or discard them; unanswered, they expire after a fortnight.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {candidates.map((c) => (
+        <Card key={c.id}>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <span className="text-xs text-muted-foreground">
+              {KIND_LABELS[c.kind]} · {fmtTime(c.created_at)}
+            </span>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => decide(() => promote(c.id), "Kept")}>
+                Keep
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => decide(() => dismiss(c.id), "Discarded")}
+              >
+                Discard
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <p className="whitespace-pre-wrap text-sm">{c.content}</p>
+          </CardContent>
+        </Card>
+      ))}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from kimi_cli.memory.candidates import CANDIDATES_FILENAME, CandidateFile, MemoryCandidate
 from kimi_cli.memory.entry import MemoryEntry
 from kimi_cli.memory.storage import read_entries, upsert_entry
 from kimi_cli.web.api import memory
@@ -86,3 +87,77 @@ def test_the_tool_and_the_api_share_one_invariant(
     )
 
     assert len(read_entries(persistent_path)) == 1
+
+
+@pytest.fixture
+def queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CandidateFile:
+    """The suggestion queue this caller's endpoints act on."""
+    directory = tmp_path / "memory"
+    directory.mkdir()
+    monkeypatch.setattr(memory, "get_user_memory_dir", lambda _owner: directory)
+    return CandidateFile(directory / CANDIDATES_FILENAME)
+
+
+def suggest(queue: CandidateFile, content: str, kind: str = "project") -> MemoryCandidate:
+    candidate = MemoryCandidate(kind=kind, content=content)
+    queue.add([candidate])
+    return candidate
+
+
+class TestSuggestionsCanBeDecidedWithoutAskingTheAgent:
+    """The agent has had promote and dismiss since the tool existed, and the
+    preamble lists what is waiting — but it raises a suggestion only when the
+    subject comes up. Anything off-topic stayed queued until it expired, with
+    no way for its owner to see it. Five real proposals sat for two days that
+    way.
+    """
+
+    def test_the_queue_is_visible(self, client: TestClient, queue: CandidateFile) -> None:
+        suggest(queue, "Reports live under output/reports/daily")
+
+        listed = client.get("/api/memory/candidates").json()
+
+        assert [c["content"] for c in listed] == ["Reports live under output/reports/daily"]
+
+    def test_promoting_stores_it_and_clears_the_queue(
+        self, client: TestClient, queue: CandidateFile, persistent_path: Path
+    ) -> None:
+        candidate = suggest(queue, "Ask before emailing a client", kind="feedback")
+
+        response = client.post(f"/api/memory/candidates/{candidate.id}/promote")
+
+        assert response.status_code == 201
+        assert [e.content for e in read_entries(persistent_path)] == [
+            "Ask before emailing a client"
+        ]
+        assert queue.read() == []
+
+    def test_a_failed_write_leaves_the_suggestion_to_decide_again(
+        self, client: TestClient, queue: CandidateFile, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Written first, dequeued second. The other order drops it silently."""
+        candidate = suggest(queue, "Ask before emailing a client")
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(memory, "upsert_entry", _fail)
+        with pytest.raises(OSError, match="disk full"):
+            client.post(f"/api/memory/candidates/{candidate.id}/promote")
+
+        assert [c.id for c in queue.read()] == [candidate.id]
+
+    def test_dismissing_drops_it_and_writes_nothing(
+        self, client: TestClient, queue: CandidateFile, persistent_path: Path
+    ) -> None:
+        candidate = suggest(queue, "A guess nobody wants kept")
+
+        assert client.delete(f"/api/memory/candidates/{candidate.id}").status_code == 204
+        assert queue.read() == []
+        assert read_entries(persistent_path) == []
+
+    def test_an_id_that_is_gone_is_not_a_silent_success(
+        self, client: TestClient, queue: CandidateFile
+    ) -> None:
+        assert client.post("/api/memory/candidates/deadbeef/promote").status_code == 404
+        assert client.delete("/api/memory/candidates/deadbeef").status_code == 404

@@ -16,6 +16,15 @@ export type KnowledgeFileContent = {
   content: string;
 };
 
+export type Candidate = {
+  id: string;
+  kind: MemoryKind;
+  content: string;
+  key: string | null;
+  created_at: number;
+  session_id: string | null;
+};
+
 export type PersistentEntry = {
   id: string;
   kind: MemoryKind;
@@ -121,6 +130,28 @@ export function deletePersistent(id: string): Promise<void> {
   });
 }
 
+// ----------------------- suggested memories -----------------------
+//
+// Extraction proposes and a person decides. The agent can promote and dismiss
+// too, but it only raises a suggestion when the subject comes up, so anything
+// off-topic waited here unseen until it expired.
+
+export function listCandidates(): Promise<Candidate[]> {
+  return api("/api/memory/candidates");
+}
+
+export function promoteCandidate(id: string): Promise<PersistentEntry> {
+  return api(`/api/memory/candidates/${encodeURIComponent(id)}/promote`, {
+    method: "POST",
+  });
+}
+
+export function dismissCandidate(id: string): Promise<void> {
+  return api(`/api/memory/candidates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 // ----------------------- recent summaries -----------------------
 
 export function listRecent(limit = 50): Promise<RecentSummary[]> {
@@ -179,6 +210,46 @@ export function useMemoryEvents(onEvent: (event: MemoryEvent) => void): void {
 }
 
 // ----------------------- React hooks -----------------------
+
+export function useCandidates() {
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setCandidates(await listCandidates());
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const promote = useCallback(
+    async (id: string) => {
+      await promoteCandidate(id);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const dismiss = useCallback(
+    async (id: string) => {
+      await dismissCandidate(id);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  return { candidates, loading, error, refresh, promote, dismiss };
+}
 
 export function usePersistentMemory() {
   const [entries, setEntries] = useState<PersistentEntry[]>([]);
