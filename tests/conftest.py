@@ -80,6 +80,34 @@ def _drop_inherited_git_context() -> Generator[None, None, None]:
         os.environ.update(saved)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _share_dir_away_from_home(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[None, None, None]:
+    """Point KIMI_SHARE_DIR somewhere disposable for the whole run.
+
+    `get_share_dir()` falls back to ``~/.kimi`` and mkdirs it, so merely calling
+    it reaches into the developer's own directory. Seventeen of the two hundred
+    and seventy-eight test modules set the variable; the rest inherited the
+    real one, and a run left the directory's mtime moved — entries created and
+    removed again, which is the tidy version of the same thing. A test that
+    fails partway leaves them.
+
+    Same shape as the GIT_* fixture above and for the same reason: a test that
+    passes `cwd=` or a tmp_path still loses to an environment variable, and the
+    fix belongs to the suite rather than to each module that remembers.
+    """
+    saved = os.environ.get("KIMI_SHARE_DIR")
+    os.environ["KIMI_SHARE_DIR"] = str(tmp_path_factory.mktemp("share"))
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("KIMI_SHARE_DIR", None)
+        else:
+            os.environ["KIMI_SHARE_DIR"] = saved
+
+
 @pytest.fixture
 def config() -> Config:
     """Create a Config instance."""

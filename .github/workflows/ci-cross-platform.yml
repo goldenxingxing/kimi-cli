@@ -1,0 +1,57 @@
+# The suite on the platforms this fork ships to, not only the one it is
+# developed on.
+#
+# OpenKimo builds a Windows artifact and every other job here runs on ubuntu,
+# so twenty-three `sys.platform == "win32"` branches were never executed by
+# anything. One of them was wrong: msvcrt.locking holds for the whole process,
+# so a second thread asking for a range this process already had was refused
+# with "Resource deadlock avoided" where fcntl.flock would have queued it —
+# concurrent writes to one memory store failed on Windows and passed
+# everywhere else. It was found by carryover's own matrix, after shipping.
+#
+# A separate file from ci-kimi-cli.yml, which is upstream's: this fork syncs
+# from MoonshotAI, and edits to shared workflow files come back as conflicts.
+#
+# e2e is excluded. It drives a PTY and is timing-sensitive; on three operating
+# systems that buys flakes rather than coverage, and what broke there has so
+# far been a symptom of causes this tier already catches.
+name: CI (cross-platform)
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "openkimo-**"
+
+concurrency:
+  group: cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # What release.yml builds the shipped artifact on. `uv sync` would
+      # otherwise take 3.14 from .python-version, and a suite green there says
+      # nothing about the binary users get.
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Tests
+        run: uv run pytest tests --ignore=tests/e2e -q
