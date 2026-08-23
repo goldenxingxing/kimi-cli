@@ -36,7 +36,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows is not listed here: `include` adds to a combination that
+        # already exists rather than replacing it, so naming it in both places
+        # produced two Windows jobs — one of them without the exclusion below,
+        # which is the one that hangs.
+        os: [ubuntu-latest, macos-latest]
         exclude_args: [""]
         include:
           # tests/acp hangs on Windows: the third test of the run sat in
