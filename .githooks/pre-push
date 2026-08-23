@@ -32,5 +32,9 @@ echo "pre-push: ruff"
 uv run --no-sync ruff check src tests benchmarks
 uv run --no-sync ruff format --check src tests benchmarks
 
+# -n 4, not the machine's core count: at -n 8 the wiki lock test that asserts a
+# subprocess has exited starts finding it still running under CPU contention.
+# Four workers took 100 seconds down to 38 across three runs with all 3773
+# passing, and left that margin intact.
 echo "pre-push: tests (excluding e2e; run them before a release)"
-uv run --no-sync pytest tests --ignore=tests/e2e -q
+uv run --no-sync pytest tests --ignore=tests/e2e -q -n 4
