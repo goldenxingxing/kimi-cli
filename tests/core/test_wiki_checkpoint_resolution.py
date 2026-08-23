@@ -478,23 +478,20 @@ async def test_an_ordinary_turn_runs_no_wiki_search(
     relevance cost latency and prompt space on conversations that never needed
     it — which was most of them.
     """
-    import kimi_cli.wiki.retrieval as retrieval_module
+    src = Path(__file__).resolve().parents[2] / "src" / "kimi_cli"
 
-    searched = False
+    # Was a monkeypatch over the per-turn entry point plus a check that the call
+    # site had gone. The entry point itself is gone now, so the guard is what is
+    # left of it: nothing under src reaches for one, and there is no module for
+    # a call site to come back to.
+    assert not (src / "wiki" / "retrieval.py").exists()
+    reaching = [
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if "retrieve_for_turn" in path.read_text(encoding="utf-8")
+    ]
 
-    async def _unexpected(*_args: object, **_kwargs: object):
-        nonlocal searched
-        searched = True
-        return None
-
-    monkeypatch.setattr(retrieval_module, "retrieve_for_turn", _unexpected)
-    source = (
-        Path(__file__).resolve().parents[2] / "src" / "kimi_cli" / "soul" / "kimisoul.py"
-    ).read_text(encoding="utf-8")
-
-    assert not searched
-    # The call site is gone, not merely guarded.
-    assert "retrieve_for_turn" not in source
+    assert reaching == []
 
 
 @pytest.mark.asyncio

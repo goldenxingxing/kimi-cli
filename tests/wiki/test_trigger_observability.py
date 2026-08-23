@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,6 @@ from kimi_cli.wiki import telemetry as wiki_telemetry
 from kimi_cli.wiki.evidence import WikiEvidenceReporter
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wiki.models import PageChange, WikiCandidate, WikiPage
-from kimi_cli.wiki.retrieval import retrieve_for_turn
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.telemetry import allowed_fields, track_wiki_event
 from kimi_cli.wiki.triggers import EvidenceObservation, WikiTurnCoordinator
@@ -159,7 +157,7 @@ def test_a_failing_telemetry_sink_never_raises(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(wiki_telemetry, "track", _boom)
 
-    track_wiki_event("wiki_retrieval_miss", reason="empty")
+    track_wiki_event("wiki_trigger_failed", stage="commit", error_class="OSError")
 
 
 # ---------------------------------------------------------------------------
@@ -290,97 +288,6 @@ async def test_a_rejected_candidate_reports_discarded_with_its_reason(
 
 
 @pytest.mark.asyncio
-async def test_retrieval_reports_a_miss_when_a_real_wiki_has_no_match(
-    observed_runtime,
-    captured_events,
-) -> None:
-    """An empty Wiki is skipped before searching; a populated one can still miss."""
-    coordinator = observed_runtime.wiki_coordinator
-    await coordinator.begin_turn("durable architecture", "durable architecture")
-    # A Wiki that has been written to before, but holds nothing matching.
-    observed_runtime.wiki.layout.revision.write_text("7\n", encoding="ascii")
-    captured_events.clear()
-
-    result = await retrieve_for_turn(
-        observed_runtime.wiki, coordinator, "durable architecture notes"
-    )
-
-    assert result is None
-    assert _names(captured_events) == ["wiki_retrieval_miss"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("kwargs", "reason"),
-    [({"synthetic": True}, "synthetic"), ({"slash_command": True}, "slash_command")],
-)
-async def test_retrieval_reports_why_it_was_skipped(
-    observed_runtime,
-    captured_events,
-    kwargs: dict[str, bool],
-    reason: str,
-) -> None:
-    coordinator = observed_runtime.wiki_coordinator
-    await coordinator.begin_turn("a prompt", "a prompt")
-    captured_events.clear()
-
-    await retrieve_for_turn(observed_runtime.wiki, coordinator, "a prompt", **kwargs)
-
-    assert _names(captured_events) == ["wiki_retrieval_skipped"]
-    assert captured_events[0][1]["reason"] == reason
-
-
-@pytest.mark.asyncio
-async def test_a_sensitive_prompt_is_skipped_without_recording_the_prompt(
-    observed_runtime,
-    captured_events,
-) -> None:
-    coordinator = observed_runtime.wiki_coordinator
-    await coordinator.begin_turn("secret", "secret")
-    captured_events.clear()
-
-    await retrieve_for_turn(
-        observed_runtime.wiki,
-        coordinator,
-        "api_key=sk-abcdefghijklmnopqrstuvwx please search",
-    )
-
-    assert _names(captured_events) == ["wiki_retrieval_skipped"]
-    assert "sk-abcdefghijklmnopqrstuvwx" not in json.dumps(captured_events)
-
-
-# ---------------------------------------------------------------------------
-# Privacy
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_no_wiki_event_ever_carries_a_sensitive_payload(
-    observed_runtime,
-    captured_events,
-) -> None:
-    checkpoint, params = await _durable_turn(observed_runtime)
-    tool = Wiki(observed_runtime)
-    await tool(params)
-    await retrieve_for_turn(observed_runtime.wiki, observed_runtime.wiki_coordinator, "release")
-
-    serialized = json.dumps(captured_events, default=str)
-    for forbidden in (
-        str(observed_runtime.session.work_dir),
-        "/Users/",
-        "C:\\\\Users",
-        "api_key",
-        "Bearer ",
-        "durable decision",
-        "Signed tags only",
-        "where is the rule",
-        "decision.md",
-        checkpoint.summary_hash or "sha256:absent",
-    ):
-        assert forbidden not in serialized, forbidden
-
-
-@pytest.mark.asyncio
 async def test_telemetry_failure_never_changes_the_commit_outcome(
     observed_runtime,
     monkeypatch: pytest.MonkeyPatch,
@@ -396,46 +303,3 @@ async def test_telemetry_failure_never_changes_the_commit_outcome(
 
     assert not result.is_error
     assert observed_runtime.wiki.layout.revision.read_text(encoding="utf-8").strip() != "0"
-
-
-@pytest.mark.asyncio
-async def test_telemetry_failure_never_blocks_retrieval(
-    observed_runtime,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    coordinator = observed_runtime.wiki_coordinator
-    await coordinator.begin_turn("a prompt", "a prompt")
-
-    def _boom(event: str, **properties: Any) -> None:
-        raise RuntimeError("sink is down")
-
-    monkeypatch.setattr(wiki_telemetry, "track", _boom)
-
-    assert await retrieve_for_turn(observed_runtime.wiki, coordinator, "a prompt") is None
-
-
-@pytest.mark.asyncio
-async def test_an_empty_wiki_costs_no_search_at_all(
-    observed_runtime,
-    captured_events,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A fresh install must not pay for a full-text query on every prompt."""
-    coordinator = observed_runtime.wiki_coordinator
-    await coordinator.begin_turn("anything", "anything")
-    searched = False
-
-    def _search(*_args: Any, **_kwargs: Any):
-        nonlocal searched
-        searched = True
-        return []
-
-    monkeypatch.setattr(observed_runtime.wiki, "search", _search)
-    captured_events.clear()
-
-    result = await retrieve_for_turn(observed_runtime.wiki, coordinator, "anything at all")
-
-    assert result is None
-    assert not searched, "an empty Wiki must be skipped before searching"
-    assert _names(captured_events) == ["wiki_retrieval_skipped"]
-    assert captured_events[0][1]["reason"] == "empty_wiki"

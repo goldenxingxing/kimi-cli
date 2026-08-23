@@ -17,9 +17,6 @@ from kimi_cli.telemetry import track
 from kimi_cli.utils.logging import logger
 
 WikiEventName = Literal[
-    "wiki_retrieval_hit",
-    "wiki_retrieval_miss",
-    "wiki_retrieval_skipped",
     "wiki_evidence_recorded",
     "wiki_checkpoint_created",
     "wiki_checkpoint_resolved",
@@ -34,9 +31,6 @@ SafeScalar = bool | int | float | str | None
 CheckpointOutcome = Literal["persist", "discard", "unresolved", "cancelled", "unavailable"]
 
 _EVENT_FIELDS: dict[WikiEventName, frozenset[str]] = {
-    "wiki_retrieval_hit": frozenset({"result_count", "injected_bytes", "duration_ms", "revision"}),
-    "wiki_retrieval_miss": frozenset({"duration_ms", "reason"}),
-    "wiki_retrieval_skipped": frozenset({"reason"}),
     "wiki_evidence_recorded": frozenset(
         {"producer_role", "evidence_class", "reliable", "stable", "source_count", "triggering"}
     ),

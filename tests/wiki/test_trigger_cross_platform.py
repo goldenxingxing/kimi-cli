@@ -13,11 +13,6 @@ from kimi_cli.wiki.evidence import WikiEvidenceReporter
 from kimi_cli.wiki.intent import MAX_INTENT_BYTES, detect_durable_intent
 from kimi_cli.wiki.manager import WikiManager
 from kimi_cli.wiki.models import SourceRef, validate_relative_source_path
-from kimi_cli.wiki.retrieval import (
-    RETRIEVAL_MAX_QUERY_BYTES,
-    build_retrieval_query,
-    truncate_utf8,
-)
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.triggers import (
     OPENKIMO_WIKI_CHECKPOINT_START,
@@ -169,23 +164,6 @@ async def test_a_remote_workspace_records_no_workspace_file_evidence(
 # ---------------------------------------------------------------------------
 # Byte budgets at multi-byte boundaries
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("text", ["测试" * 400, "aπ" * 400, "🌏" * 200])
-def test_truncation_always_lands_on_a_code_point_boundary(text: str) -> None:
-    for budget in (1, 2, 3, 7, 64, 511, 512):
-        truncated = truncate_utf8(text, max_bytes=budget)
-
-        assert len(truncated.encode("utf-8")) <= budget
-        # Round-tripping proves no code point was cut in half.
-        assert truncated.encode("utf-8").decode("utf-8") == truncated
-
-
-def test_a_chinese_query_respects_the_512_byte_budget() -> None:
-    query = build_retrieval_query("发布规则" * 300)
-
-    assert len(query.encode("utf-8")) <= RETRIEVAL_MAX_QUERY_BYTES
-    assert query.encode("utf-8").decode("utf-8") == query
 
 
 def test_intent_detection_bound_holds_at_a_multibyte_boundary() -> None:
