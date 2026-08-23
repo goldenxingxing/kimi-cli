@@ -197,25 +197,29 @@ class TestWhereWritingIsWiredIn:
         assert "propose_candidates" not in source
         assert "propose_candidates" in inspect.getsource(archivist.archive_compaction)
 
-    def test_the_worker_never_archives_at_all(self) -> None:
-        """The desktop app runs the worker, and the worker's shutdown does not.
+    def test_every_way_a_session_ends_archives(self) -> None:
+        """Both shutdown paths, not just the terminal one.
 
-        `archive_on_session_end` is reached from the terminal CLI's `finally`
-        and from nowhere else, so in the app a session that does not compact
-        leaves neither a summary nor a proposal. It is why every summary in a
-        real store came from compaction.
+        This asserted the opposite for as long as it took to notice: the
+        worker the desktop app runs closed without archiving, so a session
+        that did not happen to compact left neither summary nor proposal.
+        A real store showed nine summaries and every one came from compaction.
 
-        This test fails the day someone wires it up, which is the point: the
-        gap is recorded rather than remembered.
+        Kept as a list rather than a count so that adding a third way to end a
+        session is a decision someone makes here, not something that quietly
+        inherits the old behaviour.
         """
         from pathlib import Path
 
         src = Path(__file__).resolve().parents[2] / "src" / "kimi_cli"
-        callers = [
+        callers = sorted(
             path.relative_to(src).as_posix()
             for path in src.rglob("*.py")
-            if "archive_on_session_end" in path.read_text(encoding="utf-8")
+            # The call, not the name: a comment mentioning the function
+            # satisfied the first version of this, which a negative control
+            # caught by passing when it should have failed.
+            if "archive_on_session_end(" in path.read_text(encoding="utf-8")
             and path.name != "archivist.py"
-        ]
+        )
 
-        assert callers == ["cli/__init__.py"]
+        assert callers == ["cli/__init__.py", "web/runner/worker.py"]

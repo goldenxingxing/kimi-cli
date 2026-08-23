@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -112,6 +113,22 @@ async def run_worker(session_id: UUID) -> None:
     try:
         await kimi_cli.run_wire_stdio()
     finally:
+        # Archive before closing, while the soul still has its history.
+        #
+        # The terminal CLI has done this in its own `finally` since the memory
+        # system landed; the worker never did, so in the desktop app a session
+        # that did not happen to compact left nothing behind — no summary and
+        # no proposal. A real store showed it plainly: nine summaries, every
+        # one triggered by compaction, none by a session ending.
+        #
+        # It costs one summarisation request per session end, which is what the
+        # CLI already pays. Fail-open and time-boxed for the same reason it is
+        # there: a slow or broken summariser must not keep the process alive.
+        with contextlib.suppress(Exception):
+            from kimi_cli.memory.archivist import archive_on_session_end
+
+            await asyncio.wait_for(archive_on_session_end(kimi_cli.soul), timeout=10)
+
         await kimi_cli.close()
 
 
