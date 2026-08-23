@@ -1,0 +1,28 @@
+#!/bin/sh
+# Lint and format, which take under a second on this repository.
+#
+# Here rather than only in CI because CI on this account cannot start a job at
+# all — every run fails in three seconds on billing — and because six lint
+# errors and thirteen unformatted files had already accumulated while the only
+# check that existed looked at one directory out of many.
+#
+# `git commit --no-verify` skips this.
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+# git exports GIT_DIR and friends to the hooks it runs, and they beat cwd for
+# anything that shells out to git. The suite drops them itself; unsetting here
+# as well means a stray script run from this hook cannot reach the repository
+# either.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-commit: uv not found, skipping lint. Install uv or use --no-verify." >&2
+    exit 0
+fi
+
+echo "pre-commit: ruff"
+uv run --no-sync ruff check src tests benchmarks
+uv run --no-sync ruff format --check src tests benchmarks

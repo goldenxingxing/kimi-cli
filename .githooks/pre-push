@@ -1,0 +1,36 @@
+#!/bin/sh
+# The suite, minus e2e. About two and a half minutes for 3773 tests.
+#
+# This suite reached forty-four failures because nothing ran it — not CI, which
+# runs the outer repository's tests, and not anybody locally. Two were real
+# defects that sat in main: a session listing blind to every session written
+# after sessions moved into the work directory, and a benchmark pinned to one
+# machine's absolute path. The first is covered by tests/vis, in this tier.
+#
+# e2e is left out: another three minutes for fifty-nine tests, and what broke
+# there today were symptoms of a cause this tier already catches. Run it before
+# a release:  uv run pytest tests/e2e -q
+#
+# `git push --no-verify` skips this.
+set -e
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+# git exports GIT_DIR and friends to the hooks it runs, and they beat cwd for
+# anything that shells out to git. The suite drops them itself; unsetting here
+# as well means a stray script run from this hook cannot reach the repository
+# either.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-push: uv not found, skipping tests. Install uv or use --no-verify." >&2
+    exit 0
+fi
+
+echo "pre-push: ruff"
+uv run --no-sync ruff check src tests benchmarks
+uv run --no-sync ruff format --check src tests benchmarks
+
+echo "pre-push: tests (excluding e2e; run them before a release)"
+uv run --no-sync pytest tests --ignore=tests/e2e -q
