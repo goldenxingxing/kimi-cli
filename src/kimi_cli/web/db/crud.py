@@ -186,6 +186,26 @@ def get_user_session(db: sqlite3.Connection, token: str) -> dict[str, Any] | Non
     return user
 
 
+def get_user_session_row(db: sqlite3.Connection, token: str) -> dict[str, Any] | None:
+    """Return the raw ``user_sessions`` row for *token*, expired or not.
+
+    Separate from :func:`get_user_session` because renewal needs the timestamps
+    the user dict does not carry, and must be able to tell "expired" from
+    "never existed" without deleting anything.
+    """
+    row = db.execute("SELECT * FROM user_sessions WHERE token = ?", (token,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_user_session_expiry(db: sqlite3.Connection, token: str, expires_at: float) -> None:
+    """Move a session's deadline. Silently does nothing if the row is gone."""
+    db.execute(
+        "UPDATE user_sessions SET expires_at = ? WHERE token = ?",
+        (expires_at, token),
+    )
+    db.commit()
+
+
 def delete_user_session(db: sqlite3.Connection, token: str) -> None:
     """Delete a user session by token."""
     db.execute("DELETE FROM user_sessions WHERE token = ?", (token,))

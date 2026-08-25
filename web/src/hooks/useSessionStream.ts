@@ -139,6 +139,7 @@ import { createMessageId, getApiBaseUrl } from "./utils";
 import { kimiCliVersion } from "@/lib/version";
 import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/tool/store";
 import { isSystemReminderOnly } from "./system-reminder";
+import { notifySessionExpired } from "@/lib/session-expiry";
 import { decideOnClose, shouldReportErrorEvent } from "./connection-policy";
 import {
   LEGACY_UPLOADS_REGEX,
@@ -2973,9 +2974,15 @@ export function useSessionStream(
             tooManySessions: "Too many concurrent sessions",
             // Say what the server said. "Lost connection" reads as a network
             // problem and sends people to the wrong place.
-            unauthorized: "Not signed in for this session — reload the page to sign in again",
+            unauthorized: "Signed out — sign in again to continue",
             forbidden: "The server refused this connection (origin or network policy)",
           };
+          if (decision.reason === "unauthorized") {
+            // The socket is the first thing to notice an expired session, and
+            // reconnecting cannot fix it. Hand it to the auth layer so the
+            // login page comes up instead of a dead workspace.
+            notifySessionExpired();
+          }
           const err = new Error(
             REASONS[decision.reason] ??
               "Lost connection to the session and could not reconnect",

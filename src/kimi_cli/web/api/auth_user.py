@@ -15,12 +15,11 @@ from kimi_cli.web.db.crud import (
     verify_password,
 )
 from kimi_cli.web.db.database import get_db
+from kimi_cli.web.session_policy import COOKIE_NAME as _COOKIE_NAME
+from kimi_cli.web.session_policy import session_max_age
 from kimi_cli.web.user_auth import require_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-_COOKIE_NAME = "kimi_session"
-_SESSION_MAX_AGE = 86400  # 24 hours in seconds
 
 
 class LoginRequest(BaseModel):
@@ -53,7 +52,8 @@ async def login(body: LoginRequest, response: Response) -> UserResponse:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Account is disabled",
             )
-        token = create_user_session(db, user["id"], expires_in_seconds=_SESSION_MAX_AGE)
+        max_age = session_max_age()
+        token = create_user_session(db, user["id"], expires_in_seconds=max_age)
 
     response.set_cookie(
         key=_COOKIE_NAME,
@@ -61,7 +61,7 @@ async def login(body: LoginRequest, response: Response) -> UserResponse:
         httponly=True,
         samesite="lax",
         path="/",
-        max_age=_SESSION_MAX_AGE,
+        max_age=max_age,
     )
     return UserResponse(
         user_id=user["id"],

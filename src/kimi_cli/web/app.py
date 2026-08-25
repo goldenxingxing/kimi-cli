@@ -4,9 +4,11 @@ import asyncio
 import os
 import secrets
 import sys
+import time
 import webbrowser
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
@@ -16,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import HTMLResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -47,6 +49,15 @@ from kimi_cli.web.auth import (
     normalize_allowed_origins,
 )
 from kimi_cli.web.runner.process import KimiCLIRunner
+from kimi_cli.web.session_policy import (
+    COOKIE_NAME as SESSION_COOKIE_NAME,
+)
+from kimi_cli.web.session_policy import (
+    build_cookie_header,
+    next_expiry,
+    session_absolute_max_age,
+    session_max_age,
+)
 
 # Container mode imports
 try:
@@ -112,6 +123,99 @@ class _StaticCacheHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, _send_with_cache_headers)
+
+
+class _SessionRenewalMiddleware:
+    """Slide a live session's deadline forward while it is being used.
+
+    Without this the session is a fixed window from login: a tab open across
+    the 24-hour mark is thrown back to the login page mid-use, and the first
+    sign of it is a refresh. The renewal has to happen out here rather than in
+    the auth dependency because only a middleware can still add a header to
+    the response on the way out — and because a request that never touches an
+    authenticated route should still count as "you are using this".
+
+    Cost is one primary-key SELECT on requests that carry the cookie; the
+    UPDATE and the ``Set-Cookie`` only happen once the window is more than
+    half spent. Static assets are skipped: they are the bulk of the requests
+    and none of them mean anything about whether a person is present.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        token = _session_token_from_scope(scope)
+        path: str = scope.get("path", "")
+        if not token or path.startswith("/assets/"):
+            await self.app(scope, receive, send)
+            return
+
+        max_age = session_max_age()
+        renewed = await asyncio.to_thread(_renew_session, token, max_age)
+        if not renewed:
+            await self.app(scope, receive, send)
+            return
+
+        cookie = build_cookie_header(token, max_age)
+
+        async def _send_with_cookie(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message).append("set-cookie", cookie)
+            await send(message)
+
+        await self.app(scope, receive, _send_with_cookie)
+
+
+def _session_token_from_scope(scope: Scope) -> str | None:
+    """Pull the session cookie out of a raw ASGI scope, or ``None``."""
+    raw = Headers(scope=scope).get("cookie")
+    if not raw:
+        return None
+    jar: SimpleCookie = SimpleCookie()
+    try:
+        jar.load(raw)
+    except CookieError:
+        return None
+    morsel = jar.get(SESSION_COOKIE_NAME)
+    return morsel.value if morsel is not None else None
+
+
+def _renew_session(token: str, max_age: int) -> bool:
+    """Extend the session behind *token* if it is due. Returns whether it was.
+
+    Runs in a worker thread: sqlite here is a local file, but the event loop
+    serves streaming responses and websockets that should not wait on it.
+    """
+    from kimi_cli.web.db.crud import get_user_session_row, set_user_session_expiry
+    from kimi_cli.web.db.database import get_db
+
+    try:
+        db = get_db()
+        try:
+            row = get_user_session_row(db, token)
+            if row is None:
+                return False
+            new_expiry = next_expiry(
+                now=time.time(),
+                created_at=float(row["created_at"]),
+                expires_at=float(row["expires_at"]),
+                max_age=max_age,
+                absolute_max_age=session_absolute_max_age(),
+            )
+            if new_expiry is None:
+                return False
+            set_user_session_expiry(db, token, new_expiry)
+            return True
+        finally:
+            db.close()
+    except Exception as e:  # pragma: no cover - renewal must never break a request
+        logger.debug("Session renewal skipped: {err}", err=e)
+        return False
 
 
 def _get_private_addresses(addresses: list[str]) -> list[str]:
@@ -215,6 +319,8 @@ def create_app(
     )
 
     application.add_middleware(cast(Any, _StaticCacheHeadersMiddleware))
+
+    application.add_middleware(cast(Any, _SessionRenewalMiddleware))
 
     application.add_middleware(
         cast(Any, AuthMiddleware),
@@ -434,8 +540,6 @@ def run_web_server(
     if open_browser:
 
         def open_browser_after_delay():
-            import time
-
             time.sleep(1.5)
             webbrowser.open(browser_url)
 

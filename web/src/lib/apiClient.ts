@@ -65,7 +65,9 @@ function createConfig(): Configuration {
 
             switch (context.response.status) {
               case 401:
-                console.error("Authentication failed. Please login again.");
+                // Handled globally by the fetch interceptor in
+                // lib/session-expiry.ts, which also covers the hand-written
+                // fetch helpers this client does not go through.
                 break;
               case 403:
                 console.error(message);
