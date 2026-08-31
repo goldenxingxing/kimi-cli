@@ -11,7 +11,8 @@ import mimetypes
 import os
 import sys
 import time
-from collections.abc import AsyncGenerator
+from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +78,119 @@ def worker_log_path() -> Path | None:
         return None
 
 
+# How far behind one browser tab may fall before it is dropped. A client this
+# many messages (or bytes) behind cannot catch up on the live stream anyway;
+# reconnecting replays `wire.jsonl` from the start, which is both correct and
+# cheaper than holding the backlog.
+WS_SEND_QUEUE_MAX_MESSAGES = 8192
+WS_SEND_QUEUE_MAX_BYTES = 64 * 1024 * 1024
+# A single frame that has not made it onto the wire in this long means the peer
+# has stopped reading and is not coming back.
+WS_SEND_TIMEOUT_S = 60.0
+# Closing a wedged socket writes a close frame, which can block for the same
+# reason the data did. Never wait on it.
+WS_CLOSE_TIMEOUT_S = 5.0
+
+
+class _WebSocketChannel:
+    """The outbound half of one attached WebSocket.
+
+    Every message the session produces used to be written to each attached
+    socket inline, from the task that reads the worker's stdout. A browser tab
+    that stopped draining its socket therefore stopped the read loop, the
+    worker's stdout pipe filled, and the worker blocked mid-turn — while
+    `wire.jsonl` kept being written, so reloading the page showed a turn that
+    had in fact finished. Giving each connection its own queue and writer task
+    keeps that backpressure where it belongs: on that one connection.
+    """
+
+    def __init__(self, ws: WebSocket) -> None:
+        self.ws = ws
+        self.dead = False
+        self._queue: deque[str] = deque()
+        self._queued_bytes = 0
+        self._wakeup = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._on_dead: Callable[[WebSocket], Awaitable[None]] | None = None
+
+    def enqueue(self, message: str) -> bool:
+        """Queue a message for this connection. Never blocks.
+
+        Returns False if the client has fallen too far behind to be worth
+        keeping, in which case the caller should detach it.
+        """
+        if self.dead:
+            return False
+        if (
+            len(self._queue) >= WS_SEND_QUEUE_MAX_MESSAGES
+            or self._queued_bytes >= WS_SEND_QUEUE_MAX_BYTES
+        ):
+            logger.warning(
+                "WebSocket send queue overflow "
+                f"({len(self._queue)} msgs / {self._queued_bytes} bytes); dropping client"
+            )
+            self.dead = True
+            return False
+        self._queue.append(message)
+        self._queued_bytes += len(message)
+        self._wakeup.set()
+        return True
+
+    def start_writing(self, on_dead: Callable[[WebSocket], Awaitable[None]]) -> None:
+        """Leave replay mode and start draining the queue to the socket."""
+        self._on_dead = on_dead
+        if self._task is None and not self.dead:
+            self._task = asyncio.create_task(self._write_loop())
+
+    async def _write_loop(self) -> None:
+        try:
+            while True:
+                if not self._queue:
+                    self._wakeup.clear()
+                    if not self._queue:
+                        await self._wakeup.wait()
+                    continue
+                message = self._queue.popleft()
+                self._queued_bytes -= len(message)
+                if self.ws.client_state != WebSocketState.CONNECTED:
+                    break
+                try:
+                    await asyncio.wait_for(self.ws.send_text(message), WS_SEND_TIMEOUT_S)
+                except asyncio.CancelledError:
+                    raise
+                except TimeoutError:
+                    logger.warning(
+                        f"websocket send stalled for {WS_SEND_TIMEOUT_S:.0f}s; dropping client"
+                    )
+                    break
+                except Exception as e:
+                    logger.warning(f"websocket failed: {e.__class__.__name__} {e}")
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"websocket writer crashed: {e.__class__.__name__} {e}")
+
+        self.dead = True
+        self._queue.clear()
+        self._queued_bytes = 0
+        if self._on_dead is not None:
+            await self._on_dead(self.ws)
+
+    async def shutdown(self) -> None:
+        """Stop the writer task and discard anything still queued."""
+        self.dead = True
+        self._on_dead = None
+        task = self._task
+        self._task = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._queue.clear()
+        self._queued_bytes = 0
+
+
 class SessionProcess:
     """Manages a single session's KimiCLI subprocess.
 
@@ -117,9 +231,9 @@ class SessionProcess:
             updated_at=datetime.now(UTC),
         )
         self._process: asyncio.subprocess.Process | None = None
-        self._websockets: set[WebSocket] = set()
+        self._channels: dict[WebSocket, _WebSocketChannel] = {}
         self._websocket_count = 0
-        self._replay_buffers: dict[WebSocket, list[str]] = {}
+        self._closing_tasks: set[asyncio.Task[None]] = set()
         self._read_task: asyncio.Task[None] | None = None
         self._expecting_exit = False
         self._lock = asyncio.Lock()
@@ -157,8 +271,13 @@ class SessionProcess:
         return self._websocket_count
 
     async def send_status_snapshot(self, ws: WebSocket) -> None:
-        """Send the current status snapshot to a specific WebSocket."""
-        await ws.send_text(new_session_status_message(self._status).model_dump_json())
+        """Send the current status snapshot to a specific WebSocket.
+
+        Goes through that connection's queue so it cannot overtake the live
+        messages flushed when replay ended, and so a stalled peer cannot block
+        the caller.
+        """
+        await self._send_to(ws, new_session_status_message(self._status).model_dump_json())
 
     def _build_status(
         self,
@@ -590,104 +709,136 @@ class SessionProcess:
         return None
 
     async def _broadcast(self, message: str) -> None:
-        """Broadcast a message to all connected WebSockets."""
-        disconnected: set[WebSocket] = set()
+        """Hand a message to every attached WebSocket. Never blocks on a client.
 
+        This runs on the task that drains the worker's stdout, so it must
+        return promptly no matter how slowly any browser tab is reading.
+        Delivery is the job of each connection's own writer task.
+        """
         async with self._ws_lock:
-            websockets = list(self._websockets)
-            to_send: list[WebSocket] = []
-            for ws in websockets:
-                buffer = self._replay_buffers.get(ws)
-                if buffer is not None:
-                    buffer.append(message)
-                else:
-                    to_send.append(ws)
+            channels = list(self._channels.values())
 
-        for ws in to_send:
-            try:
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.send_text(message)
-                else:
-                    disconnected.add(ws)
-            except Exception as e:
-                logger.warning(f"websocket failed: {e.__class__.__name__} {e}")
-                disconnected.add(ws)
+        for channel in channels:
+            if not channel.enqueue(message):
+                await self._drop_websocket(channel.ws, reason="send queue overflow")
 
-        if disconnected:
-            async with self._ws_lock:
-                self._websockets -= disconnected
-                self._websocket_count = len(self._websockets)
-                for ws in disconnected:
-                    self._replay_buffers.pop(ws, None)
-            logger.debug(
-                f"Broadcast: removed {len(disconnected)} disconnected ws, "
-                f"remaining={self._websocket_count}"
-            )
+    async def _send_to(self, ws: WebSocket, message: str) -> None:
+        """Queue a message for one connection. Never blocks on the client."""
+        async with self._ws_lock:
+            channel = self._channels.get(ws)
+        if channel is None:
+            return
+        if not channel.enqueue(message):
+            await self._drop_websocket(ws, reason="send queue overflow")
+
+    async def _drop_websocket(self, ws: WebSocket, *, reason: str) -> None:
+        """Detach a connection that can no longer keep up, and close it.
+
+        Detaching first is what matters: once the socket is out of
+        ``_channels`` it can no longer hold anything up, whatever the close
+        handshake does. The client reconnects and replays `wire.jsonl`, so
+        nothing it missed is lost.
+        """
+        async with self._ws_lock:
+            channel = self._channels.pop(ws, None)
+            self._websocket_count = len(self._channels)
+        if channel is None:
+            return
+        logger.warning(f"Dropping WebSocket ({reason}), remaining={self._websocket_count}")
+        self._teardown(channel, code=1011, reason="Client fell behind")
+
+    def _teardown(
+        self,
+        channel: _WebSocketChannel,
+        *,
+        code: int,
+        reason: str,
+    ) -> None:
+        """Stop a detached connection's writer and close its socket, in the background.
+
+        Both halves can block for the very reason the connection is being torn
+        down: cancelling a writer means waiting for a send that may not be
+        going anywhere, and the close handshake writes a frame of its own. The
+        caller here may be the read loop, so it waits for neither — the socket
+        is already out of ``_channels`` and can no longer hold anything up.
+        """
+
+        async def teardown() -> None:
+            await channel.shutdown()
+            if channel.ws.client_state != WebSocketState.CONNECTED:
+                return
+            # Already gone, or wedged: either way we are done with it.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    channel.ws.close(code=code, reason=reason), WS_CLOSE_TIMEOUT_S
+                )
+
+        task = asyncio.create_task(teardown())
+        self._closing_tasks.add(task)
+        task.add_done_callback(self._closing_tasks.discard)
 
     async def add_websocket_and_begin_replay(self, ws: WebSocket) -> None:
         """Atomically attach a WebSocket and enter replay mode for it."""
         async with self._ws_lock:
-            if ws not in self._websockets:
-                self._websockets.add(ws)
-                self._websocket_count = len(self._websockets)
-            self._replay_buffers.setdefault(ws, [])
+            if ws not in self._channels:
+                self._channels[ws] = _WebSocketChannel(ws)
+                self._websocket_count = len(self._channels)
         logger.debug(f"WebSocket added (replay mode), count={self._websocket_count}")
 
     async def end_replay(self, ws: WebSocket) -> None:
-        """Flush buffered live messages for a websocket after history replay."""
-        while True:
-            async with self._ws_lock:
-                buffer = self._replay_buffers.get(ws)
-                if buffer is None:
-                    return
-                if not buffer:
-                    self._replay_buffers.pop(ws, None)
-                    return
-                chunk = buffer.copy()
-                buffer.clear()
+        """Start delivering live messages to a websocket after history replay.
 
-            if ws.client_state != WebSocketState.CONNECTED:
-                logger.warning("end_replay: ws not connected, cleaning up replay buffer")
-                async with self._ws_lock:
-                    self._replay_buffers.pop(ws, None)
+        Anything broadcast during the replay is already queued in order, so the
+        writer picks up exactly where the replayed history left off.
+        """
+        async with self._ws_lock:
+            channel = self._channels.get(ws)
+        if channel is None:
+            return
+        channel.start_writing(self._on_channel_dead)
+
+    async def _on_channel_dead(self, ws: WebSocket) -> None:
+        """A connection's writer gave up: forget it and close the socket."""
+        async with self._ws_lock:
+            existing = self._channels.get(ws)
+            if existing is None or not existing.dead:
                 return
-            for message in chunk:
-                try:
-                    await ws.send_text(message)
-                except Exception as e:
-                    # Send failed — pop the replay buffer so _broadcast()
-                    # sends directly (or detects disconnect) on the next call.
-                    # Do NOT remove ws from _websockets here; let _broadcast()
-                    # or session_stream's finally block handle cleanup.
-                    logger.warning(f"end_replay: send_text failed during buffer flush: {e}")
-                    async with self._ws_lock:
-                        self._replay_buffers.pop(ws, None)
-                    return
+            channel = self._channels.pop(ws, None)
+            self._websocket_count = len(self._channels)
+        if channel is None:
+            return
+        logger.debug(f"WebSocket writer ended, remaining={self._websocket_count}")
+        self._teardown(channel, code=1011, reason="Send failed")
 
     async def _close_all_websockets(self) -> None:
         """Close all connected WebSockets."""
         async with self._ws_lock:
-            websockets = list(self._websockets)
-            self._websockets.clear()
+            channels = list(self._channels.values())
+            self._channels.clear()
             self._websocket_count = 0
-            self._replay_buffers.clear()
 
-        for ws in websockets:
-            try:
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.close(code=1001, reason="Session process exited")
-            except Exception:
-                # Ignore errors closing already-disconnected WebSockets
-                pass
+        async def close(channel: _WebSocketChannel) -> None:
+            await channel.shutdown()
+            if channel.ws.client_state != WebSocketState.CONNECTED:
+                return
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    channel.ws.close(code=1001, reason="Session process exited"),
+                    WS_CLOSE_TIMEOUT_S,
+                )
+
+        # Concurrently: one wedged peer must not make everyone else wait out
+        # its close timeout too.
+        await asyncio.gather(*(close(channel) for channel in channels))
 
     async def remove_websocket(self, ws: WebSocket) -> None:
         """Remove a WebSocket connection from this session."""
         async with self._ws_lock:
-            if ws in self._websockets:
-                self._websockets.discard(ws)
-                self._websocket_count = len(self._websockets)
-                logger.debug(f"WebSocket removed, count={self._websocket_count}")
-            self._replay_buffers.pop(ws, None)
+            channel = self._channels.pop(ws, None)
+            self._websocket_count = len(self._channels)
+        if channel is not None:
+            logger.debug(f"WebSocket removed, count={self._websocket_count}")
+            await channel.shutdown()
 
     async def apply_compaction_ratio(self, ratio: float) -> bool:
         """Push a new auto-compaction ratio into a live worker.
