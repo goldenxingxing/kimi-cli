@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,9 +33,16 @@ def _run_kimi(args: list[str], *, share_dir: Path) -> subprocess.CompletedProces
     )
 
 
+#: Rich colours its error box when it believes the output can take it, which
+#: it does under CI even though the same command is plain locally. The box
+#: characters then arrive behind an escape sequence and every check below
+#: misses them, so the colour comes off before anything else is decided.
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _normalize_cli_error_output(text: str) -> str:
     """Normalize Rich/Click error boxes across platforms for snapshot tests."""
-    text = text.replace("\r\n", "\n")
+    text = _ANSI_SGR.sub("", text.replace("\r\n", "\n"))
     lines: list[str] = []
     in_box = False
     for line in text.splitlines():
