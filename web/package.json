@@ -77,7 +77,7 @@
     "zustand": "^5.0.9"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.3.8",
+    "@biomejs/biome": "^2.5.3",
     "@types/js-md5": "^0.8.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.10.1",

@@ -20,10 +20,24 @@
       "correctness": {
         // View Transitions API uses ::view-transition-old(root) which linter doesn't recognize
         "noUnknownTypeSelector": "off",
+        // Biome 2.5 does not recognize a forwardRef render function as a
+        // component, so every hook in one is reported. All 15 reports are in
+        // virtualized-message-list.tsx, which is a forwardRef component.
+        "useHookAtTopLevel": "off",
       },
       "suspicious": {
         // Middleware pattern often requires async without await
         "useAwait": "off",
+        // Moved from nursery in Biome 2.5
+        "noLeakedRender": "off",
+        // Keys here combine the index with content (`${index}-${item.title}`)
+        // to stay unique; Biome 2.5 flags any key mentioning the index.
+        "noArrayIndexKey": "off",
+      },
+      "a11y": {
+        // Biome 2.5 reports an empty title on <svg><title>Loading</title>,
+        // where the title is present and non-empty.
+        "noSvgWithoutTitle": "off",
       },
       "performance": {},
       "complexity": {
@@ -32,7 +46,6 @@
       },
       "nursery": {
         "useSortedClasses": "off",
-        "noLeakedRender": "off",
       },
       "style": "off",
     },

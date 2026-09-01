@@ -10,7 +10,7 @@ const PYPROJECT_VERSION_REGEX = /^\s*version\s*=\s*"([^"]+)"/m;
 
 function readKimiCliVersion(): string {
   const fallback = process.env.KIMI_CLI_VERSION ?? "dev";
-  const pyprojectPath = path.resolve(__dirname, "../pyproject.toml");
+  const pyprojectPath = path.resolve(import.meta.dirname, "../pyproject.toml");
 
   try {
     const pyproject = fs.readFileSync(pyprojectPath, "utf8");
@@ -55,8 +55,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
-      "@ai-elements": path.resolve(__dirname, "./src/components/ai-elements"),
+      "@": path.resolve(import.meta.dirname, "./src"),
+      "@ai-elements": path.resolve(import.meta.dirname, "./src/components/ai-elements"),
     },
   },
   server: {

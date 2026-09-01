@@ -1,5 +1,4 @@
 import { cn } from "@/lib/utils";
-import type { Element } from "hast";
 import type { ComponentProps, ReactNode } from "react";
 import { isValidElement } from "react";
 import type { StreamdownProps } from "streamdown";
@@ -140,7 +139,14 @@ const getCodeText = (children: ReactNode): string => {
   return "";
 };
 
-type StreamdownCodeProps = ComponentProps<"code"> & { node?: Element };
+type StreamdownCodeProps = ComponentProps<"code"> & {
+  node?: {
+    position?: {
+      start?: { line?: number };
+      end?: { line?: number };
+    };
+  };
+};
 
 const StreamdownCode = ({
   className,
