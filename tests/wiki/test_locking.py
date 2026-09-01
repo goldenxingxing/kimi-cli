@@ -11,6 +11,24 @@ import pytest
 
 from kimi_cli.wiki.locking import WikiBusyError, WikiLock
 
+#: How long a child gets to start, attempt the lock and exit. The number is a
+#: hang guard, not a timing assertion — what these tests measure is the lock's
+#: own timeout, which the child applies to itself. The parent must hold its
+#: lock for the whole life of the child, so the join has to outlast a slow
+#: start rather than the other way round: on a spawn platform the child
+#: re-imports the package tree, and a two-second budget lost that race on a
+#: loaded machine. It surfaced as `exitcode is None`, or, worse, as a writer
+#: that reported "acquired" because the parent had already let go.
+_CHILD_BUDGET = 60.0
+
+
+def _join_or_fail(process: multiprocessing.Process, name: str) -> None:
+    process.join(_CHILD_BUDGET)
+    if process.is_alive():
+        process.kill()
+        process.join()
+        raise AssertionError(f"{name} did not finish within {_CHILD_BUDGET}s")
+
 
 def _try_lock(path: str, mode: str, timeout: float, queue: multiprocessing.Queue[str]) -> None:
     lock = WikiLock(Path(path))
@@ -33,10 +51,10 @@ def test_exclusive_lock_times_out_while_another_process_holds_it(tmp_path: Path)
             args=(str(lock_path), "exclusive", 0.1, queue),
         )
         process.start()
-        process.join(2)
+        _join_or_fail(process, "process")
 
     assert process.exitcode == 0
-    assert queue.get(timeout=1) == "busy"
+    assert queue.get(timeout=_CHILD_BUDGET) == "busy"
 
 
 def test_shared_locks_coexist_but_block_a_writer(tmp_path: Path) -> None:
@@ -56,14 +74,14 @@ def test_shared_locks_coexist_but_block_a_writer(tmp_path: Path) -> None:
         )
         reader.start()
         writer.start()
-        reader.join(2)
-        writer.join(2)
+        _join_or_fail(reader, "reader")
+        _join_or_fail(writer, "writer")
 
     assert reader.exitcode == 0
     assert writer.exitcode == 0
     expected_reader = "busy" if os.name == "nt" else "acquired"
-    assert reader_queue.get(timeout=1) == expected_reader
-    assert writer_queue.get(timeout=1) == "busy"
+    assert reader_queue.get(timeout=_CHILD_BUDGET) == expected_reader
+    assert writer_queue.get(timeout=_CHILD_BUDGET) == "busy"
 
 
 def test_lock_is_released_after_context_exit(tmp_path: Path) -> None:
