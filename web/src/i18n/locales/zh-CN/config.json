@@ -1,11 +1,13 @@
 {
   "model": {
-    "changeAria": "更改全局模型",
+    "changeAria": "切换模型",
     "fallback": "模型",
-    "title": "选择全局模型",
+    "title": "选择模型",
     "placeholder": "搜索模型...",
     "empty": "未找到模型。",
     "heading": "模型",
+    "setGlobalDefault": "把 {{model}} 设为全局默认",
+    "isGlobalDefault": "已经是全局默认",
     "forceRestart": "强制重启忙碌会话",
     "reload": "重新加载全局配置"
   }

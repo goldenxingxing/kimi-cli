@@ -1,11 +1,13 @@
 {
   "model": {
-    "changeAria": "Change global model",
+    "changeAria": "Change model",
     "fallback": "Model",
-    "title": "Select global model",
+    "title": "Select model",
     "placeholder": "Search models...",
     "empty": "No models found.",
     "heading": "Models",
+    "setGlobalDefault": "Set {{model}} as the global default",
+    "isGlobalDefault": "Already the global default",
     "forceRestart": "Force restart busy sessions",
     "reload": "Reload global config"
   }

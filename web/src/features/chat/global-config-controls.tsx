@@ -1,7 +1,7 @@
 import { useCallback, useState, type ReactElement } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Check, Cpu, Paperclip, RefreshCcw } from "lucide-react";
+import { Check, Cpu, Globe, Paperclip, RefreshCcw } from "lucide-react";
 import { usePromptInputAttachments } from "@ai-elements";
 import { useGlobalConfig } from "@/hooks/useGlobalConfig";
 import { Button } from "@/components/ui/button";
@@ -78,10 +78,11 @@ export function GlobalConfigControls({
   draftModel,
   onDraftModelChange,
 }: GlobalConfigControlsProps): ReactElement {
-  const { config, isLoading, error, refresh } = useGlobalConfig();
+  const { config, isLoading, isUpdating, error, refresh, update } = useGlobalConfig();
   const { t } = useTranslation(["toasts", "config", "chat"]);
 
   const [isSelectorOpen, setIsSelectorOpen] = useState(false);
+  const [lastBusySkip, setLastBusySkip] = useState<string[] | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
   // Local fallback for the draft selection when the parent does not control it.
   const [localDraftModel, setLocalDraftModel] = useState<string | null>(null);
@@ -135,6 +136,66 @@ export function GlobalConfigControls({
       t,
     ],
   );
+
+  // Picking a model binds it to this session. Writing it to the global default
+  // is a second, deliberate action: it changes what every session without its
+  // own model follows, and restarts the idle ones to pick it up.
+  const handleSetGlobalDefault = useCallback(async () => {
+    setIsSelectorOpen(false);
+    if (!(config && effectiveModelName) || effectiveModelName === config.defaultModel) {
+      return;
+    }
+    try {
+      const resp = await update({ defaultModel: effectiveModelName });
+      const restarted = resp.restartedSessionIds ?? [];
+      const skippedBusy = resp.skippedBusySessionIds ?? [];
+
+      if (restarted.length > 0) {
+        toast.success(t("toasts:globalModel.successTitle"), {
+          description: t("toasts:globalModel.successDesc", { count: restarted.length }),
+        });
+      } else {
+        toast.success(t("toasts:globalModel.successTitle"));
+      }
+
+      if (skippedBusy.length > 0) {
+        setLastBusySkip(skippedBusy);
+        toast.message(t("toasts:globalModel.busyTitle"), {
+          description: t("toasts:globalModel.busyDesc", { count: skippedBusy.length }),
+        });
+      } else {
+        setLastBusySkip(null);
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : t("toasts:globalModel.fallbackError");
+      toast.error(t("toasts:globalModel.errorTitle"), { description: message });
+    }
+  }, [config, effectiveModelName, update, t]);
+
+  const handleForceRestartBusy = useCallback(async () => {
+    if (!lastBusySkip || lastBusySkip.length === 0) {
+      return;
+    }
+    try {
+      const resp = await update({ forceRestartBusySessions: true });
+      const restarted = resp.restartedSessionIds ?? [];
+      const skippedBusy = resp.skippedBusySessionIds ?? [];
+
+      setLastBusySkip(skippedBusy.length === 0 ? null : skippedBusy);
+
+      toast.success(t("toasts:restartBusy.successTitle"), {
+        description:
+          restarted.length > 0
+            ? t("toasts:restartBusy.successDesc", { count: restarted.length })
+            : t("toasts:restartBusy.successDescNone"),
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : t("toasts:restartBusy.fallbackError");
+      toast.error(t("toasts:restartBusy.errorTitle"), { description: message });
+    }
+  }, [lastBusySkip, update, t]);
 
   const attachments = usePromptInputAttachments();
 
@@ -212,6 +273,25 @@ export function GlobalConfigControls({
               })}
             </ModelSelectorGroup>
           </ModelSelectorList>
+          {config && effectiveModelName ? (
+            <div className="border-t px-2 py-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-full justify-start gap-2 text-xs"
+                type="button"
+                disabled={isUpdating || effectiveModelName === config.defaultModel}
+                onClick={handleSetGlobalDefault}
+              >
+                <Globe className="size-3.5 shrink-0" />
+                <span className="truncate">
+                  {effectiveModelName === config.defaultModel
+                    ? t("config:model.isGlobalDefault")
+                    : t("config:model.setGlobalDefault", { model: effectiveModelName })}
+                </span>
+              </Button>
+            </div>
+          ) : null}
         </ModelSelectorContent>
       </ModelSelector>
 
@@ -281,6 +361,24 @@ export function GlobalConfigControls({
           </span>
         </>
       )}
+
+      {lastBusySkip && lastBusySkip.length > 0 ? (
+        <>
+          <div className="mx-1.5 h-4 w-px bg-border/70" />
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-9"
+            aria-label={t("config:model.forceRestart")}
+            title={t("config:model.forceRestart")}
+            type="button"
+            onClick={handleForceRestartBusy}
+            disabled={isUpdating}
+          >
+            <RefreshCcw className="size-4" />
+          </Button>
+        </>
+      ) : null}
 
       {error ? (
         <>
