@@ -239,6 +239,8 @@ class SessionProcess:
         self._lock = asyncio.Lock()
         self._ws_lock = asyncio.Lock()
         self._sent_files: set[str] = set()
+        self._deferred_restart_reason: str | None = None
+        self._deferred_restart_task: asyncio.Task[None] | None = None
 
     @property
     def is_alive(self) -> bool:
@@ -405,8 +407,49 @@ class SessionProcess:
             if emit_status:
                 await self._emit_status("stopped", reason=reason or "stop")
 
+    def defer_restart(self, reason: str) -> None:
+        """Owe this session a restart, to be paid when it stops being busy.
+
+        A config change must not interrupt a prompt, so a busy session is
+        skipped -- but skipping alone left it on the old config until something
+        else happened to restart it, which for a session nobody restarts is
+        forever. The debt is recorded here and settled at the next busy -> idle
+        transition.
+        """
+        self._deferred_restart_reason = reason
+
+    def _settle_deferred_restart(self) -> None:
+        """Pay a deferred restart now that the session has gone idle.
+
+        Runs as its own task: the caller is inside the worker's read loop, and
+        `stop_worker` cancels and awaits that very task.
+        """
+        if self._deferred_restart_reason is None or self.is_busy or not self.is_alive:
+            return
+        if self._deferred_restart_task is not None and not self._deferred_restart_task.done():
+            return
+        task = asyncio.create_task(self._apply_deferred_restart())
+        self._deferred_restart_task = task
+        task.add_done_callback(lambda _: None)
+
+    async def _apply_deferred_restart(self) -> None:
+        reason = self._deferred_restart_reason
+        if reason is None:
+            return
+        # A new prompt may have arrived between the transition and this task.
+        # The debt stays on the books for the next time it goes idle.
+        if self.is_busy or not self.is_alive:
+            return
+        try:
+            await self.restart_worker(reason=reason)
+        except Exception:
+            logger.exception(f"Deferred restart failed for session {self.session_id}")
+
     async def restart_worker(self, *, reason: str | None = None) -> None:
         """Restart the worker subprocess without disconnecting WebSockets."""
+        # Any restart loads the current config, so it settles the debt whatever
+        # asked for it.
+        self._deferred_restart_reason = None
         started_at = time.perf_counter()
         await self._emit_status("restarting", reason=reason or "restart")
         await self.stop_worker(reason="restart", emit_status=False)
@@ -536,12 +579,14 @@ class SessionProcess:
                     self._in_flight_prompt_ids.remove(message.id)
                 if was_busy and not self.is_busy:
                     await self._emit_status("idle", reason="prompt_complete")
+                    self._settle_deferred_restart()
             case JSONRPCErrorResponse():
                 was_busy = self.is_busy
                 if message.id in self._in_flight_prompt_ids:
                     self._in_flight_prompt_ids.remove(message.id)
                 if was_busy and not self.is_busy:
                     await self._emit_status("idle", reason="prompt_error")
+                    self._settle_deferred_restart()
             case _:
                 return
 
@@ -992,6 +1037,9 @@ class KimiCLIRunner:
                 if joint is not None and joint.model:
                     continue
             if proc.is_busy and not force:
+                # Not "not applied": applied as soon as the prompt in flight
+                # finishes, without interrupting it.
+                proc.defer_restart(reason)
                 skipped_busy.append(session_id)
                 continue
             restarted.append(session_id)

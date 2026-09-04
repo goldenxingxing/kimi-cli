@@ -140,11 +140,22 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._enforce_origin = enforce_origin
         self._lan_only = lan_only
 
+    def _state(self, request: Request, name: str, fallback):  # noqa: ANN001, ANN202
+        """Prefer what the app currently holds over what was passed at startup.
+
+        A settings change is applied to `app.state` without restarting the
+        server, so a value captured in `__init__` would keep enforcing the
+        configuration the process happened to start with.
+        """
+        return getattr(request.app.state, name, fallback)
+
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
         path = request.url.path
+        session_token = self._state(request, "session_token", self._session_token)
+        lan_only = self._state(request, "lan_only", self._lan_only)
 
         # LAN-only check applies to all requests (including static files)
-        if self._lan_only:
+        if lan_only:
             client_ip = get_client_ip(request)
             if client_ip and not is_private_ip(client_ip):
                 return JSONResponse(
@@ -173,9 +184,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Origin not allowed"},
                 )
 
-        if self._session_token:
+        if session_token:
             provided = extract_token_from_request(request)
-            if not verify_token(provided, self._session_token):
+            if not verify_token(provided, session_token):
                 # Also accept cookie-based user sessions (multi-user auth).
                 # If the request carries a valid kimi_session cookie the
                 # per-route dependency (require_current_user / require_admin)

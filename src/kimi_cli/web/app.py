@@ -1,6 +1,7 @@
 """Kimi Code CLI Web UI application."""
 
 import asyncio
+import contextlib
 import os
 import secrets
 import sys
@@ -48,6 +49,7 @@ from kimi_cli.web.auth import (
     is_private_ip,
     normalize_allowed_origins,
 )
+from kimi_cli.web.config_reload import reload_signal_path, watch_for_reload
 from kimi_cli.web.runner.process import KimiCLIRunner
 from kimi_cli.web.session_policy import (
     COOKIE_NAME as SESSION_COOKIE_NAME,
@@ -300,9 +302,19 @@ def create_app(
         app.state.runner = runner
         runner.start()
 
+        # A settings change reaches this process through a signal file rather
+        # than a restart, so nothing has to be killed to deliver it.
+        reload_task: asyncio.Task[None] | None = None
+        if reload_signal_path() is not None:
+            reload_task = asyncio.create_task(watch_for_reload(app, runner))
+
         try:
             yield
         finally:
+            if reload_task is not None:
+                reload_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reload_task
             await runner.stop()
 
     application = FastAPI(
