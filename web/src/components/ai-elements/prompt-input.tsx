@@ -38,6 +38,7 @@ import { cn } from "@/lib/utils";
 import { transcodeHeicFiles } from "@/lib/heic";
 import { IMAGE_CONFIG, VIDEO_CONFIG, MEDIA_CONFIG } from "@/config/media";
 import { useVideoThumbnail } from "@/hooks/useVideoThumbnail";
+import { type DraftBook, switchDraft } from "./prompt-input-drafts";
 import type { ChatStatus, FileUIPart } from "ai";
 import {
   CornerDownLeftIcon,
@@ -139,6 +140,12 @@ const useOptionalProviderAttachments = () =>
 
 export type PromptInputProviderProps = PropsWithChildren<{
   initialInput?: string;
+  /**
+   * Scopes unsent input. The provider sits above the session switcher, so
+   * without a key every session shares one draft; pass the session id and each
+   * one keeps its own text and attachments.
+   */
+  draftKey?: string;
 }>;
 
 /**
@@ -147,6 +154,7 @@ export type PromptInputProviderProps = PropsWithChildren<{
  */
 export function PromptInputProvider({
   initialInput: initialTextInput = "",
+  draftKey = "",
   children,
 }: PromptInputProviderProps) {
   // ----- textInput state
@@ -157,6 +165,24 @@ export function PromptInputProvider({
   const [attachments, setAttachments] = useState<
     (FileUIPart & { id: string })[]
   >([]);
+
+  // ----- per-scope drafts
+  const drafts = useRef<DraftBook<FileUIPart & { id: string }>>(new Map());
+  const [activeDraftKey, setActiveDraftKey] = useState(draftKey);
+  if (draftKey !== activeDraftKey) {
+    // Adjusted during render, not in an effect, so the composer never paints
+    // the previous session's draft for a frame. Attachment object URLs are
+    // carried over rather than revoked -- the draft is being kept, not sent.
+    const restored = switchDraft(
+      drafts.current,
+      activeDraftKey,
+      { text: textInput, files: attachments },
+      draftKey,
+    );
+    setActiveDraftKey(draftKey);
+    setTextInput(restored.text);
+    setAttachments(restored.files);
+  }
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const openRef = useRef<() => void>(() => {});
 

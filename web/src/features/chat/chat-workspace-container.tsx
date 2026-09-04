@@ -188,7 +188,7 @@ export function ChatWorkspaceContainer({
   const enqueue = useQueueStore((s) => s.enqueue);
   const queueLength = useQueueStore((s) => s.queue.length);
   const dequeue = useQueueStore((s) => s.dequeue);
-  const clearQueue = useQueueStore((s) => s.clearQueue);
+  const setActiveQueueSession = useQueueStore((s) => s.setActiveSession);
 
   useEffect(() => {
     if (status === "streaming") {
@@ -196,12 +196,12 @@ export function ChatWorkspaceContainer({
     }
   }, [status, clearNewFiles]);
 
-  // Clear queue when session changes (must run before auto-send to prevent
-  // sending stale queued messages to the wrong session)
-  // biome-ignore lint/correctness/useExhaustiveDependencies: selectedSessionId triggers queue clear on session switch
+  // Point the queue at this session (must run before auto-send, so a queue is
+  // never sent to the session that happens to be open now). Each session keeps
+  // its own queue, so switching away leaves it waiting rather than dropping it.
   useEffect(() => {
-    clearQueue();
-  }, [selectedSessionId, clearQueue]);
+    setActiveQueueSession(selectedSessionId);
+  }, [selectedSessionId, setActiveQueueSession]);
 
   // Auto-send next queued message when status becomes ready
   const prevStatusRef = useRef(status);

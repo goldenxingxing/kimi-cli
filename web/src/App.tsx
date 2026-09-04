@@ -28,6 +28,7 @@ import { consumeAuthTokenFromUrl, setAuthToken } from "./lib/auth";
 import { useAuth } from "./hooks/useAuth";
 import { LoginPage } from "./features/auth/login-page";
 import { AdminPage } from "./features/admin/admin-page";
+import { useQueueStore } from "./features/chat/queue-store";
 import { BrandingProvider, useBranding } from "./hooks/useBranding";
 
 /**
@@ -357,6 +358,8 @@ function App() {
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
       await deleteSession(sessionId);
+      // Nothing can be sent to it any more, so its queue should not outlive it.
+      useQueueStore.getState().forgetSessionQueue(sessionId);
     },
     [deleteSession],
   );
@@ -618,7 +621,7 @@ function App() {
   );
 
   return (
-    <PromptInputProvider>
+    <PromptInputProvider draftKey={selectedSessionId}>
       <div className="box-border flex h-[100dvh] flex-col bg-background text-foreground px-[calc(0.75rem+var(--safe-left))] pr-[calc(0.75rem+var(--safe-right))] pt-[calc(0.75rem+var(--safe-top))] pb-1 lg:pb-[calc(0.75rem+var(--safe-bottom))] max-lg:h-[100svh] max-lg:overflow-hidden">
         <div className="mx-auto flex h-full min-h-0 w-full flex-1 flex-col gap-2 max-w-none">
           {isDesktop ? (
