@@ -80,6 +80,11 @@ class DiscardedCandidate:
 
     reason: DiscardReason
     summary: str
+    detail: str | None = None
+    """What exactly failed, when the reason alone is not actionable."""
+    retryable: bool = False
+    """Whether a corrected candidate could still pass, rather than the material
+    itself being unfit to store."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +93,8 @@ class GateDecision:
 
     accepted: bool
     reason: DiscardReason | None = None
+    detail: str | None = None
+    retryable: bool = False
 
 
 def contains_sensitive_text(text: str) -> bool:
@@ -106,15 +113,18 @@ def evaluate_candidate(
     try:
         WikiCandidate.model_validate(candidate.model_dump(mode="python"))
     except ValueError:
-        return GateDecision(False, "sensitive")
+        return GateDecision(False, "sensitive", "the candidate does not re-validate")
     if candidate.value != "high" or not context.cross_turn_utility:
         return GateDecision(False, "low_value")
     if not context.stable:
         return GateDecision(False, "unstable")
     if not _is_grounded(candidate, context):
         return GateDecision(False, "ungrounded")
-    if not _summary_is_safe(candidate) or not _pages_are_safe(candidate):
-        return GateDecision(False, "sensitive")
+    unsafe = _summary_is_safe_detail(candidate) or _pages_are_safe_detail(candidate)
+    if unsafe is not None:
+        # How the page is written, not whether the knowledge belongs here: the
+        # same conclusion can be phrased so it is storable.
+        return GateDecision(False, "sensitive", unsafe, retryable=True)
     if len(duplicate_candidate_paths(candidate, existing_pages)) == len(candidate.pages):
         return GateDecision(False, "duplicate")
     return GateDecision(True)
@@ -162,7 +172,12 @@ def _source_is_grounded(source: SourceRef, context: WikiContext) -> bool:
     return context.reliable_source
 
 
-def _pages_are_safe(candidate: WikiCandidate) -> bool:
+def _pages_are_safe_detail(candidate: WikiCandidate) -> str | None:
+    """Return what makes a page unsafe to store, or nothing when all are safe.
+
+    The detail names the rule that failed and never echoes page content, so it
+    is safe to hand straight back to the model as something it can correct.
+    """
     try:
         sources = [*candidate.sources]
         for change in candidate.pages:
@@ -170,21 +185,25 @@ def _pages_are_safe(candidate: WikiCandidate) -> bool:
             render_page(change.page)
             for text in (change.page.title, *change.page.tags):
                 if not _text_is_safe_as_page_content(change.page, text):
-                    return False
+                    return f"the title or tags of {change.page.logical_path} are not storable"
             sources.extend(change.page.sources)
         for source in sources:
             SourceRef.model_validate(source.model_dump(mode="python"))
             if source.url is not None and has_url_credentials(str(source.url)):
-                return False
-    except (UnsafeWikiPage, ValueError):
-        return False
-    return True
+                return "a source URL carries credentials"
+    except UnsafeWikiPage as exc:
+        return str(exc)
+    except ValueError:
+        return "a page or source does not satisfy the Wiki schema"
+    return None
 
 
-def _summary_is_safe(candidate: WikiCandidate) -> bool:
+def _summary_is_safe_detail(candidate: WikiCandidate) -> str | None:
     if contains_sensitive_text(candidate.summary):
-        return False
-    return _text_is_safe_as_page_content(candidate.pages[0].page, candidate.summary)
+        return "the summary looks like it carries a credential"
+    if not _text_is_safe_as_page_content(candidate.pages[0].page, candidate.summary):
+        return "the summary is not storable as page content"
+    return None
 
 
 def _text_is_safe_as_page_content(page: WikiPage, text: str) -> bool:

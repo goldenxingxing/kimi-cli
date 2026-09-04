@@ -11,6 +11,7 @@ import pytest
 from kimi_cli.wiki.models import CurrentSource, PageChange, SourceRef, WikiCandidate, WikiPage
 from kimi_cli.wiki.schema import content_hash
 from kimi_cli.wiki.transaction import WikiConflictError
+from kimi_cli.wiki.value_gate import DiscardedCandidate
 
 _SESSION_ID = UUID("223e4567-e89b-12d3-a456-426614174000")
 _NOW = datetime(2026, 7, 24, 12, tzinfo=UTC)
@@ -221,7 +222,13 @@ def test_mixed_duplicate_and_novel_candidate_commits_only_novel_page(manager) ->
     assert manager.read("concepts/cache-mode.md").page.revision == 1
 
 
-def test_ingest_requires_current_source_provenance_on_every_page(manager) -> None:
+def test_ingest_attaches_current_source_provenance_to_every_page(manager) -> None:
+    """The manager derives the ingest source, so no page can be missing it.
+
+    The candidate below names an unrelated source and never mentions the
+    content being ingested -- it has no way to, since it would have to hash the
+    exact bytes. The manager attaches that provenance itself.
+    """
     raw = "A stable source supplied in this user interaction."
     current = CurrentSource(kind="inline", content=raw)
     expected = SourceRef(
@@ -235,14 +242,16 @@ def test_ingest_requires_current_source_provenance_on_every_page(manager) -> Non
     instructions = candidate.model_copy(
         update={
             "pages": [PageChange(page=page, expected_revision=None)],
-            "sources": [expected, unrelated],
+            "sources": [unrelated],
         }
     )
 
-    discarded = manager.ingest(current, instructions, _context())
+    prepared = manager.ingest(current, instructions, _context())
 
-    assert discarded.reason == "ungrounded"
-    assert not (manager.layout.root / "concepts" / "cache-mode.md").exists()
+    assert not isinstance(prepared, DiscardedCandidate)
+    manager.commit(prepared)
+    stored = manager.read("concepts/cache-mode.md").page
+    assert expected in stored.sources
 
 
 def test_ingest_prepares_sanitized_conclusion_without_storing_raw_source(manager) -> None:

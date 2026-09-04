@@ -37,8 +37,13 @@ _BODY_HTTP_URL_RE = re.compile(r"https?://[^\s\])}>]+", flags=re.IGNORECASE)
 _MARKDOWN_URL_TARGET_RE = re.compile(r"!?\[[^\]]*\]\(\s*([^\s)]+)")
 _MACHINE_ABSOLUTE_PATH_PATTERNS = (
     # After safe Markdown links and API endpoints are removed, a leading slash is
-    # unambiguously a local POSIX path rather than a root-relative web route.
-    re.compile(r"(?<![\w:/.])/(?!/)[^\s\])}>.,;!?]+"),
+    # unambiguously a local POSIX path rather than a root-relative web route --
+    # but only once what follows actually looks like a path. A slash separating a
+    # unit or a ratio from a non-ASCII word ("O(1)/点") is punctuation, not a root,
+    # so a single segment must be ASCII; anything else has to prove itself with a
+    # second segment.
+    re.compile(r"(?<![\w:/.])/(?!/)[A-Za-z0-9_@%+~.-]+"),
+    re.compile(r"(?<![\w:/.])/(?!/)[^\s\])}>.,;!?/]+/[^\s\])}>.,;!?]+"),
     re.compile(r"(?<!\w)[A-Za-z]:[\\/]+[^\s\])}>]*"),
     re.compile(r"(?<![\\/:])\\\\+[^\s\])}>]+"),
     re.compile(r"(?<!\\)\\(?!\\)(?=[A-Za-z0-9_.-]+(?:[\\/]|$))"),

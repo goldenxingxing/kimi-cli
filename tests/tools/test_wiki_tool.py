@@ -90,9 +90,15 @@ def wiki_tool(manager):
     return Wiki(cast("Runtime", runtime))
 
 
-def test_tool_description_exposes_only_portable_provenance(wiki_tool) -> None:
-    assert str(_SESSION_ID) in wiki_tool.description
-    assert "SHA-256" in wiki_tool.description
+def test_tool_description_asks_for_no_provenance_and_leaks_none(wiki_tool) -> None:
+    """Provenance is the runtime's to supply, so the description asks for none.
+
+    It also carries no session identifier and no host path: what the model is
+    told about a write must stay portable.
+    """
+    assert "omit `sources`" in wiki_tool.description
+    assert str(_SESSION_ID) not in wiki_tool.description
+    assert "SHA-256" not in wiki_tool.description
     assert "/Users/" not in wiki_tool.description
 
 

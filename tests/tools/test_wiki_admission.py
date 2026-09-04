@@ -248,7 +248,7 @@ async def test_a_real_current_file_the_runtime_never_read_is_refused(admission_r
     )
 
     assert result.is_error
-    assert "not admissible" in result.message
+    assert "did not observe" in result.message
     assert _revision(admission_runtime) == before
     assert admission_runtime.wiki_coordinator.unconsumed_grant_count == 0
 
@@ -406,6 +406,157 @@ async def test_a_declined_approval_spends_the_grant_and_writes_nothing(
 # ---------------------------------------------------------------------------
 # Cause-specific grant rules
 # ---------------------------------------------------------------------------
+
+
+def _unsourced(body: str = "Signed tags only for every release.\n") -> WikiCandidate:
+    """The candidate a model can actually write: content, and no provenance."""
+    page = WikiPage(
+        logical_path="concepts/release-rule.md",
+        title="Release rule",
+        created=_NOW,
+        updated=_NOW,
+        tags=["release"],
+        revision=1,
+        body=body,
+    )
+    return WikiCandidate(
+        summary="Record the signed-tag release rule",
+        pages=[PageChange(page=page, expected_revision=None)],
+        value="high",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_with_no_sources_is_grounded_by_the_checkpoints_own_evidence(
+    admission_runtime,
+) -> None:
+    """The working path: the model writes the knowledge, the runtime the provenance."""
+    checkpoint, source, _ = await _file_checkpoint(admission_runtime)
+
+    result = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_unsourced(),
+        )
+    )
+
+    assert not result.is_error
+    stored = admission_runtime.wiki.read("concepts/release-rule.md").page
+    assert stored.sources == [source]
+    assert admission_runtime.wiki_coordinator.unconsumed_grant_count == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unsourced_candidate_resolves_an_explicit_durable_checkpoint(
+    admission_runtime,
+) -> None:
+    """A checkpoint with no evidence still has the user's own turn behind it.
+
+    Its source hash is of the exact turn text, which the model cannot compute,
+    so the runtime attaches it -- otherwise "remember this" would be a request
+    that can only ever be discarded.
+    """
+    from kimi_cli.tools.wiki import reset_wiki_turn_context
+
+    checkpoint, text, token = await _durable_checkpoint(admission_runtime)
+    try:
+        result = await Wiki(admission_runtime)(
+            Params(
+                operation="remember",
+                checkpoint_id=checkpoint.checkpoint_id,
+                candidate=_unsourced(),
+            )
+        )
+
+        assert not result.is_error
+        stored = admission_runtime.wiki.read("concepts/release-rule.md").page
+        assert [source.kind for source in stored.sources] == ["conversation"]
+        assert stored.sources[0].content_hash == content_hash(text.encode("utf-8"))
+    finally:
+        reset_wiki_turn_context(token)
+
+
+@pytest.mark.asyncio
+async def test_an_unobserved_source_is_refused_with_a_recoverable_instruction(
+    admission_runtime,
+) -> None:
+    """A refusal the model cannot act on is how a checkpoint gets burned."""
+    checkpoint, _, _ = await _file_checkpoint(admission_runtime)
+    unread = Path(str(admission_runtime.session.work_dir)) / "never-read.md"
+    unread.write_text("a file the agent never opened", encoding="utf-8")
+    unread_source = admission_runtime.wiki.registry.relative_source(
+        admission_runtime.workspace_id, unread
+    )
+
+    refused = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_candidate(unread_source),
+        )
+    )
+
+    assert refused.is_error
+    assert "Omit `sources`" in refused.message
+    # The checkpoint survives the refusal, so following that instruction works.
+    accepted = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_unsourced(),
+        )
+    )
+
+    assert not accepted.is_error
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_cannot_be_stored_as_written_can_be_rewritten(
+    admission_runtime,
+) -> None:
+    """A phrasing the store rejects must not cost the whole checkpoint."""
+    checkpoint, _, _ = await _file_checkpoint(admission_runtime)
+
+    refused = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_unsourced(body="The rule lives in /Users/someone/decision.md.\n"),
+        )
+    )
+
+    assert refused.is_error
+    assert "absolute path" in refused.message
+    assert admission_runtime.wiki_coordinator.unconsumed_grant_count == 0
+
+    rewritten = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_unsourced(body="The rule lives in the workspace decision note.\n"),
+        )
+    )
+
+    assert not rewritten.is_error
+
+
+@pytest.mark.asyncio
+async def test_a_body_measured_per_non_ascii_unit_is_not_read_as_a_path(
+    admission_runtime,
+) -> None:
+    """ "O(1)/点" is a unit, not a root directory."""
+    checkpoint, _, _ = await _file_checkpoint(admission_runtime)
+
+    result = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_unsourced(body="流式 O(1)/点，状态 <200 B。\n"),
+        )
+    )
+
+    assert not result.is_error
 
 
 @pytest.mark.asyncio

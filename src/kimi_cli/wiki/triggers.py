@@ -154,6 +154,28 @@ class WikiAdmissionGrant:
     reliable_source: bool
 
 
+GrantRefusalReason = Literal[
+    "not_open",
+    "already_granted",
+    "no_source",
+    "unverified_source",
+    "unobserved_source",
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GrantReservation:
+    """The outcome of one reservation attempt, refusal reason included.
+
+    ``reserve_grant`` answers only whether write authority exists. Callers that
+    have to tell the model what to do next need to know *why* a reservation was
+    refused, which is what this carries.
+    """
+
+    grant: WikiAdmissionGrant | None = None
+    reason: GrantRefusalReason | None = None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CheckpointBatch:
     checkpoints: tuple[WikiCheckpoint, ...]
@@ -656,6 +678,20 @@ class WikiTurnCoordinator:
                     continue
                 for source in evidence.source_refs:
                     seen.setdefault(_source_key(source), _source_snapshot(source))
+            if not seen and checkpoint.cause == "explicit_user_durable":
+                # The user asked for this in so many words, so their own turn is
+                # the grounding -- the same source `reserve_grant` admits for
+                # this cause. Handing it back is what makes such a checkpoint
+                # resolvable at all: its hash is of the exact turn text, which
+                # the model has no way to compute.
+                turn = self._turns.get(checkpoint.root_turn_id)
+                if turn is not None:
+                    source = SourceRef(
+                        kind="conversation",
+                        session_id=self.provenance_session_id,
+                        content_hash=turn.raw_hash,
+                    )
+                    seen[_source_key(source)] = source
             return tuple(seen.values())
 
     async def reserve_grant(
@@ -677,19 +713,44 @@ class WikiTurnCoordinator:
         open on this turn, if any claimed source is unverified or unbacked, or
         if a grant is already outstanding for it.
         """
+        reservation = await self.reserve_grant_detailed(
+            checkpoint_id,
+            candidate_hash=candidate_hash,
+            source_keys=source_keys,
+            verified_source_keys=verified_source_keys,
+        )
+        return reservation.grant
+
+    async def reserve_grant_detailed(
+        self,
+        checkpoint_id: str,
+        *,
+        candidate_hash: str,
+        source_keys: frozenset[str],
+        verified_source_keys: frozenset[str],
+    ) -> GrantReservation:
+        """Reserve a grant, naming the reason when there is none to give.
+
+        The decision is identical to ``reserve_grant``; only the refusal is
+        described, so a caller can tell the model whether a corrected retry is
+        worth attempting or the checkpoint should simply be discarded.
+        """
         async with self._locked():
-            if self._closed or not _is_sha256(candidate_hash) or not source_keys:
-                return None
+            if self._closed or not _is_sha256(candidate_hash):
+                return GrantReservation(reason="not_open")
+            if not source_keys:
+                return GrantReservation(reason="no_source")
             checkpoint = self._checkpoints.get(checkpoint_id)
             if (
                 checkpoint is None
                 or checkpoint.state != "pending"
                 or checkpoint.root_turn_id != self._active_root_turn_id
-                or checkpoint_id in self._grants
             ):
-                return None
+                return GrantReservation(reason="not_open")
+            if checkpoint_id in self._grants:
+                return GrantReservation(reason="already_granted")
             if not source_keys <= verified_source_keys:
-                return None
+                return GrantReservation(reason="unverified_source")
 
             evidence = tuple(
                 record
@@ -704,7 +765,7 @@ class WikiTurnCoordinator:
                 # The user's own statement is the grounding, so a conversation
                 # source may stand for it — but only this turn's exact text.
                 if turn is None:
-                    return None
+                    return GrantReservation(reason="not_open")
                 admitted_keys |= self._conversation_source_keys(turn)
                 high_value = True
                 stable = True
@@ -715,7 +776,7 @@ class WikiTurnCoordinator:
                 reliable_source = bool(evidence) and all(record.reliable for record in evidence)
             grounded = bool(source_keys) and source_keys <= admitted_keys
             if not grounded:
-                return None
+                return GrantReservation(reason="unobserved_source")
 
             grant = WikiAdmissionGrant(
                 checkpoint_id=checkpoint_id,
@@ -732,7 +793,7 @@ class WikiTurnCoordinator:
             self._grants[checkpoint_id] = grant
             self._checkpoints[checkpoint_id] = replace(checkpoint, state="persisting")
             self._safe_track("wiki_trigger_grant_reserved", cause=checkpoint.cause)
-            return grant
+            return GrantReservation(grant=grant)
 
     async def finish_grant(
         self,
@@ -1187,8 +1248,9 @@ def _render_batch(
         )
     lines.append(
         'action: resolve each checkpoint exactly once — call Wiki(operation="remember" or '
-        '"ingest", checkpoint_id=...) to persist it, or Wiki(operation="discard", '
-        "checkpoint_id=..., discard_reason=...) to drop it."
+        '"ingest", checkpoint_id=..., candidate=... with no sources of your own) to '
+        'persist it, or Wiki(operation="discard", checkpoint_id=..., discard_reason=...) '
+        "to drop it."
     )
     lines.append(OPENKIMO_WIKI_CHECKPOINT_END)
     rendered = "\n".join(lines)

@@ -168,7 +168,12 @@ class WikiManager:
         decision = evaluate_candidate(candidate, context, snapshot.pages)
         if not decision.accepted:
             assert decision.reason is not None
-            return DiscardedCandidate(reason=decision.reason, summary=candidate.summary)
+            return DiscardedCandidate(
+                reason=decision.reason,
+                summary=candidate.summary,
+                detail=decision.detail,
+                retryable=decision.retryable,
+            )
         if not self._workspace_sources_resolve(candidate):
             return DiscardedCandidate(reason="ungrounded", summary=candidate.summary)
 
@@ -271,16 +276,10 @@ class WikiManager:
         expected_source = self._source_ref_for_ingest(source, context)
         if isinstance(expected_source, DiscardedCandidate):
             return expected_source
-        expected_key = expected_source.model_dump_json(exclude_none=True)
-        supplied = {item.model_dump_json(exclude_none=True) for item in instructions.sources}
-        page_source_sets = (
-            {item.model_dump_json(exclude_none=True) for item in change.page.sources}
-            for change in instructions.pages
-        )
-        if expected_key not in supplied or any(
-            expected_key not in sources for sources in page_source_sets
-        ):
-            return DiscardedCandidate(reason="ungrounded", summary=instructions.summary)
+        # The ingest source is provenance the manager derived, so it attaches it
+        # rather than demanding the candidate repeat a hash back. Asking for the
+        # hash only ever produced a mismatch the model could not correct.
+        instructions = _with_source(instructions, expected_source)
         ingest_context = context.model_copy(update={"operation": "ingest"})
         return self.prepare(instructions, ingest_context)
 
@@ -464,6 +463,32 @@ def _assert_page_bases_unchanged(
     for base in page_bases:
         if current.get(base.logical_path) != base.content_hash:
             raise WikiConflictError(f"page changed after approval: {base.logical_path}")
+
+
+def _with_source(candidate: WikiCandidate, source: SourceRef) -> WikiCandidate:
+    """Attach one runtime-derived source to a candidate and each of its pages."""
+    key = source.model_dump_json(exclude_none=True)
+
+    def _extend(existing: list[SourceRef]) -> list[SourceRef]:
+        if any(item.model_dump_json(exclude_none=True) == key for item in existing):
+            return list(existing)
+        return [*existing, source]
+
+    return candidate.model_copy(
+        update={
+            "sources": _extend(candidate.sources),
+            "pages": [
+                change.model_copy(
+                    update={
+                        "page": change.page.model_copy(
+                            update={"sources": _extend(change.page.sources)}
+                        )
+                    }
+                )
+                for change in candidate.pages
+            ],
+        }
+    )
 
 
 def _materialize_changes(

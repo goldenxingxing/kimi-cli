@@ -22,6 +22,8 @@ from kimi_cli.wiki.telemetry import track_wiki_event
 from kimi_cli.wiki.transaction import WikiConflictError, WikiRecoveryRequired
 from kimi_cli.wiki.triggers import (
     CheckpointDiscardReason,
+    GrantRefusalReason,
+    GrantReservation,
     WikiAdmissionGrant,
     WikiCheckpoint,
 )
@@ -199,12 +201,17 @@ class Wiki(CallableTool2[Params]):
         trusted = getattr(runtime, "wiki_tool_context", None)
         provenance_help = ""
         if isinstance(trusted, WikiToolContext):
+            # Provenance is the runtime's job. Asking the model for it means
+            # asking it to reproduce a content hash byte for byte, which it
+            # cannot do -- and a source it writes itself grants nothing anyway.
             provenance_help = (
-                " For conversation SourceRef provenance, use session_id "
-                f"{trusted.provenance_session_id} and the SHA-256 hash of the exact "
-                "trusted current-turn text."
+                " When resolving a checkpoint, omit `sources` from the candidate and "
+                "from each page: the runtime attaches the provenance it observed for "
+                "that checkpoint."
             )
             if runtime.workspace_id is not None:
+                # An ingest source still has to name its workspace, and unlike a
+                # content hash this is something the model can copy verbatim.
                 provenance_help += f" The current portable workspace_id is {runtime.workspace_id}."
         super().__init__(description=self.description + provenance_help)
         self._runtime = runtime
@@ -458,17 +465,17 @@ class Wiki(CallableTool2[Params]):
         checkpoint: WikiCheckpoint,
         params: Params,
         candidate_hash: str,
-    ) -> WikiAdmissionGrant | None:
+    ) -> GrantReservation:
         coordinator = getattr(self._runtime, "wiki_coordinator", None)
         assert params.candidate is not None
         if coordinator is None:
-            return None
+            return GrantReservation(reason="not_open")
         if (
             params.source is not None
             and params.source.kind == "workspace-file"
             and params.source.workspace_id != self._runtime.workspace_id
         ):
-            return None
+            return GrantReservation(reason="unobserved_source")
         trusted = self.current_context(self._runtime)
         conversation_hashes: frozenset[str] = (
             trusted.conversation_hashes if trusted is not None else frozenset[str]()
@@ -485,7 +492,7 @@ class Wiki(CallableTool2[Params]):
             conversation_hashes,
             session_id,
         )
-        return await coordinator.reserve_grant(
+        return await coordinator.reserve_grant_detailed(
             checkpoint.checkpoint_id,
             candidate_hash=candidate_hash,
             source_keys=_candidate_source_keys(params.candidate),
@@ -526,16 +533,13 @@ class Wiki(CallableTool2[Params]):
                 }
             )
             assert params.candidate is not None
-            grant = await self._reserve_grant(
+            reservation = await self._reserve_grant(
                 manager, resolvable, params, _candidate_hash(params.candidate)
             )
+            grant = reservation.grant
             if grant is None:
                 return ToolError(
-                    message=(
-                        "This candidate is not admissible: its sources do not match what the "
-                        "runtime actually observed for that checkpoint. Re-read the exact "
-                        "source and try again, or discard the checkpoint."
-                    ),
+                    message=_refusal_message(reservation.reason),
                     brief="Wiki candidate not admitted",
                 )
             context = WikiContext.from_grant(grant, operation)
@@ -601,17 +605,37 @@ class Wiki(CallableTool2[Params]):
                 context,
             )
         if isinstance(prepared, DiscardedCandidate):
-            # The gate already decided; the opportunity is spent either way.
-            await self._finish_grant(grant, "discarded")
             track_wiki_event(
                 "wiki_candidate_discarded",
                 reason=prepared.reason,
                 checkpoint_id=_checkpoint_id_of(resolvable),
                 page_count=len(params.candidate.pages),
             )
+            detail = f" ({prepared.detail})" if prepared.detail else ""
+            if prepared.retryable:
+                # Unlike the value judgements, this one is about how the page is
+                # written, not whether it is worth keeping. Spending the
+                # checkpoint on a fixable phrasing would lose real knowledge, so
+                # the same candidate may come back corrected.
+                await self._release_or_finish(grant)
+                return ToolError(
+                    message=(
+                        f"This page cannot be stored as written{detail}. Rewrite the "
+                        "affected text — absolute paths, credentials, and raw URLs do not "
+                        "belong in a Wiki page — and send it again, or discard the "
+                        "checkpoint."
+                    ),
+                    brief="Wiki candidate discarded",
+                )
+            # Every other gate reason is a judgement on the knowledge itself, so
+            # the opportunity is spent either way.
+            await self._finish_grant(grant, "discarded")
             await self._close_checkpoint(resolvable, "not_useful")
             return ToolError(
-                message=f"Wiki candidate discarded: {prepared.reason}.",
+                message=(
+                    f"Wiki candidate discarded: {prepared.reason}{detail}. The checkpoint "
+                    "is now resolved; do not retry it."
+                ),
                 brief="Wiki candidate discarded",
             )
         approval = self._runtime.approval
@@ -714,6 +738,43 @@ class Wiki(CallableTool2[Params]):
             reliable_source=trusted.reliable_source,
             operation=operation,
         )
+
+
+_REFUSAL_MESSAGES: dict[GrantRefusalReason, str] = {
+    "not_open": (
+        "That checkpoint is no longer open for resolution, so it cannot be persisted. "
+        "Do not retry this write."
+    ),
+    "already_granted": (
+        "A write for that checkpoint is already in flight. Do not retry this write."
+    ),
+    "no_source": (
+        "That checkpoint has no source the runtime observed, so nothing can be grounded "
+        'in it. Discard it with Wiki(operation="discard").'
+    ),
+    "unverified_source": (
+        "A source behind that checkpoint no longer matches the bytes the runtime "
+        "captured — the file changed after it was read. Read it again to open a fresh "
+        "checkpoint, or discard this one."
+    ),
+    "unobserved_source": (
+        "This candidate names sources the runtime did not observe for that checkpoint. "
+        "Omit `sources` from the candidate and from each page and send it again: the "
+        "runtime attaches the provenance it observed. Writing sources yourself cannot "
+        "work, because they must match captured bytes exactly."
+    ),
+}
+_DEFAULT_REFUSAL_MESSAGE = (
+    "This candidate is not admissible for that checkpoint. Omit `sources` from the "
+    "candidate and from each page and send it again, or discard the checkpoint."
+)
+
+
+def _refusal_message(reason: GrantRefusalReason | None) -> str:
+    """Say what to do next, since a bare refusal only invites the same retry."""
+    if reason is None:
+        return _DEFAULT_REFUSAL_MESSAGE
+    return _REFUSAL_MESSAGES.get(reason, _DEFAULT_REFUSAL_MESSAGE)
 
 
 def _checkpoint_id_of(checkpoint: object) -> str | None:

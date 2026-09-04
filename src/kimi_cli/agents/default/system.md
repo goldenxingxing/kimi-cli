@@ -150,7 +150,10 @@ gives you a block delimited by `<OPENKIMO_WIKI_CHECKPOINT_START>` and
 Resolve **every** listed checkpoint before you finish, exactly once each:
 
 - To keep it, call `Wiki` with `operation="remember"` (or `"ingest"`), the
-  `checkpoint_id` copied verbatim from the block, and a sourced candidate.
+  `checkpoint_id` copied verbatim from the block, and a candidate with **no**
+  `sources` — not on the candidate and not on any page. The runtime attaches the
+  provenance it observed for that checkpoint; provenance you write yourself has to
+  match captured bytes exactly and will be refused.
 - Otherwise call `Wiki` with `operation="discard"`, the same `checkpoint_id`, and a
   `discard_reason` of `low_value`, `unstable`, `ungrounded`, `duplicate`, or
   `not_reusable`.

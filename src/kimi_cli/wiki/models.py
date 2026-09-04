@@ -194,7 +194,14 @@ class WikiPage(BaseModel):
     created: datetime
     updated: datetime
     tags: list[str] = Field(default_factory=list)
-    sources: list[SourceRef]
+    sources: list[SourceRef] = Field(
+        default_factory=list[SourceRef],
+        description=(
+            "Leave this out when resolving a checkpoint: the runtime attaches the "
+            "provenance it actually observed. A source you write yourself has to "
+            "match those bytes exactly, which is not something you can reconstruct."
+        ),
+    )
     revision: PositiveInt
     body: str = Field(min_length=1)
 
@@ -248,7 +255,14 @@ class WikiCandidate(BaseModel):
 
     summary: str = Field(min_length=1, max_length=500)
     pages: list[PageChange] = Field(min_length=1)
-    sources: list[SourceRef]
+    sources: list[SourceRef] = Field(
+        default_factory=list[SourceRef],
+        description=(
+            "Leave this out when resolving a checkpoint: the runtime attaches the "
+            "provenance it actually observed. A source you write yourself has to "
+            "match those bytes exactly, which is not something you can reconstruct."
+        ),
+    )
     value: Literal["high", "medium", "low"]
 
     @model_validator(mode="after")
