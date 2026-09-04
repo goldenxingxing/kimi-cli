@@ -141,6 +141,7 @@ import { handleToolResult, useToolEventsStore, type TodoItem } from "@/features/
 import { isSystemReminderOnly } from "./system-reminder";
 import { notifySessionExpired } from "@/lib/session-expiry";
 import { decideOnClose, shouldReportErrorEvent } from "./connection-policy";
+import { startsIncomingConversation } from "./conversation-reset";
 import {
   LEGACY_UPLOADS_REGEX,
   MEDIA_TAG_PATH_REGEX,
@@ -390,6 +391,8 @@ export function useSessionStream(
   const reconnectRef = useRef<() => void>(() => undefined);
   const resetStateRef = useRef<(preserveSlashCommands?: boolean) => void>(() => undefined);
   const historyCompleteTimeoutRef = useRef<number | null>(null);
+  /** A connect owes the list a reset, paid when the replacement arrives. */
+  const pendingConversationResetRef = useRef(false);
   const isReplayingRef = useRef(true); // Track if we're still replaying history
   const pendingMessageRef = useRef<string | null>(null); // Message to send after connection
   const awaitingIdleRef = useRef(false); // Track pending idle after cancel
@@ -2347,6 +2350,16 @@ export function useSessionStream(
       try {
         const message: WireMessage = JSON.parse(data);
 
+        if (
+          pendingConversationResetRef.current &&
+          startsIncomingConversation(message, initializeIdRef.current)
+        ) {
+          // Same tick as the append below, so React renders the replacement
+          // without ever painting the empty list in between.
+          pendingConversationResetRef.current = false;
+          setMessages([]);
+        }
+
         // Check for JSON-RPC error response
         if (message.error) {
           // Initialize failure during busy session is non-fatal - retry after delay
@@ -2831,7 +2844,12 @@ export function useSessionStream(
     if (retainedQuestions) {
       pendingQuestionRequestsRef.current = retainedQuestions;
     }
-    setMessages([]);
+    // Deferred, not done here: clearing now would drop the conversation the
+    // reader is looking at before its replacement exists, and an empty list
+    // swaps the whole message area out for a spinner until history replays.
+    // A session switch has already cleared it; a reconnect keeps it until the
+    // incoming conversation starts arriving. See `conversation-reset`.
+    pendingConversationResetRef.current = true;
     setStatus("submitted");
     setAwaitingFirstResponse(Boolean(pendingMessageRef.current));
 
@@ -3011,7 +3029,6 @@ export function useSessionStream(
   }, [
     sessionId,
     resetState,
-    setMessages,
     getWebSocketUrl,
     handleMessage,
     onError,
