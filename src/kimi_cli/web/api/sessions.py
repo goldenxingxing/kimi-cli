@@ -9,6 +9,7 @@ import mimetypes
 import os
 import shutil
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, stat
 from fastapi.responses import FileResponse, Response
 from kaos.path import KaosPath
 from pydantic import BaseModel, Field
+from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from kimi_cli import logger
@@ -111,17 +113,69 @@ def get_runner_ws(ws: WebSocket) -> KimiCLIRunner:
     return ws.app.state.runner
 
 
+def ensure_session_access(session: Session, connection: HTTPConnection) -> None:
+    """Refuse a session that belongs to somebody else.
+
+    Listing has always filtered by owner. The per-session routes checked
+    nothing at all, so in a multi-user deployment any logged-in user who knew
+    (or guessed, or once saw) another user's session id could read that user's
+    work-dir files, fork the session, retitle it, or delete it.
+
+    A session with no owner stays reachable by a caller who is not logged in —
+    single-user installs, static-token deployments, and everything created
+    before multi-user existed, where the middleware is the only gate there is.
+    A *logged-in* caller does not get that exception: list_sessions already
+    hides ownerless sessions from them, so allowing one to be opened by id only
+    widened access without giving anybody back their own history.
+
+    404 rather than 403, so the answer does not confirm the id.
+    """
+    from kimi_cli.web.user_auth import user_from_connection
+
+    try:
+        user = user_from_connection(connection)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Session owner lookup failed")
+        user = None
+
+    if may_access_session(session, user):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Session not found",
+    )
+
+
+def may_access_session(session: Session, user: dict[str, Any] | None) -> bool:
+    """The access rule itself, so HTTP and the socket cannot drift apart.
+
+    The socket carried its own copy of this and skipped the check entirely for
+    an ownerless session — which is exactly the case the HTTP side denies a
+    logged-in caller. A session hidden from someone's list was still
+    streamable to them by id.
+    """
+    if user is not None and user.get("role") == "admin":
+        return True
+    owner_id = getattr(session, "owner_id", None)
+    if owner_id is None:
+        return user is None
+    return user is not None and user.get("id") == owner_id
+
+
 def get_editable_session(
     session_id: UUID,
     runner: KimiCLIRunner,
+    connection: HTTPConnection,
 ) -> JointSession:
-    """Get a session and verify it's not busy."""
+    """Get a session and verify the caller may edit it and it's not busy."""
     session = load_session_by_id(session_id)
     if session is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found",
         )
+    ensure_session_access(session, connection)
     # Check if session is busy
     session_process = runner.get_session(session_id)
     if session_process and session_process.is_busy:
@@ -288,21 +342,32 @@ async def list_sessions(
 
     current_user = _get_current_user(request)
 
-    sessions = load_sessions_page(limit=limit, offset=offset, query=q, archived=archived)
-
-    # Filter by owner when a logged-in non-admin user requests sessions,
-    # or when an admin does not pass ?all=true.
-    # When no user is authenticated at all (anonymous / static-token-only mode)
-    # do NOT expose sessions owned by other users; only return sessions that
-    # have no owner_id set (legacy / pre-multi-user sessions).
+    # Who this caller may see, decided before the page is cut rather than
+    # after. Filtering the returned page paged across everybody's sessions: a
+    # user asking for the first 100 got however many of their own happened to
+    # fall inside the global first 100, and offset=100 skipped a hundred other
+    # people's sessions rather than a hundred of theirs — so their history
+    # looked truncated and pages came back empty with more still to come.
+    owner_filter: Callable[[str | None], bool] | None = None
     if current_user is not None:
         is_admin = current_user.get("role") == "admin"
         if not is_admin or not all:
             owner_id = current_user["id"]
-            sessions = [s for s in sessions if getattr(s, "owner_id", None) == owner_id]
+
+            def owner_filter(owner: str | None, _mine: str = owner_id) -> bool:
+                return owner == _mine
     else:
         # Unauthenticated (static-token-only) callers may only see ownerless sessions.
-        sessions = [s for s in sessions if getattr(s, "owner_id", None) is None]
+        def owner_filter(owner: str | None) -> bool:
+            return owner is None
+
+    sessions = load_sessions_page(
+        limit=limit,
+        offset=offset,
+        query=q,
+        archived=archived,
+        owner_filter=owner_filter,
+    )
 
     for session in sessions:
         session_process = runner.get_session(session.session_id)
@@ -314,11 +379,13 @@ async def list_sessions(
 @router.get("/{session_id}", summary="Get session")
 async def get_session(
     session_id: UUID,
+    http_request: Request,
     runner: KimiCLIRunner = Depends(get_runner),
 ) -> Session | None:
     """Get a session by ID."""
     session = load_session_by_id(session_id)
     if session is not None:
+        ensure_session_access(session, http_request)
         session_process = runner.get_session(session_id)
         session.is_running = session_process is not None and session_process.is_running
         session.status = session_process.status if session_process else None
@@ -474,10 +541,11 @@ class UploadSessionFileResponse(BaseModel):
 async def upload_session_file(
     session_id: UUID,
     file: UploadFile,
+    http_request: Request,
     runner: KimiCLIRunner = Depends(get_runner),
 ) -> UploadSessionFileResponse:
     """Upload a file to a session."""
-    session = get_editable_session(session_id, runner)
+    session = get_editable_session(session_id, runner, http_request)
     session_dir = session.kimi_cli_session.dir
     upload_dir = session_dir / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -514,6 +582,7 @@ async def upload_session_file(
 async def get_session_upload_file(
     session_id: UUID,
     path: str,
+    http_request: Request,
 ) -> Response:
     """Get a file from a session's uploads directory."""
     session = load_session_by_id(session_id)
@@ -522,6 +591,7 @@ async def get_session_upload_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found",
         )
+    ensure_session_access(session, http_request)
 
     uploads_dir = (session.kimi_cli_session.dir / "uploads").resolve()
     if not uploads_dir.exists():
@@ -747,6 +817,7 @@ async def get_session_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found",
         )
+    ensure_session_access(session, request)
 
     runner = request.app.state.runner
     work_dir = Path(str(session.kimi_cli_session.work_dir)).resolve()
@@ -852,12 +923,17 @@ def _update_last_session_id(session: JointSession) -> None:
 
 
 @router.delete("/{session_id}", summary="Delete a session")
-async def delete_session(session_id: UUID, runner: KimiCLIRunner = Depends(get_runner)) -> None:
+async def delete_session(
+    session_id: UUID,
+    http_request: Request,
+    runner: KimiCLIRunner = Depends(get_runner),
+) -> None:
     """Delete a session."""
-    session = get_editable_session(session_id, runner)
+    session = get_editable_session(session_id, runner, http_request)
     session_process = runner.get_session(session_id)
     if session_process is not None:
         await session_process.stop()
+    await runner.forget_session(session_id)
     wd_meta = session.kimi_cli_session.work_dir_meta
     if wd_meta.last_session_id == str(session_id):
         metadata = load_metadata()
@@ -876,6 +952,7 @@ async def delete_session(session_id: UUID, runner: KimiCLIRunner = Depends(get_r
 async def update_session(
     session_id: UUID,
     request: UpdateSessionRequest,
+    http_request: Request,
     runner: KimiCLIRunner = Depends(get_runner),
 ) -> Session:
     """Update a session (e.g., rename title, archive/unarchive, or switch model)."""
@@ -892,6 +969,7 @@ async def update_session(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Session not found",
             )
+        ensure_session_access(session, http_request)
         if session_process and session_process.is_busy:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -907,7 +985,7 @@ async def update_session(
                 detail=f"Model '{request.model}' not found in config",
             )
     else:
-        session = get_editable_session(session_id, runner)
+        session = get_editable_session(session_id, runner, http_request)
     session_dir = session.kimi_cli_session.dir
     state = load_session_state(session_dir)
 
@@ -1019,6 +1097,7 @@ def extract_first_turn_from_wire(session_dir: Path) -> tuple[str, str] | None:
 async def fork_session_endpoint(
     session_id: UUID,
     request: ForkSessionRequest,
+    http_request: Request,
     runner: KimiCLIRunner = Depends(get_runner),
 ) -> Session:
     """Fork a session, creating a new session with history up to the specified turn.
@@ -1027,7 +1106,7 @@ async def fork_session_endpoint(
     """
     from kimi_cli.session_fork import fork_session as do_fork
 
-    source_session = get_editable_session(session_id, runner)
+    source_session = get_editable_session(session_id, runner, http_request)
     source_dir = source_session.kimi_cli_session.dir
     work_dir = source_session.kimi_cli_session.work_dir
 
@@ -1083,6 +1162,7 @@ async def fork_session_endpoint(
 @router.post("/{session_id}/generate-title", summary="Generate session title using AI")
 async def generate_session_title(
     session_id: UUID,
+    http_request: Request,
     request: GenerateTitleRequest | None = None,
     runner: KimiCLIRunner = Depends(get_runner),
 ) -> GenerateTitleResponse:
@@ -1091,7 +1171,7 @@ async def generate_session_title(
     If request body is empty or parameters are missing, the backend will
     automatically read the first turn from wire.jsonl.
     """
-    session = get_editable_session(session_id, runner)
+    session = get_editable_session(session_id, runner, http_request)
     session_dir = session.kimi_cli_session.dir
 
     from kimi_cli.session_state import load_session_state, save_session_state
@@ -1301,6 +1381,15 @@ async def session_stream(
         await websocket.close(code=4004, reason="Session not found")
         return
 
+    # And that it is this user's. The handshake above only established that
+    # *someone* is logged in; without this, another user's session id was a
+    # live stream of their conversation. Same rule as the HTTP routes, from the
+    # same function — a socket cannot raise an HTTPException, but it must not
+    # answer a different question either.
+    if not may_access_session(session, _websocket_user(websocket)):
+        await websocket.close(code=4004, reason="Session not found")
+        return
+
     # Check if session has history
     session_dir = session.kimi_cli_session.dir
     wire_file = session_dir / "wire.jsonl"
@@ -1505,11 +1594,12 @@ async def get_discovered_agents(work_dir: str | None = None) -> list[DiscoveredA
 
 
 @router.get("/{session_id}/git-diff", summary="Get git diff stats")
-async def get_session_git_diff(session_id: UUID) -> GitDiffStats:
+async def get_session_git_diff(session_id: UUID, http_request: Request) -> GitDiffStats:
     """get git diff stats for the session's work directory"""
     session = load_session_by_id(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    ensure_session_access(session, http_request)
 
     work_dir = Path(str(session.kimi_cli_session.work_dir))
 

@@ -59,6 +59,10 @@ from kimi_cli.web.user_auth import (
 
 router = APIRouter(prefix="/api/memory", tags=["memory"])
 
+#: Strong references to the archive tasks nobody awaits; see the archive
+#: endpoint below for why this is not optional.
+_background_archives: set[asyncio.Task[None]] = set()
+
 
 # ----------------------- helpers -----------------------
 
@@ -94,7 +98,7 @@ def _resolve_session_work_dir(session_id: UUID) -> Path:
 
 
 def _check_session_owner(session_id: UUID, user: dict[str, Any]) -> None:
-    """Block KB writes by users who don't own this session unless they are admin."""
+    """Block KB access by users who don't own this session unless they are admin."""
     session = load_session_by_id(session_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
@@ -105,7 +109,11 @@ def _check_session_owner(session_id: UUID, user: dict[str, Any]) -> None:
         # Pre-multi-user / anonymous sessions: any logged-in user may edit.
         return
     if owner_id != user["id"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not session owner")
+        # 404, matching /api/sessions/{id}. A 403 here and a 404 there answers
+        # two different questions about the same id: "it exists and is not
+        # yours" versus "no such session" — which hands back exactly the
+        # existence the 404 convention is there to withhold.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
 
 def _caller_owner_id(user: dict[str, Any] | None) -> str:
@@ -135,8 +143,12 @@ class KnowledgeWriteRequest(BaseModel):
 @router.get("/knowledge", summary="List knowledge base files")
 async def list_knowledge(
     session_id: UUID,
-    _user: dict[str, Any] = Depends(require_current_user),  # noqa: B008
+    user: dict[str, Any] = Depends(require_current_user),  # noqa: B008
 ) -> list[KnowledgeFile]:
+    # Reads need the same owner check the writes have. Being logged in is not
+    # the question — whose session this is, is; without it any user could
+    # enumerate and read another user's knowledge base from its session id.
+    _check_session_owner(session_id, user)
     work_dir = _resolve_session_work_dir(session_id)
     knowledge_dir = get_knowledge_dir(work_dir)
     if not knowledge_dir.exists():
@@ -154,8 +166,9 @@ async def list_knowledge(
 async def read_knowledge_file(
     filename: str,
     session_id: UUID,
-    _user: dict[str, Any] = Depends(require_current_user),  # noqa: B008
+    user: dict[str, Any] = Depends(require_current_user),  # noqa: B008
 ) -> KnowledgeFileContent:
+    _check_session_owner(session_id, user)
     name = _validate_kb_filename(filename)
     work_dir = _resolve_session_work_dir(session_id)
     path = get_knowledge_dir(work_dir) / name
@@ -673,7 +686,15 @@ async def archive_session(
         work_dir_str = None
 
     owner_id = _caller_owner_id(user)
-    asyncio.create_task(_run_archive_in_background(session_id, owner_id, history, work_dir_str))
+    # Hold the reference. asyncio keeps only a weak one, so a task nobody
+    # awaits can be garbage-collected while it runs — the archive disappears
+    # mid-flight and neither archive.completed nor archive.failed is ever
+    # delivered.
+    task = asyncio.create_task(
+        _run_archive_in_background(session_id, owner_id, history, work_dir_str)
+    )
+    _background_archives.add(task)
+    task.add_done_callback(_background_archives.discard)
     return ArchiveAccepted(session_id=str(session_id))
 
 

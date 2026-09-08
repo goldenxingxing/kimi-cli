@@ -24,6 +24,17 @@ TEST_MODEL = "test-model-a"
 OTHER_MODEL = "test-model-b"
 
 
+def _anonymous_request() -> SimpleNamespace:
+    """A stand-in for the caller's connection.
+
+    The per-session routes now resolve who is asking, so they can refuse a
+    session that belongs to somebody else. These sessions have no owner, which
+    is the single-user case: the check returns before it looks at the
+    connection at all.
+    """
+    return SimpleNamespace()
+
+
 @pytest.fixture
 def isolated_share_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     share_dir = tmp_path / "share"
@@ -145,6 +156,7 @@ async def test_update_session_model_persists_and_preserves_thinking(
     updated = await sessions_api.update_session(
         UUID(session.id),
         UpdateSessionRequest(model=OTHER_MODEL),
+        _anonymous_request(),
         runner=runner,
     )
 
@@ -167,6 +179,7 @@ async def test_update_session_model_restarts_only_own_worker(
     await sessions_api.update_session(
         UUID(session.id),
         UpdateSessionRequest(model=TEST_MODEL),
+        _anonymous_request(),
         runner=runner,
     )
 
@@ -189,6 +202,7 @@ async def test_update_session_model_rejected_when_busy(
         await sessions_api.update_session(
             UUID(session.id),
             UpdateSessionRequest(model=TEST_MODEL),
+            _anonymous_request(),
             runner=runner,
         )
     assert exc_info.value.status_code == 409
@@ -211,6 +225,7 @@ async def test_update_session_model_rejects_unknown_model(
         await sessions_api.update_session(
             UUID(session.id),
             UpdateSessionRequest(model="no-such-model"),
+            _anonymous_request(),
             runner=runner,
         )
     assert exc_info.value.status_code == 400

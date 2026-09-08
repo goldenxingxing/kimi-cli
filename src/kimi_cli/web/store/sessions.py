@@ -19,6 +19,7 @@ This design works well when:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -353,6 +354,7 @@ def load_sessions_page(
     offset: int = 0,
     query: str | None = None,
     archived: bool | None = None,
+    owner_filter: Callable[[str | None], bool] | None = None,
 ) -> list[JointSession]:
     """Load a paginated list of sessions, optionally filtered by query and archived status.
 
@@ -364,6 +366,13 @@ def load_sessions_page(
             - None (default): Only return non-archived sessions.
             - True: Only return archived sessions.
             - False: Only return non-archived sessions.
+        owner_filter: Decides which owners the caller may see, given each
+            session's ``owner_id``. Applied *before* the page is cut, which is
+            the whole point of it being here: filtering the page afterwards
+            pages across everybody's sessions, so a user asking for the first
+            100 got however many of their own happened to fall inside the
+            global first 100, and later offsets skipped other people's
+            sessions rather than their own.
     """
     entries = list(_load_sessions_index_cached())
 
@@ -372,6 +381,9 @@ def load_sessions_page(
         entries = [e for e in entries if not e.state.archived]
     else:
         entries = [e for e in entries if e.state.archived]
+
+    if owner_filter is not None:
+        entries = [e for e in entries if owner_filter(e.state.owner_id)]
 
     if query:
         query_text = query.strip().lower()

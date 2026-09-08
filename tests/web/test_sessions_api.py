@@ -18,6 +18,17 @@ if TYPE_CHECKING:
     from kimi_cli.web.runner.process import KimiCLIRunner
 
 
+def _anonymous_request() -> SimpleNamespace:
+    """A stand-in for the caller's connection.
+
+    The per-session routes now resolve who is asking, so they can refuse a
+    session that belongs to somebody else. These sessions have no owner, which
+    is the single-user case: the check returns before it looks at the
+    connection at all.
+    """
+    return SimpleNamespace()
+
+
 @pytest.fixture
 def isolated_share_dir(monkeypatch, tmp_path: Path) -> Path:
     share_dir = tmp_path / "share"
@@ -137,6 +148,7 @@ async def test_generate_title_preserves_concurrent_manual_title(
 
     response = await sessions_api.generate_session_title(
         UUID(session.id),
+        _anonymous_request(),
         GenerateTitleRequest(
             user_message="debug the flaky web session rename issue",
             assistant_response="I'll inspect the session state writes.",
@@ -200,6 +212,7 @@ async def test_generate_title_caps_kimi_completion(
 
     response = await sessions_api.generate_session_title(
         UUID(session.id),
+        _anonymous_request(),
         GenerateTitleRequest(
             user_message="investigate a completion budget regression",
             assistant_response="I will inspect the request construction.",
