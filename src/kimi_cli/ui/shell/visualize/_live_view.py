@@ -495,6 +495,11 @@ class _LiveView:
                 self.refresh_soon()
             case StatusUpdate():
                 self._status_block.update(msg)
+                # Ask for a repaint. The status line is only redrawn when
+                # something sets _need_recompose, so a status-only update —
+                # context usage, token counts — sat unrendered until an
+                # unrelated message happened to come along and refresh.
+                self.refresh_soon()
             case Notification():
                 self.append_notification(msg)
             case ContentPart():

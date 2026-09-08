@@ -12,6 +12,7 @@ All public names are re-exported here so external imports remain stable:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from typing import Any
 
@@ -158,15 +159,25 @@ async def visualize(
             get_trace_id=get_trace_id,
             show_thinking_stream=show_thinking_stream,
         )
-    if on_view_ready is not None:
-        on_view_ready(view)
     try:
+        # Inside the try: on_view_ready is caller-supplied, and one that raised
+        # skipped every line of the cleanup below — leaving the prompt session
+        # attached in AGENT mode with the running-input bindings still live.
+        if on_view_ready is not None:
+            on_view_ready(view)
         await view.visualize_loop(wire)
     finally:
+        # Each step guarded on its own. Run in sequence, an exception from
+        # unbind_running_input() skipped the detach and the on_view_closed
+        # notification after it — the same half-torn-down state, reached a
+        # different way.
         if prompt_session is not None and steer is not None:
             if unbind_running_input is not None:
-                unbind_running_input()
+                with contextlib.suppress(Exception):
+                    unbind_running_input()
             if isinstance(view, _PromptLiveView):
-                prompt_session.detach_running_prompt(view)
+                with contextlib.suppress(Exception):
+                    prompt_session.detach_running_prompt(view)
         if on_view_closed is not None:
-            on_view_closed()
+            with contextlib.suppress(Exception):
+                on_view_closed()

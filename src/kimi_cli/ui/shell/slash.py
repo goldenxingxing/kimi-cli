@@ -866,6 +866,11 @@ async def undo(app: Shell, args: str):
     except (EOFError, KeyboardInterrupt):
         return
 
+    if selected is None:
+        # Every other ChoiceInput here guards this; the application can exit
+        # without a result, and int(None) is a traceback in the user's face.
+        return
+
     turn_index = int(selected)
 
     # The selected turn is the one we want to redo — fork includes turns *before* it

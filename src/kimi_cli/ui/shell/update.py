@@ -301,7 +301,13 @@ async def _do_update(*, print: bool, check_only: bool) -> UpdateResult:
             _print("[grey50]Extracting...[/grey50]")
             try:
                 with tarfile.open(tar_path, "r:gz") as tar:
-                    tar.extractall(tmpdir)
+                    # filter="data" — the archive comes off the network and is
+                    # not checksummed, and the default extraction honours the
+                    # member paths verbatim: `../` segments and absolute names
+                    # write outside tmpdir, and a symlink member can redirect
+                    # the os.walk below onto an arbitrary `kimi` binary that
+                    # this function then installs and the user then runs.
+                    tar.extractall(tmpdir, filter="data")
                 binary_path = None
                 for root, _, files in os.walk(tmpdir):
                     if "kimi" in files:

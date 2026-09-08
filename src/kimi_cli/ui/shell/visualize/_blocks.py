@@ -427,10 +427,15 @@ class _ToolCallBlock:
             self._last_subagent_tool_call.function.arguments += tool_call_part.arguments_part
 
     def finish_sub_tool_call(self, tool_result: ToolResult):
-        self._last_subagent_tool_call = None
         sub_tool_call = self._ongoing_subagent_tool_calls.pop(tool_result.tool_call_id, None)
         if sub_tool_call is None:
+            # A result for a call this block does not know about — duplicated,
+            # or out of order. Clearing _last_subagent_tool_call first threw
+            # away the streaming target of a *different*, still-running call,
+            # and its remaining argument chunks then had nowhere to go.
             return
+
+        self._last_subagent_tool_call = None
 
         self._finished_subagent_tool_calls.append(
             _ToolCallBlock.FinishedSubCall(

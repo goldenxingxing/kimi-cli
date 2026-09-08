@@ -87,7 +87,15 @@ class SessionPickerApp:
     # Data loading
     # ------------------------------------------------------------------
 
-    async def _load_sessions(self) -> None:
+    async def _load_sessions(self, version: int | None = None) -> None:
+        """Load the session list for the current scope.
+
+        `version` is the reload this load belongs to. A stale one must not
+        publish: the caller's guard runs *after* this returns, so assigning
+        unconditionally let an old scope's list land in `self._sessions` and
+        stay there — the guard then skipped the redraw, and the picker showed
+        the wrong scope's sessions until the next toggle.
+        """
         current = self._current_session
 
         if self._scope == "current":
@@ -98,6 +106,8 @@ class SessionPickerApp:
         await current.refresh()
         if not current.is_empty():
             sessions.insert(0, current)
+        if version is not None and version != self._reload_version:
+            return
         self._sessions = sessions
 
     def _build_values(self) -> list[tuple[str, str]]:
@@ -212,7 +222,7 @@ class SessionPickerApp:
         self._radio_list._selected_index = 0  # pyright: ignore[reportPrivateUsage]
         app.invalidate()
 
-        await self._load_sessions()
+        await self._load_sessions(version)
 
         if version != self._reload_version:
             return  # stale reload; a newer toggle already started

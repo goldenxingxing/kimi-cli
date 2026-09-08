@@ -76,7 +76,11 @@ class _SetupResult(NamedTuple):
 async def _setup_platform(platform: Platform) -> _SetupResult | None:
     # enter the API key
     api_key = await _prompt_text("Enter your API key", is_password=True)
+    api_key = (api_key or "").strip()
     if not api_key:
+        # `if not api_key` alone let a key of spaces through, which is then
+        # saved and fails later as an auth error with nothing pointing back
+        # here.
         return None
 
     # list models

@@ -128,3 +128,30 @@ async def test_import_directory_path_prints_clear_error(tmp_path: Path, monkeypa
     assert "provide a file" in rendered.lower()
     assert app.soul.context.append_message.await_count == 0
     assert app.soul.wire_file.append_message.await_count == 0
+
+
+async def test_a_sensitive_file_is_not_imported_until_it_is_confirmed(tmp_path: Path) -> None:
+    """The warning has to come before the import, not after it.
+
+    Once perform_import has run, the contents are in the live context, in the
+    wire file, and in every later export — a warning at that point tells the
+    reader about something they can no longer decline.
+    """
+    app = _make_shell_app(tmp_path)
+    secrets = tmp_path / ".env"
+    secrets.write_text("OPENAI_API_KEY=sk-do-not-ingest\n", encoding="utf-8")
+
+    await shell_export_import.import_context(app, str(secrets))  # type: ignore[reportGeneralTypeIssues]
+
+    app.soul.context.append_message.assert_not_awaited()
+    app.soul.wire_file.append_message.assert_not_awaited()
+
+
+async def test_confirming_imports_it(tmp_path: Path) -> None:
+    app = _make_shell_app(tmp_path)
+    secrets = tmp_path / ".env"
+    secrets.write_text("OPENAI_API_KEY=sk-the-user-said-yes\n", encoding="utf-8")
+
+    await shell_export_import.import_context(app, f"--yes {secrets}")  # type: ignore[reportGeneralTypeIssues]
+
+    app.soul.wire_file.append_message.assert_awaited()

@@ -60,6 +60,17 @@ async def export(app: Shell, args: str):
 # ---------------------------------------------------------------------------
 
 
+def _take_confirmation_flag(args: str) -> tuple[str, bool]:
+    """Split a leading ``--yes`` / ``-y`` off the argument string."""
+    rest = args.strip()
+    for flag in ("--yes ", "-y "):
+        if rest.startswith(flag):
+            return rest[len(flag) :].strip(), True
+    if rest in {"--yes", "-y"}:
+        return "", True
+    return rest, False
+
+
 @registry.command(name="import")
 @shell_mode_registry.command(name="import")
 async def import_context(app: Shell, args: str):
@@ -70,9 +81,23 @@ async def import_context(app: Shell, args: str):
     if soul is None:
         return
 
+    args, confirmed = _take_confirmation_flag(args)
     target = sanitize_cli_path(args)
     if not target:
         console.print("[yellow]Usage: /import <file_path or session_id>[/yellow]")
+        return
+
+    # Before the import, not after it. The warning used to be printed once the
+    # content was already merged into soul.context — in the live window sent to
+    # the model, in the wire file, and in every later export — where there is
+    # nothing left for the reader to decide.
+    if not confirmed and is_sensitive_file(Path(target).name):
+        console.print(
+            f"[yellow]{shorten_home(Path(target))} looks like it may contain secrets "
+            "(API keys, tokens, credentials). Importing puts its contents into this "
+            "session's context permanently.[/yellow]"
+        )
+        console.print(f"[yellow]Re-run as [bold]/import --yes {args}[/bold] to go ahead.[/yellow]")
         return
 
     session = soul.runtime.session
@@ -110,8 +135,3 @@ async def import_context(app: Shell, args: str):
         f"[green]Imported context from {source_desc} "
         f"({content_len} chars) into current session.[/green]"
     )
-    if source_desc.startswith("file") and is_sensitive_file(Path(target).name):
-        console.print(
-            "[yellow]Warning: This file may contain secrets (API keys, tokens, credentials). "
-            "The content is now part of your session context.[/yellow]"
-        )

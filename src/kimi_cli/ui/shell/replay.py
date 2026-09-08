@@ -131,8 +131,11 @@ async def _build_replay_turns_from_wire(wire_file: WireFile | None) -> list[_Rep
                 current_turn.n_steps = wire_msg.n
             current_turn.events.append(wire_msg)
     except Exception:
+        # Keep what was already parsed. Returning [] made the caller fall back
+        # to history_turns, so a single malformed record near the end of a long
+        # wire file silently replaced the whole replay with the shorter view —
+        # with nothing on screen to say a turn had failed to parse.
         logger.exception("Failed to build replay turns from wire file {file}:", file=wire_file.path)
-        return []
     return list(turns)
 
 

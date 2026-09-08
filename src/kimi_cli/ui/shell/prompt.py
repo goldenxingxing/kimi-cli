@@ -988,6 +988,14 @@ def _get_git_status() -> tuple[bool, int, int]:
             # Terminate it so the toolbar is not permanently frozen; retry after next TTL.
             with contextlib.suppress(Exception):
                 state.proc.terminate()
+            # Reap it and close the pipe. Dropping the reference leaves a
+            # zombie and an open descriptor per occurrence, and this runs once
+            # per TTL for as long as the shell is open.
+            with contextlib.suppress(Exception):
+                state.proc.wait(timeout=1)
+            with contextlib.suppress(Exception):
+                if state.proc.stdout is not None:
+                    state.proc.stdout.close()
             state.proc = None
             state.timestamp = now  # delay next spawn by one full TTL
 
