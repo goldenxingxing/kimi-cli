@@ -39,6 +39,7 @@ from kosong.chat_provider import (
 )
 from kosong.chat_provider.openai_common import (
     close_replaced_openai_client,
+    close_response_stream,
     convert_error,
     create_openai_client,
     reasoning_effort_to_thinking_effort,
@@ -464,6 +465,15 @@ class OpenAIResponsesStreamedMessage:
         self._id: str | None = None
         self._usage: ResponseUsage | None = None
 
+    async def aclose(self) -> None:
+        """Release the underlying HTTP response.
+
+        Abandoning the iteration — a cancelled generation, a caller that stops
+        early — otherwise leaves the connection held until the GC finalizes
+        this generator. `kosong.generate` calls this in a finally.
+        """
+        await self._iter.aclose()
+
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
 
@@ -527,9 +537,14 @@ class OpenAIResponsesStreamedMessage:
             async for chunk in response:
                 if chunk.type == "response.output_text.delta":
                     yield TextPart(text=chunk.delta)
+                elif chunk.type == "response.created":
+                    # The response id, the same thing the non-streaming path
+                    # reports. This used to be set from each output item's own
+                    # id below, so `GenerateResult.id` meant a different thing
+                    # depending on whether the call streamed.
+                    self._id = chunk.response.id
                 elif chunk.type == "response.output_item.added":
                     item = chunk.item
-                    self._id = item.id
                     if item.type == "function_call":
                         yield ToolCall(
                             id=item.call_id or str(uuid.uuid4()),
@@ -540,7 +555,6 @@ class OpenAIResponsesStreamedMessage:
                         )
                 elif chunk.type == "response.output_item.done":
                     item = chunk.item
-                    self._id = item.id
                     if item.type == "reasoning":
                         yield ThinkPart(think="", encrypted=item.encrypted_content)
                 elif chunk.type == "response.function_call_arguments.delta":
@@ -550,9 +564,12 @@ class OpenAIResponsesStreamedMessage:
                 elif chunk.type == "response.reasoning_summary_text.delta":
                     yield ThinkPart(think=chunk.delta)
                 elif chunk.type == "response.completed":
+                    self._id = chunk.response.id
                     self._usage = chunk.response.usage
         except (OpenAIError, httpx.HTTPError) as e:
             raise convert_error(e) from e
+        finally:
+            await close_response_stream(response)
 
 
 if __name__ == "__main__":

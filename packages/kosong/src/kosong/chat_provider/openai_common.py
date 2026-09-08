@@ -163,3 +163,36 @@ def tool_to_openai(tool: Tool) -> ChatCompletionToolParam:
             "parameters": tool.parameters,
         },
     }
+
+
+def ensure_tool_call_arguments(dumped_message: dict[str, Any]) -> None:
+    """Give every serialized tool call an `arguments` string, in place.
+
+    `ToolCall.FunctionBody.arguments` is `str | None`, and providers do stream
+    `None` for a tool call that takes no arguments. `model_dump(exclude_none=
+    True)` then drops the key entirely, and an OpenAI-compatible backend
+    rejects a `function` object with no `arguments`. Empty JSON says the same
+    thing and is accepted everywhere.
+    """
+    for tool_call in dumped_message.get("tool_calls") or []:
+        if not isinstance(tool_call, dict):
+            continue
+        function = cast(dict[str, Any], tool_call).get("function")
+        if isinstance(function, dict) and cast(dict[str, Any], function).get("arguments") is None:
+            cast(dict[str, Any], function)["arguments"] = "{}"
+
+
+async def close_response_stream(response: object) -> None:
+    """Close a provider stream if it is one; a plain iterator has nothing to close.
+
+    `AsyncStream` holds the HTTP response open. Iterating it bare and then
+    abandoning the iteration — a cancelled generation, a caller that stops
+    early — leaves the pooled connection held until the GC gets to it, which
+    on a Ctrl-C-heavy session adds up.
+    """
+    close = getattr(response, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result

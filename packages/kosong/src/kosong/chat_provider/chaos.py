@@ -158,6 +158,15 @@ class ChaosChatProvider:
         """
         transport_owner = self._find_transport_owner()
         transport = getattr(transport_owner, "_transport", None)
+        if isinstance(transport, ChaosTransport):
+            # Already ours. `with_thinking` copies the provider, and for Kimi
+            # and OpenAI that copy shares the very same client — wrapping a
+            # second time stacked the transports and compounded the injection
+            # rate (0.3 -> 0.51 -> 0.66), quietly voiding the error budget a
+            # chaos test is written against. Re-point it at our config instead.
+            transport._config = self._chaos_config  # type: ignore[reportPrivateUsage]
+            transport._rng = random.Random(self._chaos_config.seed)  # type: ignore[reportPrivateUsage]
+            return
         if not isinstance(transport, httpx.AsyncBaseTransport):
             raise ChatProviderError(
                 "ChaosChatProvider only supports providers backed by httpx.AsyncBaseTransport"
@@ -234,6 +243,12 @@ class ChaosStreamedMessage:
         self._config = config
         self._rng = random.Random(config.seed)
         self._iterator = wrapped.__aiter__()
+
+    async def aclose(self) -> None:
+        """Release the wrapped stream. See `kosong.generate`."""
+        aclose = getattr(self._wrapped, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self

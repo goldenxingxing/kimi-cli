@@ -82,6 +82,10 @@ class ScriptedEchoStreamedMessage(StreamedMessage):
         self._id = message_id
         self._usage = usage
 
+    async def aclose(self) -> None:
+        """Release the underlying stream. See `kosong.generate`."""
+        await self._iter.aclose()
+
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
 

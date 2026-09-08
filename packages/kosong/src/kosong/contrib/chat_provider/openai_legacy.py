@@ -23,8 +23,10 @@ from kosong.chat_provider import (
 )
 from kosong.chat_provider.openai_common import (
     close_replaced_openai_client,
+    close_response_stream,
     convert_error,
     create_openai_client,
+    ensure_tool_call_arguments,
     reasoning_effort_to_thinking_effort,
     thinking_effort_to_reasoning_effort,
     tool_to_openai,
@@ -215,6 +217,7 @@ class OpenAILegacy:
         else:
             message.content = content
         dumped_message = message.model_dump(exclude_none=True)
+        ensure_tool_call_arguments(dumped_message)
         if has_reasoning and self._reasoning_key:
             dumped_message[self._reasoning_key] = reasoning_content
         return cast(ChatCompletionMessageParam, dumped_message)
@@ -231,6 +234,15 @@ class OpenAILegacyStreamedMessage:
             self._iter = self._convert_stream_response(response)
         self._id: str | None = None
         self._usage: CompletionUsage | None = None
+
+    async def aclose(self) -> None:
+        """Release the underlying HTTP response.
+
+        Abandoning the iteration — a cancelled generation, a caller that stops
+        early — otherwise leaves the connection held until the GC finalizes
+        this generator. `kosong.generate` calls this in a finally.
+        """
+        await self._iter.aclose()
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
@@ -336,6 +348,8 @@ class OpenAILegacyStreamedMessage:
                         pass
         except (OpenAIError, httpx.HTTPError) as e:
             raise convert_error(e) from e
+        finally:
+            await close_response_stream(response)
 
 
 if __name__ == "__main__":

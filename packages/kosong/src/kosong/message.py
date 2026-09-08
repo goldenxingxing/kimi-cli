@@ -60,7 +60,14 @@ class ContentPart(BaseModel, ABC, MergeableMixin):
                     type_value: Any | None = cast(dict[str, Any], value).get("type")
                     if not isinstance(type_value, str):
                         raise ValueError(f"Cannot validate {value} as ContentPart")
-                    target_class = cls.__content_part_registry[type_value]
+                    target_class = cls.__content_part_registry.get(type_value)
+                    if target_class is None:
+                        # A ValueError, not the registry's KeyError: pydantic
+                        # only turns ValueError/AssertionError into a
+                        # ValidationError, and every caller that tolerates an
+                        # unreadable part — history restore, the print UI —
+                        # catches ValidationError.
+                        raise ValueError(f"Unknown content part type: {type_value!r}")
                     return target_class.model_validate(value)
 
                 raise ValueError(f"Cannot validate {value} as ContentPart")

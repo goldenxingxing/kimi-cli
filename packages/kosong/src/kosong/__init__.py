@@ -76,7 +76,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from kosong._generate import GenerateResult, generate
-from kosong.chat_provider import ChatProvider, ChatProviderError, StreamedMessagePart, TokenUsage
+from kosong.chat_provider import ChatProvider, StreamedMessagePart, TokenUsage
 from kosong.message import Message, ToolCall
 from kosong.tooling import ToolResult, ToolResultFuture, Toolset
 from kosong.utils.aio import Callback
@@ -165,8 +165,12 @@ async def step(
             on_tool_call=on_tool_call,
             on_trace_id=on_trace_id,
         )
-    except (ChatProviderError, asyncio.CancelledError):
-        # cancel all the futures to avoid hanging tasks
+    except BaseException:
+        # Cancel all the futures to avoid hanging tasks. Any exception at all:
+        # this used to name only ChatProviderError and CancelledError, and
+        # anything else out of generate() — an on_message_part callback
+        # raising, a provider error nobody mapped, a conversion failure —
+        # left the tool tasks running with no one awaiting them.
         for future in tool_result_futures.values():
             future.remove_done_callback(future_done_callback)
             future.cancel()

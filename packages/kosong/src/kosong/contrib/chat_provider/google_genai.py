@@ -6,6 +6,7 @@ except ModuleNotFoundError as exc:
         'Install with `pip install "kosong[contrib]"`.'
     ) from exc
 
+import asyncio
 import base64
 import copy
 import json
@@ -145,7 +146,9 @@ class GoogleGenAI:
         tools: Sequence[KosongTool],
         history: Sequence[Message],
     ) -> "GoogleGenAIStreamedMessage":
-        contents = messages_to_google_genai_contents(history)
+        # Off the event loop: the conversion downloads any image or audio URL
+        # in the history with a synchronous client.
+        contents = await asyncio.to_thread(messages_to_google_genai_contents, history)
 
         config = GenerateContentConfig(**self._generation_kwargs)
         config.system_instruction = system_prompt
@@ -238,6 +241,15 @@ class GoogleGenAIStreamedMessage:
             self._iter = self._convert_stream_response(response)
         self._id: str | None = None
         self._usage: GenerateContentResponseUsageMetadata | None = None
+
+    async def aclose(self) -> None:
+        """Release the underlying HTTP response.
+
+        Abandoning the iteration — a cancelled generation, a caller that stops
+        early — otherwise leaves the connection held until the GC finalizes
+        this generator. `kosong.generate` calls this in a finally.
+        """
+        await self._iter.aclose()
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
@@ -378,6 +390,31 @@ def tool_to_google_genai(tool: KosongTool) -> Tool:
     )
 
 
+_MAX_MEDIA_BYTES = 32 * 1024 * 1024
+
+
+def _download_media(url: str) -> bytes:
+    """Fetch a media URL, bounded in time and in size.
+
+    The URL arrives in the conversation, so nothing guarantees it is small or
+    that the server answers promptly. `generate` runs the whole conversion off
+    the event loop, so this staying synchronous is fine; blocking the loop on
+    it, as it used to, was not.
+    """
+    with httpx.stream("GET", url, timeout=30.0) as response:
+        response.raise_for_status()
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > _MAX_MEDIA_BYTES:
+                raise ChatProviderError(
+                    f"Media at {url} is larger than {_MAX_MEDIA_BYTES} bytes"
+                )
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _image_url_part_to_google_genai(part: ImageURLPart) -> Part:
     """Convert an image URL part to GoogleGenAI format."""
     url = part.image_url.url
@@ -404,8 +441,7 @@ def _image_url_part_to_google_genai(part: ImageURLPart) -> Part:
         if not mime_type or not mime_type.startswith("image/"):
             # Default to image/png if we can't detect or it's not an image type
             mime_type = "image/png"
-        response = httpx.get(url).raise_for_status()
-        data_bytes = response.content
+        data_bytes = _download_media(url)
         return Part.from_bytes(data=data_bytes, mime_type=mime_type)
 
 
@@ -446,8 +482,7 @@ def _audio_url_part_to_google_genai(part: AudioURLPart) -> Part:
         if not mime_type or not mime_type.startswith("audio/"):
             # Default to audio/mp3 if we can't detect or it's not an audio type
             mime_type = "audio/mp3"
-        response = httpx.get(url).raise_for_status()
-        data_bytes = response.content
+        data_bytes = _download_media(url)
         return Part.from_bytes(data=data_bytes, mime_type=mime_type)
 
 
@@ -478,7 +513,9 @@ def _tool_call_id_to_name(tool_call_id: str, tool_name_by_id: dict[str, str]) ->
     if tool_call_id in tool_name_by_id:
         return tool_name_by_id[tool_call_id]
     # Fallback for older ids of the form "{tool_name}_{id}".
-    return tool_call_id.split("_", 1)[0]
+    # rsplit, not split: the id is "{tool_name}_{id}" and tool names have
+    # underscores in them — "get_weather_12345" split from the left gives "get".
+    return tool_call_id.rsplit("_", 1)[0]
 
 
 def _tool_message_to_function_response_part(

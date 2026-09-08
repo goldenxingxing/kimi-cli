@@ -515,6 +515,15 @@ class AnthropicStreamedMessage:
         self._id: str | None = None
         self._usage = Usage(input_tokens=0, output_tokens=0)
 
+    async def aclose(self) -> None:
+        """Release the underlying HTTP response.
+
+        Abandoning the iteration — a cancelled generation, a caller that stops
+        early — otherwise leaves the connection held until the GC finalizes
+        this generator. `kosong.generate` calls this in a finally.
+        """
+        await self._iter.aclose()
+
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
 

@@ -43,6 +43,11 @@ def deref_json_schema(schema: JsonDict) -> JsonDict:
         except (KeyError, TypeError, ValueError):
             raise ValueError(f"Unable to resolve reference path: {pointer}") from None
 
+    # Refs we are in the middle of inlining, and the ones that turned out to
+    # point back into themselves.
+    expanding: list[str] = []
+    cyclic: set[str] = set()
+
     def traverse(node: JsonType, root: JsonDict) -> JsonType:
         """Recursively traverse every node to inline local references."""
         if isinstance(node, dict):
@@ -50,10 +55,22 @@ def deref_json_schema(schema: JsonDict) -> JsonDict:
             if "$ref" in node and isinstance(node["$ref"], str):
                 ref_path = node["$ref"]
                 if ref_path.startswith("#"):
+                    if ref_path in expanding:
+                        # A self-referential schema — a tree node whose
+                        # children are nodes. Inlining it never terminates, so
+                        # leave the `$ref` standing and keep `$defs` below for
+                        # it to point at. Without this the whole function blew
+                        # the stack, taking the tool's registration with it.
+                        cyclic.add(ref_path)
+                        return node
                     # Resolve the local reference target.
                     target = resolve_pointer(root, ref_path)
                     # Recursively inline the target in case it contains more refs.
-                    ref = traverse(target, root)
+                    expanding.append(ref_path)
+                    try:
+                        ref = traverse(target, root)
+                    finally:
+                        expanding.pop()
                     if not isinstance(ref, dict):
                         msg = "Local $ref must resolve to a JSON object"
                         raise TypeError(msg)
@@ -74,12 +91,13 @@ def deref_json_schema(schema: JsonDict) -> JsonDict:
         else:
             return node
 
-    # Remove definition buckets to keep the resolved schema minimal.
     resolved = cast(JsonDict, traverse(full_schema, full_schema))
 
-    # Comment these lines if you want to keep the emitted definitions.
-    resolved.pop("$defs", None)
-    resolved.pop("definitions", None)
+    # Remove the definition buckets to keep the resolved schema minimal —
+    # unless a cycle left a `$ref` behind that still needs them.
+    if not cyclic:
+        resolved.pop("$defs", None)
+        resolved.pop("definitions", None)
 
     return resolved
 

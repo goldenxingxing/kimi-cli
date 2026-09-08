@@ -58,19 +58,28 @@ async def generate(
         # getattr for robustness against third-party StreamedMessage
         # implementations that predate the trace_id property.
         await callback(on_trace_id, getattr(stream, "trace_id", None))
-    async for part in stream:
-        logger.trace("Received part: {part}", part=part)
-        if on_message_part:
-            await callback(on_message_part, part.model_copy(deep=True))
+    try:
+        async for part in stream:
+            logger.trace("Received part: {part}", part=part)
+            if on_message_part:
+                await callback(on_message_part, part.model_copy(deep=True))
 
-        if pending_part is None:
-            pending_part = part
-        elif not pending_part.merge_in_place(part):  # try merge into the pending part
-            # unmergeable part must push the pending part to the buffer
-            _message_append(message, pending_part)
-            if isinstance(pending_part, ToolCall) and on_tool_call:
-                await callback(on_tool_call, pending_part)
-            pending_part = part
+            if pending_part is None:
+                pending_part = part
+            elif not pending_part.merge_in_place(part):  # try merge into the pending part
+                # unmergeable part must push the pending part to the buffer
+                _message_append(message, pending_part)
+                if isinstance(pending_part, ToolCall) and on_tool_call:
+                    await callback(on_tool_call, pending_part)
+                pending_part = part
+    finally:
+        # Close it here rather than leaving it to the GC: on a cancellation
+        # mid-stream the provider's HTTP response is still open, and nobody
+        # else is going to do it. getattr for robustness against third-party
+        # StreamedMessage implementations, like trace_id above.
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     # end of message
     if pending_part is not None:

@@ -47,7 +47,11 @@ class MockChatProvider(ChatProvider):
         history: Sequence[Message],
     ) -> "MockStreamedMessage":
         """Always return the predefined message parts."""
-        return MockStreamedMessage(self._message_parts)
+        # A copy per call: `kosong.generate` merges parts *in place*, so
+        # handing out the same objects twice meant the second generation saw
+        # the first one's merged text — [Text("Hello"), Text(" world")] gave
+        # "Hello world", then "Hello world world".
+        return MockStreamedMessage([part.model_copy(deep=True) for part in self._message_parts])
 
     def with_thinking(self, effort: ThinkingEffort) -> Self:
         return copy.copy(self)
@@ -58,6 +62,10 @@ class MockStreamedMessage(StreamedMessage):
 
     def __init__(self, message_parts: list[StreamedMessagePart]):
         self._iter = self._to_stream(message_parts)
+
+    async def aclose(self) -> None:
+        """Release the underlying stream. See `kosong.generate`."""
+        await self._iter.aclose()
 
     def __aiter__(self) -> AsyncIterator[StreamedMessagePart]:
         return self
