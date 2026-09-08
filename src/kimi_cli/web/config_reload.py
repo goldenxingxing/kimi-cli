@@ -120,11 +120,56 @@ def refresh_environment() -> set[str]:
     return changed
 
 
+#: The spellings app._load_env_flag accepts for a boolean setting.
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _read_settings_values() -> dict[str, str]:
+    """What the settings file itself says, or {} when it cannot be read.
+
+    Read again rather than through os.environ: refresh_environment() deletes a
+    key the file sets to empty *and* one the file never mentions, and those two
+    have to be told apart here — one is "turn this off", the other is "not my
+    business".
+    """
+    env_file = os.environ.get(ENV_FILE_VAR)
+    if not env_file:
+        return {}
+    try:
+        return parse_env_file(Path(env_file).read_text(encoding="utf-8"))
+    except OSError as exc:
+        logger.warning(f"Config reload could not re-read {env_file}: {exc}")
+        return {}
+
+
 def _refresh_app_state(app) -> None:  # noqa: ANN001 - FastAPI app, kept untyped to avoid a cycle
-    """Point the per-request auth checks at the refreshed environment."""
-    if "KIMI_WEB_SESSION_TOKEN" in RELOADABLE_KEYS:
-        app.state.session_token = os.environ.get("KIMI_WEB_SESSION_TOKEN") or None
-    app.state.lan_only = (os.environ.get("KIMI_WEB_LAN_ONLY") or "").lower() == "true"
+    """Point the per-request auth checks at the refreshed environment.
+
+    What the settings file says replaces the value, including an explicit empty
+    token, which means the same thing at a reload as it does at startup: auth
+    off. What the file does not mention leaves the value alone — that is the
+    part that used to be wrong. A settings file that simply never named
+    KIMI_WEB_SESSION_TOKEN set app.state.session_token to None here and turned
+    the middleware's token check off for the rest of the process: a save that
+    opened the server up.
+
+    So these two are deliberately not symmetric with refresh_environment(),
+    which drops a key the file no longer sets: turning auth or LAN-only *off*
+    at a reload means writing the key empty, not deleting the line. Deleting it
+    keeps the setting until the next restart, which is the direction that
+    cannot surprise anyone badly.
+    """
+    values = _read_settings_values()
+
+    if "KIMI_WEB_SESSION_TOKEN" in values:
+        app.state.session_token = values["KIMI_WEB_SESSION_TOKEN"] or None
+
+    # The same spellings create_app() accepts (see app._load_env_flag). Reading
+    # only "true" here meant a deployment configured with `KIMI_WEB_LAN_ONLY=1`
+    # — which is what run_web_server writes — started LAN-restricted and
+    # stopped being so at the first reload signal.
+    if "KIMI_WEB_LAN_ONLY" in values:
+        app.state.lan_only = values["KIMI_WEB_LAN_ONLY"].strip().lower() in _TRUTHY
 
 
 async def apply_reload(app, runner) -> None:  # noqa: ANN001 - see above

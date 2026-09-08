@@ -20,6 +20,7 @@ import pytest
 from kimi_cli.web.config_reload import (
     ENV_FILE_VAR,
     RELOADABLE_KEYS,
+    _refresh_app_state,
     parse_env_file,
     refresh_environment,
 )
@@ -191,3 +192,55 @@ async def test_touching_the_signal_applies_the_change(tmp_path, monkeypatch) -> 
             await watcher
 
     assert os.environ["LLM_PROVIDERS"] == '[{"name":"added"}]'
+
+
+def _settings_file(tmp_path, monkeypatch, body: str):
+    env_file = tmp_path / ".env"
+    env_file.write_text(body, encoding="utf-8")
+    monkeypatch.setenv(ENV_FILE_VAR, str(env_file))
+
+
+def test_lan_only_survives_a_reload_however_it_is_spelled(tmp_path, monkeypatch) -> None:
+    """create_app accepts 1/true/yes/on; the reload used to accept only "true".
+
+    run_web_server writes the literal "1", so a LAN-restricted deployment
+    started restricted and stopped being restricted at the first reload.
+    """
+    app = SimpleNamespace(state=SimpleNamespace(lan_only=True, session_token="t"))
+
+    for spelling in ("1", "true", "TRUE", "yes", "on"):
+        app.state.lan_only = False
+        _settings_file(tmp_path, monkeypatch, f"KIMI_WEB_LAN_ONLY={spelling}\n")
+        _refresh_app_state(app)
+        assert app.state.lan_only is True, spelling
+
+    _settings_file(tmp_path, monkeypatch, "KIMI_WEB_LAN_ONLY=false\n")
+    _refresh_app_state(app)
+    assert app.state.lan_only is False
+
+
+def test_a_settings_file_that_omits_the_token_does_not_turn_auth_off(tmp_path, monkeypatch) -> None:
+    """Absence is not "no token". It used to set app.state.session_token to
+    None, which switches the middleware's token check off for the life of the
+    process — a settings save that opened the server up."""
+    app = SimpleNamespace(state=SimpleNamespace(lan_only=False, session_token="the-token"))
+    _settings_file(tmp_path, monkeypatch, "KIMI_WEB_LAN_ONLY=false\n")
+
+    _refresh_app_state(app)
+
+    assert app.state.session_token == "the-token"
+
+
+def test_clearing_the_token_on_purpose_still_turns_auth_off(tmp_path, monkeypatch) -> None:
+    """An explicit empty value means at a reload what it means at startup.
+
+    create_app reads `os.environ.get(...) or None`, so empty is "no token".
+    Telling that apart from absence is why this reads the settings file rather
+    than the environment: refresh_environment deletes the key either way.
+    """
+    app = SimpleNamespace(state=SimpleNamespace(lan_only=False, session_token="the-token"))
+    _settings_file(tmp_path, monkeypatch, "KIMI_WEB_SESSION_TOKEN=\n")
+
+    _refresh_app_state(app)
+
+    assert app.state.session_token is None

@@ -300,6 +300,29 @@ def _get_runner(req: Request) -> KimiCLIRunner:
     return req.app.state.runner
 
 
+def _ensure_config_access(request: Request) -> None:
+    """An ordinary user must not read or rewrite the global config.
+
+    config.toml holds every provider's API key in plaintext, and a PATCH here
+    restarts every other user's workers. The auth middleware only establishes
+    that *somebody* is logged in, and none of these routes carried a role
+    check, so in a multi-user deployment any account could read the keys.
+
+    Deployments with no user accounts at all — the desktop app, a static-token
+    gateway — have no role to check and are unchanged: the middleware is the
+    gate there. This only narrows the case where a request does arrive as a
+    logged-in user.
+    """
+    from kimi_cli.web.user_auth import get_current_user
+
+    user = get_current_user(request)
+    if user is not None and user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
+
 def _ensure_sensitive_apis_allowed(request: Request) -> None:
     """Block sensitive config writes when restricted."""
     if getattr(request.app.state, "restrict_sensitive_apis", False):
@@ -310,8 +333,9 @@ def _ensure_sensitive_apis_allowed(request: Request) -> None:
 
 
 @router.get("/", summary="Get global (kimi-cli) config snapshot")
-async def get_global_config() -> GlobalConfig:
+async def get_global_config(http_request: Request) -> GlobalConfig:
     """Get global (kimi-cli) config snapshot."""
+    _ensure_config_access(http_request)
     return _build_global_config()
 
 
@@ -322,11 +346,16 @@ async def update_global_config(
     runner: KimiCLIRunner = Depends(_get_runner),
 ) -> UpdateGlobalConfigResponse:
     """Update global (kimi-cli) default model/thinking."""
+    _ensure_config_access(http_request)
     _ensure_sensitive_apis_allowed(http_request)
-    config = load_config()
 
-    # Build effective model list (includes env-var fallback models)
+    # Effective names first, then load. _build_global_config() merges
+    # env-provided providers and models into config.toml and saves them, so a
+    # config read before it is already stale — and the save at the end of this
+    # handler wrote that stale snapshot back over the merge, dropping the
+    # models it had just added.
     effective_model_names = get_effective_model_names()
+    config = load_config()
 
     # Validate and update default_model
     if request.default_model is not None:
@@ -334,6 +363,22 @@ async def update_global_config(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Model '{request.default_model}' not found in config",
+            )
+        # Selectable is not the same as writable, and the test is `models`
+        # itself — not "does config.toml have any models at all". With none,
+        # every name is unwritable, and the guard that read `config.models and
+        # ...` skipped itself in exactly that case: the assignment below then
+        # reached save_config() through the default_thinking branch and left a
+        # config.toml whose default_model is not in `models`. Config's own
+        # validator raises on that, on every load — every worker restart and
+        # every start of the server after this one.
+        if request.default_model not in config.models:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Model '{request.default_model}' comes from the environment and is "
+                    "not in config.toml; add it there before making it the default."
+                ),
             )
         config.default_model = request.default_model
 
@@ -403,6 +448,7 @@ async def update_global_config(
 @router.get("/toml", summary="Get kimi-cli config.toml")
 async def get_config_toml(http_request: Request) -> ConfigToml:
     """Get kimi-cli config.toml."""
+    _ensure_config_access(http_request)
     _ensure_sensitive_apis_allowed(http_request)
     config_file = get_config_file()
     if not config_file.exists():
@@ -419,6 +465,7 @@ async def update_config_toml(
     """Update kimi-cli config.toml."""
     from kimi_cli.config import load_config_from_string
 
+    _ensure_config_access(http_request)
     _ensure_sensitive_apis_allowed(http_request)
     try:
         # Validate the config first
