@@ -172,7 +172,10 @@ class ApprovalRuntime:
         cancelled = 0
         import time
 
-        for request_id, request in self._requests.items():
+        # Over a snapshot: _publish_event below calls into subscribers, and a
+        # subscriber that creates or drops a request — the UI does register
+        # callbacks here — would be mutating the dict this loop is walking.
+        for request_id, request in list(self._requests.items()):
             if request.status != "pending":
                 continue
             if request.source.kind != source_kind or request.source.id != source_id:

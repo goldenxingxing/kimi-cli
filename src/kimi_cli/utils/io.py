@@ -16,7 +16,16 @@ def atomic_json_write(data: Any, path: Path) -> None:
     """
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        # fdopen takes ownership of the descriptor only once it succeeds. If it
+        # raises, the `with` is never entered and the raw fd stays open for the
+        # life of the process — and this is the session-state write path, which
+        # runs on every state change.
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())

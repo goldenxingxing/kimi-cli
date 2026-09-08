@@ -34,6 +34,15 @@ class ACPServer:
         self.sessions: dict[str, tuple[ACPSession, _ModelIDConv]] = {}
         self.negotiated_version: ACPVersionSpec | None = None
         self._auth_methods: list[acp.schema.AuthMethod] = []
+        #: Strong references to the notifications nobody awaits; see below.
+        self._pending_updates: set[asyncio.Task[None]] = set()
+
+    def _finish_update(self, task: asyncio.Task[None]) -> None:
+        self._pending_updates.discard(task)
+        if task.cancelled():
+            return
+        if (error := task.exception()) is not None:
+            logger.warning("ACP session update failed: {error}", error=error)
 
     def on_connect(self, conn: acp.Client) -> None:
         logger.info("ACP client connected")
@@ -184,7 +193,11 @@ class ACPServer:
             acp.schema.AvailableCommand(name=cmd.name, description=cmd.description)
             for cmd in soul_slash_registry.list_commands()
         ]
-        asyncio.create_task(
+        # Held, and its failure reported. asyncio keeps only a weak reference,
+        # so a task nobody awaits can be collected before it runs — the client
+        # then never receives its command list — and an exception inside it
+        # goes nowhere at all.
+        update_task = asyncio.create_task(
             self.conn.session_update(
                 session_id=session.id,
                 update=acp.schema.AvailableCommandsUpdate(
@@ -193,6 +206,8 @@ class ACPServer:
                 ),
             )
         )
+        self._pending_updates.add(update_task)
+        update_task.add_done_callback(self._finish_update)
         return acp.NewSessionResponse(
             session_id=session.id,
             modes=acp.schema.SessionModeState(
