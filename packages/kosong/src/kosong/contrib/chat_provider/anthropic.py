@@ -578,6 +578,13 @@ class AnthropicStreamedMessage:
         self,
         manager: AsyncStream[RawMessageStreamEvent],
     ) -> AsyncIterator[StreamedMessagePart]:
+        # Blocks whose *start* we skip. Their deltas arrive as ordinary
+        # input_json_delta events, and the delta branch below has no way to
+        # tell which block they belong to — so without this they were merged
+        # into whichever tool call happened to be pending, appending a server
+        # tool's arguments onto a real one and corrupting both.
+        ignored_blocks: set[int] = set()
+
         try:
             async with manager as stream:
                 async for event in stream:
@@ -601,9 +608,12 @@ class AnthropicStreamedMessage:
                                     function=ToolCall.FunctionBody(name=block.name, arguments=""),
                                 )
                             case "server_tool_use" | "web_search_tool_result":
-                                # ignore
+                                # ignore, and remember to ignore its deltas too
+                                ignored_blocks.add(event.index)
                                 continue
                     elif isinstance(event, RawContentBlockDeltaEvent):
+                        if event.index in ignored_blocks:
+                            continue
                         delta = event.delta
                         match delta.type:
                             case "text_delta":
