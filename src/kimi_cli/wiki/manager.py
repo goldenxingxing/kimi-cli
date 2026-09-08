@@ -327,6 +327,15 @@ class WikiManager:
         return portable.model_copy(update={"content_hash": content_hash(data)})
 
     def _workspace_sources_resolve(self, candidate: WikiCandidate) -> bool:
+        """Every workspace source must still name a readable file in its workspace.
+
+        Not the same bytes, though. The agent edits the files it reads, so a
+        candidate that cited one was refused for the rest of the session — the
+        runtime-attached provenance included, which nothing could correct. The
+        stored `SourceRef` keeps the hash that was actually observed, and
+        `wiki.lint` reports the divergence as `stale_provenance`; a page whose
+        source has moved on is a page to flag, not a write to lose.
+        """
         sources = (
             *candidate.sources,
             *(source for change in candidate.pages for source in change.page.sources),
@@ -339,13 +348,7 @@ class WikiManager:
             if key in checked:
                 continue
             checked.add(key)
-            resolved = self.registry.resolve(source)
-            if resolved is None:
-                return False
-            try:
-                if content_hash(resolved.read_bytes()) != source.content_hash:
-                    return False
-            except OSError:
+            if self.registry.resolve(source) is None:
                 return False
         return True
 

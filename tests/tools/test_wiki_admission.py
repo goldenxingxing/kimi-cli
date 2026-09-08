@@ -306,13 +306,20 @@ async def test_a_web_source_the_runtime_never_fetched_is_refused(admission_runti
 
 
 @pytest.mark.asyncio
-async def test_changed_file_fails_stale_and_a_fresh_read_can_retry(admission_runtime) -> None:
-    checkpoint, source, path = await _file_checkpoint(admission_runtime)
-    tool = Wiki(admission_runtime)
-    path.write_text("changed on disk", encoding="utf-8")
-    before = _revision(admission_runtime)
+async def test_editing_the_source_file_does_not_block_the_write(admission_runtime) -> None:
+    """Editing what you read is most of a session; it used to forfeit the write.
 
-    stale = await tool(
+    Both the grant and the manager re-read the file and demanded the captured
+    bytes back, so every `remember` that followed any edit was refused — the
+    provenance the runtime attached itself included, which the model has no way
+    to correct. The observed hash is still what gets stored, and `lint` reports
+    the divergence afterwards.
+    """
+    checkpoint, source, path = await _file_checkpoint(admission_runtime)
+    before = _revision(admission_runtime)
+    path.write_text("changed on disk", encoding="utf-8")
+
+    result = await Wiki(admission_runtime)(
         Params(
             operation="remember",
             checkpoint_id=checkpoint.checkpoint_id,
@@ -320,24 +327,93 @@ async def test_changed_file_fails_stale_and_a_fresh_read_can_retry(admission_run
         )
     )
 
-    assert stale.is_error
-    assert _revision(admission_runtime) == before
+    assert not result.is_error
+    assert _revision(admission_runtime) != before
     assert admission_runtime.wiki_coordinator.unconsumed_grant_count == 0
+    # The page keeps the hash that was actually observed, so the drift stays
+    # visible rather than being papered over.
+    report = admission_runtime.wiki.lint(None)
+    assert [issue.code for issue in report.issues if issue.code == "stale_provenance"]
 
-    # Re-reading the file produces new evidence and a new checkpoint.
-    fresh_checkpoint, fresh_source, _ = await _file_checkpoint(
-        admission_runtime, name="decision.md"
+
+@pytest.mark.asyncio
+async def test_a_sourceless_candidate_survives_an_edit_to_the_file_it_cites(
+    admission_runtime,
+) -> None:
+    """The documented path: omit `sources` and let the runtime attach them.
+
+    This is what a real session does, and it failed every time — the runtime
+    filled in the provenance it had observed and then refused its own fill
+    because the agent had since written to the file. The model was told to
+    "read it again", which it cannot do for a checkpoint it did not open, so
+    it discarded the checkpoint instead and nothing was ever remembered.
+    """
+    checkpoint, _source, path = await _file_checkpoint(admission_runtime)
+    sourceless = _candidate(_source).model_copy(
+        update={
+            "sources": [],
+            "pages": [
+                change.model_copy(update={"page": change.page.model_copy(update={"sources": []})})
+                for change in _candidate(_source).pages
+            ],
+        }
     )
-    fresh = await tool(
+    before = _revision(admission_runtime)
+    path.write_text("the agent rewrote what it read", encoding="utf-8")
+
+    result = await Wiki(admission_runtime)(
         Params(
             operation="remember",
-            checkpoint_id=fresh_checkpoint.checkpoint_id,
-            candidate=_candidate(fresh_source),
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=sourceless,
         )
     )
 
-    assert not fresh.is_error
+    assert not result.is_error
     assert _revision(admission_runtime) != before
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_the_runtime_never_observed_is_still_refused(
+    admission_runtime,
+) -> None:
+    """Dropping the byte check must not weaken what actually authorizes a write."""
+    checkpoint, _source, _path = await _file_checkpoint(admission_runtime)
+    unread = Path(str(admission_runtime.session.work_dir)) / "unread.md"
+    unread.write_text("a file the agent never opened", encoding="utf-8")
+    forged = admission_runtime.wiki.registry.relative_source(admission_runtime.workspace_id, unread)
+    before = _revision(admission_runtime)
+
+    result = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_candidate(forged),
+        )
+    )
+
+    assert result.is_error
+    assert _revision(admission_runtime) == before
+
+
+@pytest.mark.asyncio
+async def test_a_source_file_that_is_gone_is_refused(admission_runtime) -> None:
+    """Resolvability is what remains of the check, and it still bites."""
+    checkpoint, source, path = await _file_checkpoint(admission_runtime)
+    before = _revision(admission_runtime)
+    path.unlink()
+
+    result = await Wiki(admission_runtime)(
+        Params(
+            operation="remember",
+            checkpoint_id=checkpoint.checkpoint_id,
+            candidate=_candidate(source),
+        )
+    )
+
+    assert result.is_error
+    assert "no longer be resolved" in result.message
+    assert _revision(admission_runtime) == before
 
 
 # ---------------------------------------------------------------------------

@@ -753,9 +753,9 @@ _REFUSAL_MESSAGES: dict[GrantRefusalReason, str] = {
         'in it. Discard it with Wiki(operation="discard").'
     ),
     "unverified_source": (
-        "A source behind that checkpoint no longer matches the bytes the runtime "
-        "captured — the file changed after it was read. Read it again to open a fresh "
-        "checkpoint, or discard this one."
+        "A source behind that checkpoint can no longer be resolved — the file is gone, "
+        "or it now sits outside the workspace it was read from. Read what you need "
+        'again to open a fresh checkpoint, or discard this one with Wiki(operation="discard").'
     ),
     "unobserved_source": (
         "This candidate names sources the runtime did not observe for that checkpoint. "
@@ -809,12 +809,22 @@ def _verified_source_keys(
     conversation_hashes: frozenset[str],
     session_id: UUID,
 ) -> frozenset[str]:
-    """Re-derive each claimed source and keep only those that still match.
+    """Re-derive each claimed source and keep only those still resolvable.
 
-    A source hash the model repeats back proves nothing: workspace files are
-    re-read through the registry and re-hashed, web sources must be
-    credential-free, and conversation sources must name this session and text
-    the runtime actually accepted.
+    A source hash the model repeats back proves nothing, so each one is
+    re-derived here: a workspace file must still resolve inside a registered
+    workspace, a web source must be credential-free, and a conversation source
+    must name this session and text the runtime actually accepted.
+
+    What this deliberately does *not* require is that a workspace file still
+    hold the bytes the runtime captured. The agent edits the files it reads —
+    that is most of what a session does — so demanding otherwise refused every
+    `remember` that came after any write, including the provenance the runtime
+    attached itself, which the model has no way to correct. Authorization does
+    not rest on it either: `reserve_grant` still requires every source to be
+    one the runtime's own evidence observed, hash included, so a fabricated
+    ref cannot get through. Drift is a property of the stored page, and
+    `wiki.lint` already reports it as `stale_provenance`.
     """
     verified: set[str] = set()
     for source in (
@@ -827,13 +837,9 @@ def _verified_source_keys(
                 resolved = manager.registry.resolve(source)
             except (OSError, ValueError):
                 continue
-            if resolved is None:
-                continue
-            try:
-                current = content_hash(resolved.read_bytes())
-            except OSError:
-                continue
-            if current == source.content_hash:
+            # `resolve` returns a path only when it is still contained in a
+            # registered workspace and still a readable file.
+            if resolved is not None:
                 verified.add(key)
         elif source.kind == "web":
             if source.url is not None and not has_url_credentials(str(source.url)):
