@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { cn } from "@/lib/utils";
@@ -35,6 +35,7 @@ import {
   ToolOutput,
 } from "@ai-elements";
 import { BrainIcon, ChevronRightIcon } from "lucide-react";
+import { useCollapseScrollAnchor } from "./collapse-scroll-anchor";
 
 export type ToolApproval = NonNullable<LiveMessage["toolCall"]>["approval"];
 
@@ -94,6 +95,27 @@ export function AssistantMessage({
 
   return content;
 }
+
+/**
+ * Wraps one collapsible block and hands its open/close handler back, so a
+ * render function that is not a component can still anchor its block against
+ * the virtual list's height compensation.
+ */
+const CollapseAnchor = ({
+  children,
+}: {
+  children: (anchorToggle: () => void) => ReactNode;
+}) => {
+  const { anchorRef, anchorToggle, measureAnchor } =
+    useCollapseScrollAnchor<HTMLDivElement>();
+  return (
+    // The capture-phase reading is the one taken before anything moves; the
+    // open/close callback below reaches us only after the DOM has changed.
+    <div onClickCapture={measureAnchor} ref={anchorRef}>
+      {children(anchorToggle)}
+    </div>
+  );
+};
 
 const renderAssistantText = (message: LiveMessage) => {
   return (
@@ -220,116 +242,124 @@ const renderToolMessage = ({
 
   const toolBlock = (
     <div className="space-y-1">
-      <Tool
-        key={`${message.id}-${blocksExpanded}`}
-        defaultOpen={blocksExpanded}
-      >
-        <ToolHeader
-          state={toolCall.state}
-          title={toolCall.title}
-          type={toolCall.type}
-          input={toolCall.input}
-        />
-        <ToolContent>
-          {toolCall.input ? <ToolInput input={toolCall.input} /> : null}
-          <ToolDisplay display={toolCall.display} isError={toolCall.isError} />
-          {toolCall.subagentSteps && toolCall.subagentSteps.length > 0 ? (
-            <SubagentActivity
-              steps={toolCall.subagentSteps}
-              isRunning={toolCall.subagentRunning}
-              defaultOpen={blocksExpanded}
-              subagentType={toolCall.subagentType}
-            />
-          ) : null}
-          {shouldShowOutput ? (
-            <ToolOutput
-              errorText={toolCall.errorText}
-              output={toolCall.output}
-              message={toolCall.message}
-            />
-          ) : null}
-          {approval ? (
-            <Confirmation
-              approval={approval}
+      <CollapseAnchor>
+        {(anchorToggle) => (
+          <Tool
+            key={`${message.id}-${blocksExpanded}`}
+            defaultOpen={blocksExpanded}
+            onOpenChange={anchorToggle}
+          >
+            <ToolHeader
               state={toolCall.state}
-              className="rounded-md bg-muted/30 px-3 py-2.5 text-sm"
-            >
-              <ConfirmationTitle>
-                {t("chat:approval.manualRequiredBy", {
-                  sender: approval.sender,
-                })}
-              </ConfirmationTitle>
-              <ConfirmationRequest>
-                <div className="text-sm text-muted-foreground">
-                  <p>
-                    <span className="font-medium text-foreground">
-                      {t("chat:approval.actionLabel")}
-                    </span>{" "}
-                    {approval.action}
-                  </p>
-                  {approval.description ? (
-                    <p className="mt-2 text-foreground">
-                      {translateBackendMessage(approval.description, t)}
-                    </p>
-                  ) : null}
-                </div>
-                <ConfirmationActions className="mt-2 gap-2">
-                  <ConfirmationAction
-                    disabled={disableApprovalActions}
-                    onClick={() =>
-                      approval && onApprovalAction?.(approval, "reject")
-                    }
-                    variant="outline"
-                  >
-                    {approvalPending
-                      ? t("chat:approval.declining")
-                      : t("chat:approval.decline")}
-                  </ConfirmationAction>
-                  <ConfirmationAction
-                    disabled={disableApprovalActions}
-                    onClick={() =>
-                      approval && onApprovalAction?.(approval, "approve")
-                    }
-                  >
-                    {approvalPending
-                      ? t("chat:approval.confirming")
-                      : t("chat:approval.approve")}
-                  </ConfirmationAction>
-                  <ConfirmationAction
-                    disabled={disableApprovalActions}
-                    onClick={() =>
-                      approval &&
-                      onApprovalAction?.(approval, "approve_for_session")
-                    }
-                    variant="secondary"
-                    className="hover:bg-primary/30"
-                  >
-                    {approvalPending
-                      ? t("chat:approval.approvingSession")
-                      : t("chat:approval.approveForSession")}
-                  </ConfirmationAction>
-                </ConfirmationActions>
-              </ConfirmationRequest>
-              <ConfirmationAccepted>
-                <div className="rounded-md bg-success/10 px-3 py-2 text-xs text-success">
-                  {approvalResponse === "approve_for_session"
-                    ? t("chat:approval.sessionApproved")
-                    : t("chat:approval.approvalConfirmed")}
-                </div>
-              </ConfirmationAccepted>
-              <ConfirmationRejected>
-                <div className="rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">
-                  {approval.reason
-                    ? t("chat:approval.requestDeniedWithReason", {
-                        reason: approval.reason,
-                      })
-                    : `${t("chat:approval.requestDenied")}.`}
-                </div>
-              </ConfirmationRejected>
-            </Confirmation>
-          ) : null}
-        </ToolContent>
-      </Tool>
+              title={toolCall.title}
+              type={toolCall.type}
+              input={toolCall.input}
+            />
+            <ToolContent>
+              {toolCall.input ? <ToolInput input={toolCall.input} /> : null}
+              <ToolDisplay
+                display={toolCall.display}
+                isError={toolCall.isError}
+              />
+              {toolCall.subagentSteps && toolCall.subagentSteps.length > 0 ? (
+                <SubagentActivity
+                  steps={toolCall.subagentSteps}
+                  isRunning={toolCall.subagentRunning}
+                  defaultOpen={blocksExpanded}
+                  subagentType={toolCall.subagentType}
+                />
+              ) : null}
+              {shouldShowOutput ? (
+                <ToolOutput
+                  errorText={toolCall.errorText}
+                  output={toolCall.output}
+                  message={toolCall.message}
+                />
+              ) : null}
+              {approval ? (
+                <Confirmation
+                  approval={approval}
+                  state={toolCall.state}
+                  className="rounded-md bg-muted/30 px-3 py-2.5 text-sm"
+                >
+                  <ConfirmationTitle>
+                    {t("chat:approval.manualRequiredBy", {
+                      sender: approval.sender,
+                    })}
+                  </ConfirmationTitle>
+                  <ConfirmationRequest>
+                    <div className="text-sm text-muted-foreground">
+                      <p>
+                        <span className="font-medium text-foreground">
+                          {t("chat:approval.actionLabel")}
+                        </span>{" "}
+                        {approval.action}
+                      </p>
+                      {approval.description ? (
+                        <p className="mt-2 text-foreground">
+                          {translateBackendMessage(approval.description, t)}
+                        </p>
+                      ) : null}
+                    </div>
+                    <ConfirmationActions className="mt-2 gap-2">
+                      <ConfirmationAction
+                        disabled={disableApprovalActions}
+                        onClick={() =>
+                          approval && onApprovalAction?.(approval, "reject")
+                        }
+                        variant="outline"
+                      >
+                        {approvalPending
+                          ? t("chat:approval.declining")
+                          : t("chat:approval.decline")}
+                      </ConfirmationAction>
+                      <ConfirmationAction
+                        disabled={disableApprovalActions}
+                        onClick={() =>
+                          approval && onApprovalAction?.(approval, "approve")
+                        }
+                      >
+                        {approvalPending
+                          ? t("chat:approval.confirming")
+                          : t("chat:approval.approve")}
+                      </ConfirmationAction>
+                      <ConfirmationAction
+                        disabled={disableApprovalActions}
+                        onClick={() =>
+                          approval &&
+                          onApprovalAction?.(approval, "approve_for_session")
+                        }
+                        variant="secondary"
+                        className="hover:bg-primary/30"
+                      >
+                        {approvalPending
+                          ? t("chat:approval.approvingSession")
+                          : t("chat:approval.approveForSession")}
+                      </ConfirmationAction>
+                    </ConfirmationActions>
+                  </ConfirmationRequest>
+                  <ConfirmationAccepted>
+                    <div className="rounded-md bg-success/10 px-3 py-2 text-xs text-success">
+                      {approvalResponse === "approve_for_session"
+                        ? t("chat:approval.sessionApproved")
+                        : t("chat:approval.approvalConfirmed")}
+                    </div>
+                  </ConfirmationAccepted>
+                  <ConfirmationRejected>
+                    <div className="rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">
+                      {approval.reason
+                        ? t("chat:approval.requestDeniedWithReason", {
+                            reason: approval.reason,
+                          })
+                        : `${t("chat:approval.requestDenied")}.`}
+                    </div>
+                  </ConfirmationRejected>
+                </Confirmation>
+              ) : null}
+            </ToolContent>
+          </Tool>
+        )}
+      </CollapseAnchor>
       {toolCall.mediaParts ? (
         <ToolMediaPreview mediaParts={toolCall.mediaParts} />
       ) : null}
@@ -371,6 +401,8 @@ const ThinkToolBlock = ({
       : undefined;
   const thoughtText = typeof thought === "string" ? thought : "";
   const [isOpen, setIsOpen] = useState(defaultOpen);
+  const { anchorRef, anchorToggle, measureAnchor } =
+    useCollapseScrollAnchor<HTMLDivElement>();
   const isComplete =
     toolCall?.state === "output-available" ||
     toolCall?.state === "output-error" ||
@@ -378,11 +410,15 @@ const ThinkToolBlock = ({
 
   return (
     <MessageContent className={assistantContentClass}>
-      <div className="not-prose">
+      <div className="not-prose" onClickCapture={measureAnchor} ref={anchorRef}>
         <button
           type="button"
+          data-slot="collapsible-trigger"
           className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer"
-          onClick={() => setIsOpen(!isOpen)}
+          onClick={() => {
+            anchorToggle();
+            setIsOpen(!isOpen);
+          }}
         >
           <BrainIcon className="size-3.5 text-muted-foreground/70 shrink-0" />
           <span className="italic">
@@ -465,16 +501,21 @@ const renderThinkingMessage = (
 
   return (
     <MessageContent className={assistantContentClass}>
-      <Reasoning
-        key={`${message.id}-${blocksExpanded}`}
-        isStreaming={message.isStreaming}
-        duration={message.thinkingDuration}
-        defaultOpen={blocksExpanded}
-        disableAutoClose
-      >
-        <ReasoningTrigger />
-        <ReasoningContent>{thinkingContent}</ReasoningContent>
-      </Reasoning>
+      <CollapseAnchor>
+        {(anchorToggle) => (
+          <Reasoning
+            key={`${message.id}-${blocksExpanded}`}
+            isStreaming={message.isStreaming}
+            duration={message.thinkingDuration}
+            defaultOpen={blocksExpanded}
+            disableAutoClose
+            onOpenChange={anchorToggle}
+          >
+            <ReasoningTrigger />
+            <ReasoningContent>{thinkingContent}</ReasoningContent>
+          </Reasoning>
+        )}
+      </CollapseAnchor>
     </MessageContent>
   );
 };
