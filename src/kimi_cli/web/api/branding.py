@@ -14,7 +14,7 @@ from kimi_cli.web.db.crud import (
     get_branding,
     upsert_branding,
 )
-from kimi_cli.web.db.database import get_db
+from kimi_cli.web.db.database import db_session
 from kimi_cli.web.user_auth import require_admin
 
 # ---------------------------------------------------------------------------
@@ -32,16 +32,41 @@ _FAVICON_MIME_PATTERN = re.compile(
 
 
 def _check_data_url_size(data_url: str, *, max_kb: int, field: str) -> None:
-    """Extract the base64 portion of a Data URL, decode it, and check byte size."""
+    """Reject a Data URL whose payload is over the limit, or is not base64.
+
+    The length is checked before anything is decoded: base64 is 4 characters
+    per 3 bytes, so the encoded length bounds the decoded one, and a 500 MB
+    request body no longer has to be materialised in memory to find out it was
+    too big.
+
+    The size error and the parse error are also kept apart properly.
+    `except (IndexError, Exception)` is just `except Exception` — it caught the
+    ValueError raised two lines above it — and told the two cases apart by
+    looking for the word "exceeds" in the message.
+    """
+    limit = max_kb * 1024
+    _, _, b64_part = data_url.partition(",")
+    if not b64_part:
+        raise ValueError(f"{field} contains invalid base64 data")
+
+    # 4 characters per 3 bytes, minus whatever the padding stands in for: the
+    # decoded length exactly for a padded payload, and a slight under-estimate
+    # for an unpadded one — which is the safe direction, since the check below
+    # is the authoritative one and this only decides whether to decode at all.
+    # Whitespace is stripped first: the MIME pattern allows newlines inside the
+    # payload, and counting those would reject a file that is within the limit.
+    compact = "".join(b64_part.split())
+    padding = len(compact) - len(compact.rstrip("="))
+    if len(compact) // 4 * 3 - padding > limit:
+        raise ValueError(f"{field} decoded size exceeds {max_kb} KB")
+
     try:
-        b64_part = data_url.split(",", 1)[1]
         raw = base64.b64decode(b64_part)
-        if len(raw) > max_kb * 1024:
-            raise ValueError(f"{field} decoded size exceeds {max_kb} KB")
-    except (IndexError, Exception) as e:
-        if "exceeds" in str(e):
-            raise
+    except Exception as e:
         raise ValueError(f"{field} contains invalid base64 data") from e
+
+    if len(raw) > limit:
+        raise ValueError(f"{field} decoded size exceeds {max_kb} KB")
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +168,7 @@ async def get_public_branding() -> BrandingResponse:
     This endpoint does not require authentication so it can be called from
     the login page and other unauthenticated contexts.
     """
-    with get_db() as db:
+    with db_session() as db:
         data = get_branding(db)
     return BrandingResponse(**data)
 
@@ -158,7 +183,7 @@ async def get_admin_branding(
     admin: dict[str, Any] = Depends(require_admin),
 ) -> BrandingResponse:
     """Return branding settings for the admin form."""
-    with get_db() as db:
+    with db_session() as db:
         data = get_branding(db)
     return BrandingResponse(**data)
 
@@ -172,7 +197,7 @@ async def update_branding(
     pass ``null`` to clear a setting.
     """
     settings = body.model_dump()
-    with get_db() as db:
+    with db_session() as db:
         upsert_branding(db, settings)
         data = get_branding(db)
     return BrandingResponse(**data)
@@ -183,7 +208,7 @@ async def reset_branding(
     admin: dict[str, Any] = Depends(require_admin),
 ) -> None:
     """Clear all custom branding settings, restoring defaults."""
-    with get_db() as db:
+    with db_session() as db:
         delete_all_branding(db)
 
 

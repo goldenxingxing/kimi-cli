@@ -11,36 +11,119 @@ import time
 import uuid
 from typing import Any
 
-# Password hashing: prefer passlib/bcrypt, fallback to hashlib.sha256 with salt
+#: Cost of the stdlib KDF. Plain SHA-256 was the fallback before, and a fast
+#: general-purpose digest is not a password KDF at any salt: a GPU does
+#: billions of those a second. PBKDF2 is in the stdlib and has a work factor,
+#: which is the property that matters here.
+_PBKDF2_ROUNDS = 600_000
+
+#: Prefixes written by this module rather than by passlib. Always understood,
+#: whether or not passlib is importable — see verify_password.
+_STDLIB_SCHEMES = ("pbkdf2_sha256$", "sha256$")
+
+
+def _hash_pbkdf2(plain: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", plain.encode(), salt, _PBKDF2_ROUNDS)
+    return f"pbkdf2_sha256${_PBKDF2_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def _verify_stdlib(plain: str, hashed: str) -> bool:
+    """Verify a hash this module wrote: PBKDF2, or the older salted SHA-256."""
+    try:
+        scheme, *rest = hashed.split("$")
+        if scheme == "pbkdf2_sha256":
+            rounds, salt_hex, digest = rest
+            # Bounded, because the number comes out of the stored row. This
+            # module only ever writes _PBKDF2_ROUNDS, so anything wildly larger
+            # is a corrupt or tampered hash — and deriving with it would sit in
+            # pbkdf2_hmac for minutes on the login path, wedging every login
+            # behind it. A count far below is not a password hash either.
+            iterations = int(rounds)
+            if not 1000 <= iterations <= _PBKDF2_ROUNDS * 4:
+                return False
+            computed = hashlib.pbkdf2_hmac(
+                "sha256", plain.encode(), bytes.fromhex(salt_hex), iterations
+            )
+            return hmac.compare_digest(computed.hex(), digest)
+        if scheme == "sha256":
+            # Accounts created by the first fallback still have to log in;
+            # their hashes are upgraded the next time the password is changed,
+            # not silently invalidated here.
+            salt, digest = rest
+            expected = hashlib.sha256(f"{salt}:{plain}".encode()).hexdigest()
+            return hmac.compare_digest(expected, digest)
+    except Exception:
+        return False
+    return False
+
+
+# Password hashing: prefer passlib/bcrypt, fall back to the stdlib KDF above.
 try:
     from passlib.context import CryptContext as _CryptContext  # type: ignore[import-untyped]
 
     _pwd_context = _CryptContext(schemes=["bcrypt"], deprecated="auto")
+except Exception as _exc:  # noqa: BLE001 - see below
+    # Broad on purpose: a bcrypt backend that fails to *initialise* lands here
+    # as well as a missing passlib, and taking the whole server down over it
+    # would be worse. But it is a downgrade, so it is said out loud rather than
+    # happening in silence — that was the actual problem: every password
+    # created afterwards was hashed differently and nothing anywhere said so.
+    import logging as _logging
 
-    def hash_password(plain: str) -> str:
-        """Hash a plaintext password."""
+    _logging.getLogger(__name__).warning(
+        "passlib/bcrypt unavailable (%s); falling back to PBKDF2 password hashing",
+        _exc,
+    )
+    _pwd_context = None
+
+
+_warned_unreadable_hash = False
+
+
+def _warn_unreadable_hash_once() -> None:
+    global _warned_unreadable_hash
+    if _warned_unreadable_hash:
+        return
+    _warned_unreadable_hash = True
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning(
+        "A stored password hash needs passlib, which is not importable here; "
+        "logins for accounts created with it will fail until it is installed."
+    )
+
+
+def hash_password(plain: str) -> str:
+    """Hash a plaintext password."""
+    if _pwd_context is not None:
         return _pwd_context.hash(plain)  # type: ignore[no-any-return]
+    return _hash_pbkdf2(plain)
 
-    def verify_password(plain: str, hashed: str) -> bool:
-        """Verify a plaintext password against its hash."""
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """Verify a plaintext password against its stored hash.
+
+    The scheme is decided by the hash, not by what happens to be installed.
+    passlib is not a declared dependency, so every account created on a host
+    without it carries a `pbkdf2_sha256$...` hash — and the day passlib became
+    importable (a transitive bump, a rebuilt image), a bcrypt-only CryptContext
+    would raise UnknownHashError on all of them. That is a 500, not a 401, for
+    every user including the admin, with nothing to fall back on.
+    """
+    if hashed.startswith(_STDLIB_SCHEMES):
+        return _verify_stdlib(plain, hashed)
+    if _pwd_context is None:
+        # A bcrypt hash and no passlib to read it: nobody with a password set
+        # on a host that had passlib can log in, admin included. Nothing can be
+        # done about that here — but it must not look like a wrong password, or
+        # the outage is undiagnosable from the logs.
+        _warn_unreadable_hash_once()
+        return False
+    try:
         return _pwd_context.verify(plain, hashed)  # type: ignore[no-any-return]
-
-except Exception:
-
-    def hash_password(plain: str) -> str:  # type: ignore[misc]
-        """Hash a plaintext password using sha256 with a random salt."""
-        salt = os.urandom(16).hex()
-        digest = hashlib.sha256(f"{salt}:{plain}".encode()).hexdigest()
-        return f"sha256${salt}${digest}"
-
-    def verify_password(plain: str, hashed: str) -> bool:  # type: ignore[misc]
-        """Verify a plaintext password against a sha256-salted hash."""
-        try:
-            _, salt, digest = hashed.split("$", 2)
-            expected = hashlib.sha256(f"{salt}:{plain}".encode()).hexdigest()
-            return hmac.compare_digest(expected, digest)
-        except Exception:
-            return False
+    except Exception:
+        return False
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -98,6 +181,8 @@ def update_user(
 
     Accepted keyword arguments: ``password``, ``role``, ``is_active``.
     Returns the updated user dict, or ``None`` if the user does not exist.
+
+    Changing the password also logs the user out everywhere.
     """
     if not kwargs:
         return get_user_by_id(db, user_id)
@@ -123,6 +208,13 @@ def update_user(
         f"UPDATE users SET {', '.join(set_clauses)} WHERE id = ?",  # noqa: S608
         params,
     )
+    if "password" in kwargs:
+        # A password change has to end the sessions opened with the old one.
+        # Deactivating an account already does (get_user_session re-checks
+        # is_active); a reset did not, so a stolen cookie outlived the reset
+        # that was meant to revoke it — and with sliding renewal, for as long
+        # as it kept being used, up to the absolute ceiling.
+        db.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
     db.commit()
     return get_user_by_id(db, user_id)
 

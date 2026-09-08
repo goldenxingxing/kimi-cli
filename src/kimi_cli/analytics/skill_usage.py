@@ -742,9 +742,9 @@ def _username(user_id: str) -> str:
     """Resolve a user id to a display name, falling back to a short id."""
     try:
         from kimi_cli.web.db.crud import get_user_by_id
-        from kimi_cli.web.db.database import get_db
+        from kimi_cli.web.db.database import db_session
 
-        with get_db() as conn:
+        with db_session() as conn:
             user = get_user_by_id(conn, user_id)
         if user and user.get("username"):
             return str(user["username"])
