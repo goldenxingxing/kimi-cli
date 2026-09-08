@@ -17,10 +17,13 @@ from kimi_cli.web.db.crud import (
     list_users,
     update_user,
 )
-from kimi_cli.web.db.database import get_db
+from kimi_cli.web.db.database import db_session
 from kimi_cli.web.user_auth import require_admin
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+#: Ceiling for an uploaded skill (archive or single .md).
+_MAX_SKILL_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 def _skill_manager() -> SkillManager:
@@ -90,7 +93,7 @@ async def get_users(
     admin: dict[str, Any] = Depends(require_admin),
 ) -> list[UserDetail]:
     """Return all users with their active session counts."""
-    with get_db() as db:
+    with db_session() as db:
         users = list_users(db)
         return [_user_to_detail(db, u) for u in users]
 
@@ -109,7 +112,7 @@ async def create_user_endpoint(
             detail="role must be 'user' or 'admin'",
         )
     try:
-        with get_db() as db:
+        with db_session() as db:
             user = create_user(db, body.username, body.password, body.role)
             return _user_to_detail(db, user)
     except sqlite3.IntegrityError as exc:
@@ -140,7 +143,7 @@ async def update_user_endpoint(
     if body.is_active is not None:
         kwargs["is_active"] = body.is_active
 
-    with get_db() as db:
+    with db_session() as db:
         user = update_user(db, user_id, **kwargs)
         if user is None:
             raise HTTPException(
@@ -161,7 +164,7 @@ async def delete_user_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete your own account",
         )
-    with get_db() as db:
+    with db_session() as db:
         deleted = delete_user(db, user_id)
     if not deleted:
         raise HTTPException(
@@ -253,7 +256,16 @@ async def upload_managed_skill(
     replace: bool = False,
     admin: dict[str, Any] = Depends(require_admin),
 ) -> ManagedSkill:
-    data = await file.read(20 * 1024 * 1024 + 1)
+    # The `+ 1` was already here to detect an oversized upload, but nothing
+    # looked at the length: read(n) does not raise, it just stops at n. A
+    # multi-gigabyte upload was silently truncated to 20 MiB and then
+    # installed — a corrupt archive, or half a skill file.
+    data = await file.read(_MAX_SKILL_UPLOAD_BYTES + 1)
+    if len(data) > _MAX_SKILL_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Skill upload exceeds {_MAX_SKILL_UPLOAD_BYTES // (1024 * 1024)} MB",
+        )
     try:
         manager = _skill_manager()
         if (file.filename or "").lower().endswith(".md"):

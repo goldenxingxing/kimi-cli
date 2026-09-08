@@ -922,9 +922,15 @@ class SessionProcess:
     async def send_message(self, message: str) -> None:
         """Send a message to the subprocess stdin."""
         await self.start()
+        # Re-read after the await, and say so rather than assert. start()
+        # yields, and a restart_worker/stop_worker running meanwhile (a model
+        # change, a config PATCH, the reload watcher) sets _process to None:
+        # the assert then fired into the websocket loop's generic handler as a
+        # silent disconnect, and under `python -O` it is not even there — the
+        # next line raises AttributeError on None instead.
         process = self._process
-        assert process is not None
-        assert process.stdin is not None
+        if process is None or process.stdin is None:
+            raise RuntimeError(f"session {self.session_id} has no running worker to send to")
 
         # Handle in message
         try:
@@ -987,6 +993,19 @@ class KimiCLIRunner:
     def get_session(self, session_id: UUID) -> SessionProcess | None:
         """Get a session process if it exists."""
         return self._sessions.get(session_id)
+
+    async def forget_session(self, session_id: UUID) -> None:
+        """Drop a deleted session's process from the table.
+
+        Nothing ever removed an entry: deleting a session stopped its worker
+        and removed its directory, and left the SessionProcess here forever.
+        get_session() then kept handing back a process for a session that no
+        longer exists, and every restart_running_workers /
+        apply_compaction_ratio walked the accumulated dead entries — on a
+        long-lived multi-user server, without bound.
+        """
+        async with self._lock:
+            self._sessions.pop(session_id, None)
 
     async def detach_websocket(self, ws: WebSocket, session_id: UUID) -> None:
         """Detach a WebSocket from a session."""
