@@ -49,7 +49,16 @@ function createConfig(): Configuration {
         },
         post: async (context: ResponseContext) => {
           if (!context.response.ok) {
-            const data = await context.response.json();
+            // Defensively: an error body is not always JSON. A proxy's HTML
+            // 502, an empty 413, a gateway timeout — .json() throws on those,
+            // and the SyntaxError replaced the real HTTP failure with
+            // "Unexpected token <" everywhere the message is shown.
+            let data: Record<string, unknown> = {};
+            try {
+              data = (await context.response.json()) as Record<string, unknown>;
+            } catch {
+              data = {};
+            }
             let message: string;
 
             if (context.response.status === 422 && data.detail) {
@@ -60,7 +69,9 @@ function createConfig(): Configuration {
             } else if (typeof data.msg === "string") {
               message = data.msg;
             } else {
-              message = "Request failed";
+              message =
+                `Request failed: HTTP ${context.response.status}` +
+                (context.response.statusText ? ` ${context.response.statusText}` : "");
             }
 
             switch (context.response.status) {
@@ -88,9 +99,9 @@ function createConfig(): Configuration {
   });
 }
 
-// Lazy-initialized API client that creates config on first access
-let _apiClient: typeof apiClient | null = null;
-
+// A fresh Configuration per access, deliberately: getApiBaseUrl() can change
+// at runtime and the client has to follow it. (There was a `_apiClient` cache
+// variable here that nothing ever read or assigned.)
 export const apiClient = {
   get config() {
     return new ConfigApi(createConfig());

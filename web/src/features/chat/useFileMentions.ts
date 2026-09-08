@@ -414,28 +414,46 @@ export const useFileMentions = ({
     };
   }, [range?.query, sessionId, listDirectory]);
 
+  // The range the reader dismissed with Escape. Escape closes the menu on
+  // keydown, and the matching keyup runs the composer's selection handler,
+  // which recomputes exactly the same range and re-opens it — the menu blinked
+  // and stayed, and Enter then inserted a mention instead of sending. It stays
+  // closed until the mention itself changes.
+  const dismissedRangeRef = useRef<MentionRange | null>(null);
+
+  const applyDetectedRange = useCallback((next: MentionRange | null) => {
+    if (next && isSameRange(next, dismissedRangeRef.current)) {
+      setRange(null);
+      return;
+    }
+    dismissedRangeRef.current = null;
+    setRange((previous) => (isSameRange(previous, next) ? previous : next));
+  }, []);
+
   useEffect(() => {
     const caret = textareaRef.current?.selectionStart ?? text.length;
-    const next = detectMention(text, caret);
-    setRange((previous) => (isSameRange(previous, next) ? previous : next));
-  }, [text, textareaRef]);
+    applyDetectedRange(detectMention(text, caret));
+  }, [text, textareaRef, applyDetectedRange]);
 
   const handleTextChange = useCallback(
     (value: string, caret: number | null) => {
-      setRange(detectMention(value, caret));
+      applyDetectedRange(detectMention(value, caret));
     },
-    [],
+    [applyDetectedRange],
   );
 
   const handleCaretChange = useCallback(
     (caret: number | null) => {
-      setRange(detectMention(text, caret));
+      applyDetectedRange(detectMention(text, caret));
     },
-    [text],
+    [text, applyDetectedRange],
   );
 
   const closeMenu = useCallback(() => {
-    setRange(null);
+    setRange((previous) => {
+      dismissedRangeRef.current = previous;
+      return null;
+    });
   }, []);
 
   const selectOption = useCallback(

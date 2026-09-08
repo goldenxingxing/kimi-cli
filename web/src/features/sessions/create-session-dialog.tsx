@@ -124,6 +124,8 @@ export function CreateSessionDialog({
   const [thinking, setThinking] = useState(true);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
   const [agentName, setAgentName] = useState<string | null>(null);
+  //: Which agent fetch is the current one; see the effect below.
+  const agentRequestRef = useRef(0);
   const [agents, setAgents] = useState<DiscoveredAgent[]>([]);
   const agentCacheRef = useRef<Map<string, DiscoveredAgent[]>>(new Map());
   const agentFetchTimerRef = useRef<number | null>(null);
@@ -199,11 +201,20 @@ export function CreateSessionDialog({
       return;
     }
 
+    // Which directory the dropdown is meant to be showing. The undebounced
+    // global fetch below can race a still-in-flight debounced project fetch,
+    // and whichever answered last used to win — so the list could name agents
+    // belonging to a different directory than the highlighted one.
+    const requestId = agentRequestRef.current + 1;
+    agentRequestRef.current = requestId;
+
     const fetchAgents = async (workDir: string | null) => {
       const cacheKey = workDir ?? "";
       const cached = agentCacheRef.current.get(cacheKey);
       if (cached) {
-        setAgents(cached);
+        if (requestId === agentRequestRef.current) {
+          setAgents(cached);
+        }
         return;
       }
 
@@ -218,7 +229,16 @@ export function CreateSessionDialog({
         }
         const data: DiscoveredAgent[] = await response.json();
         agentCacheRef.current.set(cacheKey, data);
+        if (requestId !== agentRequestRef.current) {
+          return;
+        }
         setAgents(data);
+        // A pick that the new directory does not offer is not a pick. Left
+        // alone, highlighting /b after choosing a project-scoped agent under
+        // /a submitted agent_name for a directory where it does not exist.
+        setAgentName((current) =>
+          current && !data.some((agent) => agent.name === current) ? null : current,
+        );
       } catch (err) {
         console.error("Failed to fetch discovered agents:", err);
       }

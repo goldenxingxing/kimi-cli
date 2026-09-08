@@ -82,6 +82,13 @@ export function SessionFilesPanel({
   const { t } = useTranslation("chat");
   const [currentPath, setCurrentPath] = useState(".");
   const [entries, setEntries] = useState<SessionFileEntry[]>([]);
+  // Which directory `entries` actually came from. setCurrentPath applies at
+  // once and the listing arrives later, so the previous directory's entries
+  // were rendered against the new path: joinSessionPath then produced paths
+  // that never existed, and clicking one navigated into nothing.
+  const [entriesPath, setEntriesPath] = useState<string | null>(null);
+  const entriesAreCurrent = entriesPath === currentPath;
+  const visibleEntries = entriesAreCurrent ? entries : [];
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +115,7 @@ export function SessionFilesPanel({
           return;
         }
         setEntries(nextEntries);
+        setEntriesPath(path);
       } catch (loadError) {
         if (requestId !== requestIdRef.current) {
           return;
@@ -155,7 +163,7 @@ export function SessionFilesPanel({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h2 className="text-sm font-semibold">{t("files.title")}</h2>
-              <Badge variant="secondary">{entries.length}</Badge>
+              <Badge variant="secondary">{visibleEntries.length}</Badge>
             </div>
             <p
               className="mt-1 truncate text-xs text-muted-foreground"
@@ -258,7 +266,7 @@ export function SessionFilesPanel({
             </div>
           ) : null}
 
-          {!(isLoading || error) && entries.length === 0 ? (
+          {!(isLoading || error) && entriesAreCurrent && entries.length === 0 ? (
             <div className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground">
               <FolderIcon className="size-5" />
               <span>{t("files.emptyDir")}</span>
@@ -266,7 +274,7 @@ export function SessionFilesPanel({
           ) : null}
 
           {!error
-            ? entries.map((entry) => {
+            ? visibleEntries.map((entry) => {
                 const itemPath = joinSessionPath(currentPath, entry.name);
                 const sizeLabel = formatFileSize(entry.size);
                 const isDirectory = entry.type === "directory";

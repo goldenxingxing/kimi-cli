@@ -59,12 +59,17 @@ export async function getMe(): Promise<UserInfo | null> {
     credentials: "include",
   });
 
+  // null means "not logged in" — and only that. Everything else is "cannot
+  // tell", which has to be an error: useAuth treats null as a definitive
+  // answer and clears the session, so a 502 from a restarting backend logged
+  // the user out and wiped their cached user, which its own catch block was
+  // written to prevent.
   if (resp.status === 401 || resp.status === 404) {
     return null;
   }
 
   if (!resp.ok) {
-    return null;
+    throw new Error(`Could not verify the session: HTTP ${resp.status}`);
   }
 
   return resp.json() as Promise<UserInfo>;

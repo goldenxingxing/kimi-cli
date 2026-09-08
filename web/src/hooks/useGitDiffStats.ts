@@ -28,6 +28,14 @@ export function useGitDiffStats(sessionId: string | null): UseGitDiffStatsReturn
     timestamp: number;
   } | null>(null);
 
+  // The session this hook is currently *for*. A request started for one
+  // session and answered after the reader has moved to another used to write
+  // both setStats and the cache under the old session's name — the panel then
+  // showed the previous session's counts, and the "clear on session change"
+  // effect had already run, so nothing corrected it until the next poll.
+  const requestedSessionRef = useRef(sessionId);
+  requestedSessionRef.current = sessionId;
+
   const fetchStats = useCallback(async (forceRefresh = false) => {
     if (!sessionId) {
       setStats(null);
@@ -76,6 +84,11 @@ export function useGitDiffStats(sessionId: string | null): UseGitDiffStatsReturn
         error: data.error ?? null,
       };
 
+      if (requestedSessionRef.current !== sessionId) {
+        // Answered for a session nobody is looking at any more.
+        return;
+      }
+
       // Update cache
       cacheRef.current = {
         sessionId,
@@ -85,12 +98,17 @@ export function useGitDiffStats(sessionId: string | null): UseGitDiffStatsReturn
 
       setStats(gitDiffStats);
     } catch (err) {
+      if (requestedSessionRef.current !== sessionId) {
+        return;
+      }
       const message =
         err instanceof Error ? err.message : "Failed to fetch git diff stats";
       setError(message);
       setStats(null);
     } finally {
-      setIsLoading(false);
+      if (requestedSessionRef.current === sessionId) {
+        setIsLoading(false);
+      }
     }
   }, [sessionId]);
 

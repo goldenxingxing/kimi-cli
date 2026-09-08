@@ -231,17 +231,29 @@ export function ApprovalDialog({
     }
   }
 
+  // Approvals answered by this component already, so a keypress cannot answer
+  // one twice. pendingApprovalMap is cleared in a finally and respondToApproval
+  // resolves as soon as the frame is on the socket, so the disabled state never
+  // latches: with two approvals queued — parallel tool calls, or a subagent —
+  // two quick presses of "1" approved both, the second before it had ever been
+  // rendered for anyone to read.
+  const answeredRef = useRef<Set<string>>(new Set());
+
   const handleResponse = useCallback(
     async (decision: ApprovalResponseDecision, reason?: string) => {
       if (!(pendingApproval && onApprovalResponse)) return;
 
       const { approval } = pendingApproval;
       if (!approval.id) return;
+      if (answeredRef.current.has(approval.id)) return;
+      answeredRef.current.add(approval.id);
 
       try {
         await onApprovalResponse(approval.id, decision, reason);
       } catch (error) {
         console.error("[ApprovalDialog] Failed to respond", error);
+        // Let the reader try again; nothing was recorded.
+        answeredRef.current.delete(approval.id);
       }
     },
     [pendingApproval, onApprovalResponse],
@@ -261,7 +273,9 @@ export function ApprovalDialog({
     ? pendingApprovalMap[approvalId] === true
     : false;
   const disableActions =
-    !(canRespondToApproval && onApprovalResponse) || approvalPending;
+    !(canRespondToApproval && onApprovalResponse) ||
+    approvalPending ||
+    (approvalId !== undefined && answeredRef.current.has(approvalId));
 
   // Focus the feedback input when feedback mode is activated
   useEffect(() => {

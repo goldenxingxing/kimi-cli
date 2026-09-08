@@ -153,6 +153,10 @@ export function useSessions(): UseSessionsReturn {
 
   // Archived sessions list
   const [archivedSessions, setArchivedSessions] = useState<Session[]>([]);
+  //: Which refresh is the current one; see refreshSessions.
+  const refreshSequenceRef = useRef(0);
+  //: How many sessions are on screen, so a refresh can ask for that many.
+  const loadedCountRef = useRef(0);
 
   // Currently selected session
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
@@ -176,22 +180,44 @@ export function useSessions(): UseSessionsReturn {
     setIsLoading(true);
     setError(null);
 
+    // Only the newest refresh may write the list. Nothing sequenced these:
+    // retrySessionListRequest can stretch one call across several attempts, so
+    // searching "a" and then "ab" could land in that order — the list then
+    // showed matches for a query the reader had already moved past. The 30s
+    // poll, the visibility handler and unarchiveSession all race the same way.
+    const requestId = refreshSequenceRef.current + 1;
+    refreshSequenceRef.current = requestId;
+
+    // Ask for as many as are already on screen, not just the first page. A
+    // plain page-1 refresh replaced a list the reader had paged through with
+    // "Load more" — every 30 seconds, collapsing their scroll position while
+    // hasMoreSessions stayed true. 500 is the server's own ceiling.
+    const limit = Math.min(Math.max(PAGE_SIZE, loadedCountRef.current), 500);
+
     try {
       const sessionsList = await retrySessionListRequest(() =>
         apiClient.sessions.listSessionsApiSessionsGet({
-          limit: PAGE_SIZE,
+          limit,
           offset: 0,
           q: searchQuery.trim() || undefined,
         }),
       );
 
+      if (requestId !== refreshSequenceRef.current) {
+        return;
+      }
+
       // Update sessions list
       setSessions(sessionsList);
-      setHasMoreSessions(sessionsList.length === PAGE_SIZE);
+      loadedCountRef.current = sessionsList.length;
+      setHasMoreSessions(sessionsList.length === limit);
       lastRefreshRef.current = Date.now();
 
       // Don't auto-select first session - user can click on one or create a new one
     } catch (err) {
+      if (requestId !== refreshSequenceRef.current) {
+        return;
+      }
       const message = isFetchError(err)
         ? i18n.t("toasts:session.networkError")
         : err instanceof Error
@@ -200,7 +226,9 @@ export function useSessions(): UseSessionsReturn {
       setError(message);
       console.error("Failed to refresh sessions:", err);
     } finally {
-      setIsLoading(false);
+      if (requestId === refreshSequenceRef.current) {
+        setIsLoading(false);
+      }
     }
   }, [searchQuery]);
 
@@ -218,7 +246,12 @@ export function useSessions(): UseSessionsReturn {
           offset,
           q: searchQuery.trim() || undefined,
         });
-      setSessions((current) => [...current, ...moreSessions]);
+      setSessions((current) => {
+        const next = [...current, ...moreSessions];
+        // So a later refresh asks for everything that is on screen.
+        loadedCountRef.current = next.length;
+        return next;
+      });
       setHasMoreSessions(moreSessions.length === PAGE_SIZE);
       lastRefreshRef.current = Date.now();
     } catch (err) {
@@ -536,15 +569,25 @@ export function useSessions(): UseSessionsReturn {
           sessionId,
         });
 
-        // Update sessions list
+        // Both lists. An archived session is not in `sessions`, so filtering
+        // only that one left its row in the Archived list until a manual
+        // refresh — and, because the id was never found there, the selection
+        // branch below moved the reader to sessions[0], an unrelated session.
+        // bulkDeleteSessions already does both.
+        setArchivedSessions((current) =>
+          current.filter((s) => s.sessionId !== sessionId),
+        );
         setSessions((current) => {
+          // Membership is read from `current` rather than from the `sessions`
+          // state, so this callback does not have to depend on the list — a
+          // dependency there gives deleteSession a new identity on every
+          // refresh, and every consumer memoised on it re-renders with it.
+          const wasInActiveList = current.some((s) => s.sessionId === sessionId);
           const next = current.filter((s) => s.sessionId !== sessionId);
 
           // If we deleted the selected session, select the first remaining one
-          if (sessionId === selectedSessionId && next.length > 0) {
-            setSelectedSessionId(next[0].sessionId);
-          } else if (next.length === 0) {
-            setSelectedSessionId("");
+          if (sessionId === selectedSessionId && wasInActiveList) {
+            setSelectedSessionId(next.length > 0 ? next[0].sessionId : "");
           }
 
           return next;

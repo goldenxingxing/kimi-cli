@@ -334,12 +334,31 @@ function KnowledgeTab({ sessionId }: { sessionId: string | null }) {
   const [busy, setBusy] = useState(false);
   const [newName, setNewName] = useState("");
 
+  const [readError, setReadError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!(selected && sessionId)) return;
-    readKnowledge(sessionId, selected).then((f) => {
-      setContent(f.content);
-      setOriginalContent(f.content);
-    });
+    // Cancelled on the way out, because the editor is titled by `selected` and
+    // filled by whichever read resolves last. Clicking file A then B, with A
+    // slower, left "Edit B" holding A's text — and saving wrote A's content
+    // into B. A failed read used to be an unhandled rejection, silently.
+    let cancelled = false;
+    setReadError(null);
+    readKnowledge(sessionId, selected)
+      .then((f) => {
+        if (cancelled) return;
+        setContent(f.content);
+        setOriginalContent(f.content);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setReadError(err instanceof Error ? err.message : String(err));
+        setContent("");
+        setOriginalContent("");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selected, sessionId]);
 
   const handleSave = useCallback(async () => {
@@ -399,6 +418,9 @@ function KnowledgeTab({ sessionId }: { sessionId: string | null }) {
         </Button>
       </div>
       {error && <div className="text-sm text-red-500">{error}</div>}
+      {readError && (
+        <div className="text-sm text-red-500">Could not read the file: {readError}</div>
+      )}
 
       <div className="flex flex-col gap-2">
         {files.map((f) => (

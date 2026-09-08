@@ -1372,7 +1372,11 @@ export function useSessionStream(
             upsertMessage({
               id: getNextMessageId("user"),
               role: "user",
-              turnIndex: turnCounterRef.current,
+              // The turn this reply belongs to is the one already running.
+              // turnCounterRef was incremented by TurnBegin, so reading it
+              // raw tags the reply with the turn that has not started yet —
+              // the same off-by-one the assistant text avoids by subtracting.
+              turnIndex: Math.max(0, turnCounterRef.current - 1),
               content: text,
             });
           }

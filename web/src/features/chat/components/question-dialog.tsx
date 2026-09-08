@@ -59,6 +59,9 @@ export function QuestionDialog({
   const [multiSelected, setMultiSelected] = useState<Set<number>>(new Set());
   const [otherText, setOtherText] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  // Escape has to be pressed twice to dismiss; see the key handler below.
+  const [dismissArmed, setDismissArmed] = useState(false);
+  const dismissTimerRef = useRef<number | null>(null);
   const otherInputRef = useRef<HTMLInputElement>(null);
   const savedSelectionsRef = useRef<
     Map<number, { selectedIndex: number; multiSelected: Set<number>; otherText: string }>
@@ -75,6 +78,7 @@ export function QuestionDialog({
       setMultiSelected(new Set());
       setOtherText("");
       setAnswers({});
+      setDismissArmed(false);
       savedSelectionsRef.current.clear();
     }
   }, [questionId]);
@@ -245,6 +249,26 @@ export function QuestionDialog({
     await advanceWithAnswer(answer);
   }, [getCurrentAnswer, advanceWithAnswer]);
 
+  const armDismiss = useCallback(() => {
+    setDismissArmed(true);
+    if (dismissTimerRef.current !== null) {
+      window.clearTimeout(dismissTimerRef.current);
+    }
+    dismissTimerRef.current = window.setTimeout(() => {
+      dismissTimerRef.current = null;
+      setDismissArmed(false);
+    }, 3000);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (dismissTimerRef.current !== null) {
+        window.clearTimeout(dismissTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const handleDismiss = useCallback(async () => {
     if (disableActions || !pendingQuestion) return;
     try {
@@ -366,13 +390,23 @@ export function QuestionDialog({
         handleSubmitCurrent();
       } else if (event.key === "Escape") {
         event.preventDefault();
-        handleDismiss();
+        // Twice, deliberately. This listener is on the window for as long as a
+        // question is pending, and dismissing submits {} — a permanent answer.
+        // Radix closes its own overlays on Escape without preventing default,
+        // so one press meant for a search dialog, a menu or a tooltip used to
+        // answer the question on its way past. The Dismiss button next to this
+        // hint is still one click.
+        if (dismissArmed) {
+          handleDismiss();
+        } else {
+          armDismiss();
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [pendingQuestion, disableActions, options.length, isMultiSelect, selectedIndex, otherIndex, handleSubmitCurrent, handleOptionClick, handleDismiss, handleTabClick, currentQuestionIndex, totalQuestions, multiSelected, focusOtherInputAfterToggle]);
+  }, [pendingQuestion, disableActions, options.length, isMultiSelect, selectedIndex, otherIndex, handleSubmitCurrent, handleOptionClick, handleDismiss, handleTabClick, currentQuestionIndex, totalQuestions, multiSelected, focusOtherInputAfterToggle, dismissArmed, armDismiss]);
 
   if (!(pendingQuestion && currentQuestion)) return null;
 
@@ -616,7 +650,7 @@ export function QuestionDialog({
             onClick={handleDismiss}
             className="inline-flex items-center gap-1.5 text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors disabled:opacity-50 cursor-pointer"
           >
-            Dismiss
+            {dismissArmed ? "Press esc again to dismiss" : "Dismiss"}
             <Kbd className="text-[11px] opacity-70">esc</Kbd>
           </button>
           <button

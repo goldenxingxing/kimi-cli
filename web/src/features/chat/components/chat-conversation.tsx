@@ -16,7 +16,7 @@ import {
   PlusIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { hasPlatformModifier, isMacOS } from "@/hooks/utils";
 import {
@@ -59,6 +59,17 @@ export function ChatConversation({
   const listRef = useRef<VirtualizedMessageListHandle>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const highlightTimerRef = useRef<number | null>(null);
+
+  // One array for the list and the search, so "message 12" means the same
+  // thing to both. The list drops `message-id` messages, search indexed into
+  // the unfiltered array, and a StatusUpdate carrying a message_id appends one
+  // of those on every turn — so the gap grew, and jumping to a search hit
+  // scrolled to some earlier message and ringed the wrong row.
+  const visibleMessages = useMemo(
+    () => messages.filter((message) => message.variant !== "message-id"),
+    [messages],
+  );
 
   // Handle Cmd+F / Ctrl+F
   useEffect(() => {
@@ -76,9 +87,26 @@ export function ChatConversation({
   const handleJumpToMessage = useCallback((messageIndex: number) => {
     setHighlightedIndex(messageIndex);
     listRef.current?.scrollToIndex(messageIndex);
-    // Clear highlight after a delay
-    setTimeout(() => setHighlightedIndex(-1), 2000);
+    // Clear highlight after a delay. The timer is held so a second jump
+    // within the window does not have its highlight wiped by the first one's
+    // timeout — and so nothing fires into an unmounted component.
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      highlightTimerRef.current = null;
+      setHighlightedIndex(-1);
+    }, 2000);
   }, []);
+
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const handleScrollToBottom = useCallback(() => {
     listRef.current?.scrollToBottom();
@@ -182,7 +210,7 @@ export function ChatConversation({
         <div className="flex-1">
           <VirtualizedMessageList
             ref={listRef}
-            messages={messages}
+            messages={visibleMessages}
             conversationKey={conversationKey}
             pendingApprovalMap={pendingApprovalMap}
             onApprovalAction={onApprovalAction}
@@ -209,7 +237,7 @@ export function ChatConversation({
       ) : null}
 
       <MessageSearchDialog
-        messages={messages}
+        messages={visibleMessages}
         open={isSearchOpen}
         onOpenChange={onSearchOpenChange}
         onJumpToMessage={handleJumpToMessage}

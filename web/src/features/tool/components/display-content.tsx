@@ -400,7 +400,14 @@ let diffModulePromise: Promise<typeof import("diff")> | null = null;
 
 const loadDiffModule = async (): Promise<typeof import("diff")> => {
   if (!diffModulePromise) {
-    diffModulePromise = import("diff");
+    // Forget a rejection. Caching the promise itself cached the failure too:
+    // one dropped chunk request — a stale hash after a deploy, a flaky
+    // network — poisoned every diff for the rest of the session, and each one
+    // rendered the "No changes" placeholder, so edits looked like no-ops.
+    diffModulePromise = import("diff").catch((error) => {
+      diffModulePromise = null;
+      throw error;
+    });
   }
   return diffModulePromise;
 };

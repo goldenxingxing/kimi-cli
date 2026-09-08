@@ -147,6 +147,21 @@ export const useSlashCommands = ({
     }
   }, [rangeStart]);
 
+  // The range the reader dismissed with Escape. Escape closes on keydown and
+  // the matching keyup runs the composer's selection handler, which recomputes
+  // the same range and re-opens the menu — isSelectingRef only guards the
+  // selection path, not this one. It stays closed until the command changes.
+  const dismissedRangeRef = useRef<SlashRange | null>(null);
+
+  const applyDetectedRange = useCallback((next: SlashRange | null) => {
+    if (next && isSameRange(next, dismissedRangeRef.current)) {
+      setRange(null);
+      return;
+    }
+    dismissedRangeRef.current = null;
+    setRange((previous) => (isSameRange(previous, next) ? previous : next));
+  }, []);
+
   // Detect slash on initial render
   useEffect(() => {
     // Skip detection while selecting an option to avoid race condition
@@ -155,9 +170,8 @@ export const useSlashCommands = ({
       return;
     }
     const caret = textareaRef.current?.selectionStart ?? text.length;
-    const next = detectSlash(text, caret);
-    setRange((previous) => (isSameRange(previous, next) ? previous : next));
-  }, [text, textareaRef]);
+    applyDetectedRange(detectSlash(text, caret));
+  }, [text, textareaRef, applyDetectedRange]);
 
   const handleTextChange = useCallback(
     (value: string, caret: number | null) => {
@@ -165,9 +179,9 @@ export const useSlashCommands = ({
       if (isSelectingRef.current) {
         return;
       }
-      setRange(detectSlash(value, caret));
+      applyDetectedRange(detectSlash(value, caret));
     },
-    [],
+    [applyDetectedRange],
   );
 
   const handleCaretChange = useCallback(
@@ -176,13 +190,16 @@ export const useSlashCommands = ({
       if (isSelectingRef.current) {
         return;
       }
-      setRange(detectSlash(text, caret));
+      applyDetectedRange(detectSlash(text, caret));
     },
-    [text],
+    [text, applyDetectedRange],
   );
 
   const closeMenu = useCallback(() => {
-    setRange(null);
+    setRange((previous) => {
+      dismissedRangeRef.current = previous;
+      return null;
+    });
   }, []);
 
   const selectOption = useCallback(
