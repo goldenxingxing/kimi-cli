@@ -54,7 +54,7 @@ class SteerInput(BaseModel):
 
 
 class UserReply(BaseModel):
-    """Text the user typed in answer to something the agent asked.
+    """What the user answered when the agent asked them something.
 
     Rejecting an approval with feedback, or typing into an AskUserQuestion
     prompt, is the user speaking — but it reached the model only inside a tool
@@ -64,8 +64,9 @@ class UserReply(BaseModel):
     replayed like everything else, rather than living only in a socket frame
     that a page reload forgets.
 
-    Only free text goes here. Picking a listed option is a choice, not
-    something the user said, and it is already visible in the request.
+    Picking a listed option counts too: the panel it was picked in is gone a
+    moment later, and a choice the user made belongs in the conversation rather
+    than only inside a collapsed tool block.
     """
 
     text: str

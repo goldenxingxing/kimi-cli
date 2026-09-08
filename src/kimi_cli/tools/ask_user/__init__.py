@@ -59,25 +59,36 @@ class Params(BaseModel):
     )
 
 
-def _echo_typed_answers(questions: list[QuestionItem], answers: dict[str, str]) -> None:
-    """Put anything the user typed into the transcript, as theirs.
+def _echo_answers(questions: list[QuestionItem], answers: dict[str, str]) -> None:
+    """Put what the user answered into the transcript, as theirs.
 
-    Only free text. Picking a listed option is a choice rather than something
-    the user said, and it is already on screen in the question itself — so an
-    answer is echoed exactly when it is not one of that question's options.
+    Both what they typed and which option they picked. A choice made in the
+    question panel is an instruction the user gave, and once the panel is gone
+    the only trace of it is inside a collapsed tool block — so it goes into the
+    conversation next to everything else they said.
+
+    Each answer carries the question it answers rather than the short header,
+    which is a category tag ("Auth", "Style") and need not be unique across the
+    questions in one call — two answers labelled "Auth" record nothing about
+    what was asked, which is the whole point of putting them here.
     """
     from kimi_cli.wire.types import UserReply
 
+    lines: list[str] = []
     for item in questions:
         answer = (answers.get(item.question) or "").strip()
         if not answer:
             continue
-        if any(answer == option.label for option in item.options):
-            continue
-        try:
-            wire_send(UserReply(text=answer, source="question_answer"))
-        except AssertionError:
-            logger.debug("No wire available to echo the user reply")
+        question = item.question.strip()
+        lines.append(f"{question}\n→ {answer}" if question else answer)
+
+    if not lines:
+        return
+
+    try:
+        wire_send(UserReply(text="\n\n".join(lines), source="question_answer"))
+    except AssertionError:
+        logger.debug("No wire available to echo the user reply")
 
 
 class AskUserQuestion(CallableTool2[Params]):
@@ -166,7 +177,7 @@ class AskUserQuestion(CallableTool2[Params]):
                 display=[BriefDisplayBlock(text="User dismissed")],
             )
 
-        _echo_typed_answers(questions, answers)
+        _echo_answers(questions, answers)
 
         formatted = json.dumps({"answers": answers}, ensure_ascii=False)
         return ToolReturnValue(

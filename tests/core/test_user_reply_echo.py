@@ -1,8 +1,8 @@
-"""What the user types in answer to the agent belongs in the transcript.
+"""What the user answers the agent with belongs in the transcript.
 
-Approval feedback and free-text question answers reach the model inside a tool
-result, so the conversation used to show the agent asking and then carrying on,
-with the user's own words nowhere in it.
+Approval feedback and question answers reach the model inside a tool result, so
+the conversation used to show the agent asking and then carrying on, with the
+user's own side of the exchange nowhere in it.
 """
 
 from __future__ import annotations
@@ -66,14 +66,21 @@ def test_echoing_without_a_wire_does_not_break_the_approval(
     approval_module._echo_user_reply("something", "approval_feedback")
 
 
-def test_only_typed_question_answers_are_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Picking a listed option is a choice, not something the user said."""
+def test_question_answers_are_echoed_with_the_question_they_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Picked options and typed text alike, as one reply, each under its question.
+
+    The header is a category tag and repeats across related questions, so the
+    question itself is what makes the line readable back.
+    """
     from kimi_cli.tools import ask_user as ask_user_module
 
     sent = _echoed(monkeypatch, "kimi_cli.tools.ask_user")
     questions = [
         QuestionItem(
             question="Which database?",
+            header="Database",
             options=[QuestionOption(label="Postgres"), QuestionOption(label="SQLite")],
         ),
         QuestionItem(
@@ -82,17 +89,39 @@ def test_only_typed_question_answers_are_echoed(monkeypatch: pytest.MonkeyPatch)
         ),
     ]
 
-    ask_user_module._echo_typed_answers(
+    ask_user_module._echo_answers(
         questions,
         {
-            "Which database?": "Postgres",  # a listed option — already on screen
+            "Which database?": "Postgres",  # a listed option
             "Anything else?": "use DuckDB, and keep the schema flat",  # typed
         },
     )
 
     assert [(m.text, m.source) for m in sent] == [
-        ("use DuckDB, and keep the schema flat", "question_answer")
+        (
+            "Which database?\n→ Postgres\n\nAnything else?\n→ use DuckDB, and keep the schema flat",
+            "question_answer",
+        )
     ]
+
+
+def test_unanswered_questions_are_left_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dismissed panel says nothing on the user's behalf."""
+    from kimi_cli.tools import ask_user as ask_user_module
+
+    sent = _echoed(monkeypatch, "kimi_cli.tools.ask_user")
+    questions = [
+        QuestionItem(
+            question="Which database?",
+            header="Database",
+            options=[QuestionOption(label="Postgres"), QuestionOption(label="SQLite")],
+        )
+    ]
+
+    ask_user_module._echo_answers(questions, {})
+    ask_user_module._echo_answers(questions, {"Which database?": "   "})
+
+    assert sent == []
 
 
 def test_a_user_reply_survives_the_wire_round_trip() -> None:
