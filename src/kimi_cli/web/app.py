@@ -410,12 +410,29 @@ def create_app(
         async def spa_root() -> Response:  # pyright: ignore[reportUnusedFunction]
             return _spa_html_response
 
+        _static_root = STATIC_DIR.resolve()
+
         @application.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str) -> Response:  # pyright: ignore[reportUnusedFunction]
             # Serve real static files (JS, CSS, images, etc.) directly.
+            #
+            # `full_path` is the decoded request path, so `..` segments arrive
+            # here intact (%2e%2e%2f included) and `STATIC_DIR / full_path`
+            # cheerfully walks out of the static tree. These routes are not
+            # behind the API auth middleware, so without this check the whole
+            # filesystem was readable, unauthenticated, from any deployment
+            # that is not LAN-restricted. Starlette's own StaticFiles carries
+            # the same containment check for the same reason.
             candidate = STATIC_DIR / full_path
-            if candidate.is_file():
-                return _FileResponse(candidate)
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = None
+            inside = resolved is not None and (
+                resolved == _static_root or _static_root in resolved.parents
+            )
+            if inside and resolved.is_file():
+                return _FileResponse(resolved)
             # Path with an extension that doesn't exist → true 404
             # (avoids serving index.html with wrong MIME type for missing assets).
             if "." in full_path.split("/")[-1]:

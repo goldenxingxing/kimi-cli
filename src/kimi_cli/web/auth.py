@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import ipaddress
 import re
@@ -113,6 +114,12 @@ def get_client_ip(request: Request, trust_proxy: bool = False) -> str | None:
     Args:
         request: The incoming request
         trust_proxy: If True, trust X-Forwarded-For header (only enable behind trusted proxy)
+
+    ``trust_proxy`` takes the header at face value: whoever can reach this
+    server directly can then claim any source address, including a private one,
+    and walk through the LAN-only check. Nothing passes True today. Anything
+    that starts to must first establish that the immediate peer is the trusted
+    proxy — the header alone cannot say so.
     """
     if trust_proxy:
         forwarded = request.headers.get("x-forwarded-for")
@@ -187,12 +194,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if session_token:
             provided = extract_token_from_request(request)
             if not verify_token(provided, session_token):
-                # Also accept cookie-based user sessions (multi-user auth).
-                # If the request carries a valid kimi_session cookie the
-                # per-route dependency (require_current_user / require_admin)
-                # will validate it; we only need to let it through here.
-                cookie_token = request.cookies.get("kimi_session")
-                if not cookie_token:
+                # Also accept cookie-based user sessions (multi-user auth) —
+                # but the cookie has to *resolve to a session*, not merely be
+                # present. Letting any `kimi_session` value through and leaving
+                # the real check to a per-route dependency meant every route
+                # that has no such dependency — /api/config (which returns API
+                # keys), /api/sessions, /api/open-in — was reachable with
+                # nothing more than `Cookie: kimi_session=anything`.
+                from kimi_cli.web.user_auth import user_from_connection
+
+                # In a thread: this opens and queries SQLite, and it runs for
+                # every cookie-carrying request. On the event loop it
+                # serialises that I/O behind every other request in the
+                # process — the same reason login is a sync def.
+                user = await asyncio.to_thread(user_from_connection, request)
+                if user is None:
                     return JSONResponse(
                         status_code=401,
                         content={"detail": "Unauthorized"},
