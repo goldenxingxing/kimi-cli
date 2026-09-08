@@ -92,3 +92,9 @@ async def test_read_write_bytes(kaos_cwd: KaosPath):
     file_path = KaosPath("data.bin")
     await file_path.write_bytes(b"\x00\x01\xff")
     assert await file_path.read_bytes() == b"\x00\x01\xff"
+
+
+def test_paths_can_go_in_a_set():
+    """Defining __eq__ alone had set __hash__ to None, like pathlib never does."""
+    assert len({KaosPath("/a/b"), KaosPath("/a/b"), KaosPath("/a/c")}) == 2
+    assert {KaosPath("/a/b"): 1}[KaosPath("/a/b")] == 1

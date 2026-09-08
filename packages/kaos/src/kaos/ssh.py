@@ -128,13 +128,19 @@ class SSHKaos:
         options["known_hosts"] = None
         # Connect to ssh
         connection = await asyncssh.connect(**options)
-        sftp = await connection.start_sftp_client()
-        home_dir = await sftp.realpath(".")
-        if cwd is not None:
-            await sftp.chdir(cwd)
-            cwd = await sftp.realpath(".")
-        else:
-            cwd = home_dir
+        # Everything past the connect can fail — a missing `cwd` is the usual
+        # one — and the connection is ours until it reaches the instance.
+        try:
+            sftp = await connection.start_sftp_client()
+            home_dir = await sftp.realpath(".")
+            if cwd is not None:
+                await sftp.chdir(cwd)
+                cwd = await sftp.realpath(".")
+            else:
+                cwd = home_dir
+        except BaseException:
+            connection.close()
+            raise
         return cls(connection=connection, sftp=sftp, home=home_dir, cwd=cwd, host=host)
 
     def __init__(
@@ -240,7 +246,9 @@ class SSHKaos:
     ) -> AsyncGenerator[str]:
         # NOTE: readlines is not supported by SFTPClientFile
         text = await self.readtext(path, encoding=encoding, errors=errors)
-        for line in text.splitlines():
+        # keepends, like every other backend: callers join the lines back
+        # together and expect the newlines to still be there.
+        for line in text.splitlines(keepends=True):
             yield line
 
     async def writebytes(self, path: StrOrKaosPath, data: bytes) -> int:
@@ -269,8 +277,10 @@ class SSHKaos:
             await self._sftp.makedirs(str(path), exist_ok=exist_ok)
         else:
             existed = await self._sftp.exists(str(path))
-            if existed and not exist_ok:
-                raise FileExistsError(f"{path} already exists")
+            if existed:
+                if not exist_ok:
+                    raise FileExistsError(f"{path} already exists")
+                return
             await self._sftp.mkdir(str(path))
 
     async def exec(self, *args: str, env: Mapping[str, str] | None = None) -> KaosProcess:

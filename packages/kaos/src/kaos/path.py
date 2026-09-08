@@ -48,6 +48,11 @@ class KaosPath:
             return NotImplemented
         return self._path.__eq__(other._path)
 
+    def __hash__(self) -> int:
+        # Defining __eq__ alone sets __hash__ to None, which makes a set or
+        # dict of paths a TypeError. pathlib.Path is hashable; so is this.
+        return hash(self._path)
+
     def __repr__(self) -> str:
         return f"KaosPath({repr(str(self._path))})"
 
