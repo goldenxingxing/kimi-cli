@@ -222,6 +222,13 @@ async def _download_and_install_rg(bin_name: str) -> Path:
             except (aiohttp.ClientError, TimeoutError) as exc:
                 raise RuntimeError("Failed to download ripgrep binary") from exc
 
+            # Extracted beside the target, then renamed onto it. Writing
+            # `destination` directly truncates a binary that already worked:
+            # a failed download, a kill mid-write, or a second process (the
+            # lock is process-local) leaves a half-written rg on the shared
+            # path, and _find_existing_rg only checks is_file() — so Grep
+            # stays broken until somebody clears the cache by hand.
+            staged = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
             try:
                 if is_windows:
                     with zipfile.ZipFile(tar_path, "r") as zf:
@@ -231,7 +238,7 @@ async def _download_and_install_rg(bin_name: str) -> Path:
                         )
                         if not member_name:
                             raise RuntimeError("Ripgrep binary not found in archive")
-                        with zf.open(member_name) as source, open(destination, "wb") as dest_fh:
+                        with zf.open(member_name) as source, open(staged, "wb") as dest_fh:
                             shutil.copyfileobj(source, dest_fh)
                 else:
                     with tarfile.open(tar_path, "r:gz") as tar:
@@ -244,12 +251,17 @@ async def _download_and_install_rg(bin_name: str) -> Path:
                         extracted = tar.extractfile(member)
                         if not extracted:
                             raise RuntimeError("Failed to extract ripgrep binary")
-                        with open(destination, "wb") as dest_fh:
+                        with open(staged, "wb") as dest_fh:
                             shutil.copyfileobj(extracted, dest_fh)
+                staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                os.replace(staged, destination)
             except (zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
+                staged.unlink(missing_ok=True)
                 raise RuntimeError("Failed to extract ripgrep archive") from exc
+            except BaseException:
+                staged.unlink(missing_ok=True)
+                raise
 
-    destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     logger.info("Installed ripgrep to {destination}", destination=destination)
     return destination
 

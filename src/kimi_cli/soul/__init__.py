@@ -212,12 +212,18 @@ async def run_soul(
     notification_task = asyncio.create_task(_pump_notifications_to_wire(runtime, wire))
 
     cancel_event_task = asyncio.create_task(cancel_event.wait())
-    await asyncio.wait(
-        [soul_task, cancel_event_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
 
+    # The wait belongs inside the try. Outside it, a cancellation of run_soul
+    # itself — this project cancels tasks routinely — raised straight out of
+    # the wait and skipped the whole finally: the soul, UI, notification and
+    # cancel-watch tasks were left running as orphans, the wire was never shut
+    # down or joined, and the _current_wire token was never reset.
     try:
+        await asyncio.wait(
+            [soul_task, cancel_event_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
         if cancel_event.is_set():
             logger.debug("Cancelling the run task")
             soul_task.cancel()
@@ -232,6 +238,13 @@ async def run_soul(
                 await cancel_event_task
             soul_task.result()  # this will raise if any exception was raised in the run task
     finally:
+        # Anything still running is running because we are leaving early —
+        # an outer cancellation, or an exception from the branch above.
+        for task in (soul_task, cancel_event_task):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         notification_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await notification_task

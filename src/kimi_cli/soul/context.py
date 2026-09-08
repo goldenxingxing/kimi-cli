@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from collections.abc import Sequence
@@ -202,9 +203,37 @@ class Context:
         self._next_checkpoint_id = 0
         self._system_prompt = None
         messages_after_last_usage: list[Message] = []
+        # Rebuilt beside the target and renamed into place, with the rotation
+        # undone if anything goes wrong. Written directly, an I/O error or a
+        # kill part-way through left a truncated canonical file — while the
+        # in-memory state above had already been cleared — and the only
+        # complete copy was the rotated one, with nothing to put it back.
+        tmp_path = self._file_backend.with_name(f".{self._file_backend.name}.revert.tmp")
+        try:
+            await self._rebuild_until_checkpoint(
+                rotated_file_path, tmp_path, checkpoint_id, messages_after_last_usage
+            )
+            await aiofiles.os.replace(tmp_path, self._file_backend)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                await aiofiles.os.replace(rotated_file_path, self._file_backend)
+            with contextlib.suppress(OSError):
+                await aiofiles.os.remove(tmp_path)
+            raise
+
+        self._pending_token_estimate = estimate_text_tokens(messages_after_last_usage)
+
+    async def _rebuild_until_checkpoint(
+        self,
+        source: Path,
+        destination: Path,
+        checkpoint_id: int,
+        messages_after_last_usage: list[Message],
+    ) -> None:
+        """Replay `source` into `destination`, stopping at `checkpoint_id`."""
         async with (
-            aiofiles.open(rotated_file_path, encoding="utf-8", errors="replace") as old_file,
-            aiofiles.open(self._file_backend, "w", encoding="utf-8") as new_file,
+            aiofiles.open(source, encoding="utf-8", errors="replace") as old_file,
+            aiofiles.open(destination, "w", encoding="utf-8") as new_file,
         ):
             line_no = 0
             async for line in old_file:
@@ -214,7 +243,7 @@ class Context:
 
                 line_json = self._parse_context_line(
                     line,
-                    file_backend=rotated_file_path,
+                    file_backend=source,
                     line_no=line_no,
                 )
                 if line_json is None:
@@ -226,13 +255,11 @@ class Context:
                     line_json,
                     history=self._history,
                     messages_after_last_usage=messages_after_last_usage,
-                    file_backend=rotated_file_path,
+                    file_backend=source,
                     line_no=line_no,
                 )
                 if keep_line:
                     await new_file.write(line)
-
-        self._pending_token_estimate = estimate_text_tokens(messages_after_last_usage)
 
     async def clear(self):
         """

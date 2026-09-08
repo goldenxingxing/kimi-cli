@@ -105,7 +105,13 @@ class SearchWeb(CallableTool2[Params]):
 
                 try:
                     results = Response(**await response.json()).search_results
-                except ValidationError as e:
+                except (ValidationError, ValueError) as e:
+                    # ValueError as well: aiohttp raises ContentTypeError (a
+                    # ClientError, caught below) only when the *content type*
+                    # is wrong. A body that claims to be JSON and is not — a
+                    # degraded upstream serving an error page — raises
+                    # JSONDecodeError, which is a ValueError and went out of
+                    # the tool unhandled.
                     logger.warning(
                         "SearchWeb response parse error: {error}, query={query}",
                         error=e,

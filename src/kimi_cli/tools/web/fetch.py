@@ -158,6 +158,11 @@ class FetchURL(CallableTool2[Params]):
 
         try:
             async with async_playwright() as p:
+                # try/finally around everything after launch: goto() has a 30s
+                # timeout and content() can fail too, and the broad except
+                # below caught those without ever closing the browser. Each
+                # failed fetch left a Chromium subprocess behind until the
+                # process exited.
                 browser = await p.chromium.launch(
                     headless=True,
                     args=[
@@ -167,20 +172,22 @@ class FetchURL(CallableTool2[Params]):
                         "--disable-blink-features=AutomationControlled",
                     ],
                 )
-                context = await browser.new_context(
-                    user_agent=_BROWSER_HEADERS["User-Agent"],
-                    viewport={"width": 1920, "height": 1080},
-                )
-                page = await context.new_page()
-                await page.goto(
-                    params.url,
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
-                # Wait a moment for any lazy-loaded content
-                await page.wait_for_timeout(2000)
-                content = await page.content()
-                await browser.close()
+                try:
+                    context = await browser.new_context(
+                        user_agent=_BROWSER_HEADERS["User-Agent"],
+                        viewport={"width": 1920, "height": 1080},
+                    )
+                    page = await context.new_page()
+                    await page.goto(
+                        params.url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                    # Wait a moment for any lazy-loaded content
+                    await page.wait_for_timeout(2000)
+                    content = await page.content()
+                finally:
+                    await browser.close()
         except Exception as e:
             logger.warning(
                 "FetchURL Playwright fallback failed: {error}, url={url}",

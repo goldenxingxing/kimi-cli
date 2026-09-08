@@ -2092,6 +2092,12 @@ class BackToTheFuture(Exception):
         self.messages = messages
 
 
+#: How many times a decision node may re-ask before the flow gives up. The
+#: model has to answer with something that equals one of the edge labels; a
+#: model that never does used to be re-prompted forever.
+_MAX_FLOW_DECISION_ATTEMPTS = 5
+
+
 class FlowRunner:
     def __init__(
         self,
@@ -2200,6 +2206,7 @@ class FlowRunner:
         base_prompt = self._build_flow_prompt(node, edges)
         prompt = base_prompt
         steps_used = 0
+        attempts = 0
         while True:
             result = await self._flow_turn(soul, prompt)
             steps_used += result.step_count
@@ -2225,6 +2232,22 @@ class FlowRunner:
                 choice=choice or "<missing>",
                 options=options,
             )
+
+            # Bounded. FlowRunner.run()'s move and step caps only count once
+            # this returns, and this loop returns only on a match — so a model
+            # that keeps answering with something no edge label equals spun
+            # here forever, appending a prompt and a full LLM turn each time
+            # and growing the context without any limit at all.
+            attempts += 1
+            if attempts >= _MAX_FLOW_DECISION_ATTEMPTS:
+                logger.error(
+                    'Agent flow node "{node_id}" got no usable choice in '
+                    "{attempts} attempts; stopping.",
+                    node_id=node.id,
+                    attempts=attempts,
+                )
+                return None, steps_used
+
             prompt = (
                 f"{base_prompt}\n\n"
                 "Your last response did not include a valid choice. "
